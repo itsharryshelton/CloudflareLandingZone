@@ -1,0 +1,350 @@
+# =============================================================================
+# Reusable: run one layer, against one account, in one mode.
+#
+# This is the equivalent of the `extends: template:` indirection in the Azure
+# DevOps pipelines it replaces - all the Terraform mechanics live here once, and
+# ci.yml / terraform-plan.yml / terraform-apply.yml stay thin callers.
+#
+# One invocation == one Terraform state == one {account, layer} pair, because a
+# `provider "cloudflare"` block carries exactly one API token and Terraform
+# cannot hand a dynamic provider alias to a for_each'd module. See
+# deployment/layers/zones/providers.tf.
+#
+# MODES
+#   plan   init, plan to a file, upload the plan as an artifact, publish a
+#          value-free summary of what would change.
+#   apply  init, download that same plan file, `terraform apply <plan>`.
+#
+# Apply NEVER generates its own plan. It applies a saved plan produced earlier in
+# the same run, so what a reviewer approved is what executes. If state moved
+# underneath it, Terraform rejects the saved plan as stale rather than quietly
+# doing something else.
+# =============================================================================
+name: terraform-run
+
+on:
+  workflow_call:
+    inputs:
+      account:
+        description: 'Account directory name under deployment/accounts/.'
+        required: true
+        type: string
+      layer:
+        description: 'Layer directory name under deployment/layers/.'
+        required: true
+        type: string
+      mode:
+        description: 'plan | apply'
+        required: true
+        type: string
+      environment:
+        description: >-
+          GitHub Environment supplying CLOUDFLARE_API_TOKEN (and, for apply, the
+          required reviewers that gate this job).
+        required: true
+        type: string
+      plan_artifact:
+        description: 'Artifact name to write the plan to (plan) or read it from (apply).'
+        required: true
+        type: string
+      terraform_version:
+        required: false
+        type: string
+        default: '1.14.6'
+      comment_on_pr:
+        description: 'Post the value-free plan summary as a pull request comment.'
+        required: false
+        type: boolean
+        default: false
+      plan_retention_days:
+        description: >-
+          Artifact retention. Kept short: a plan file contains resolved zone IDs,
+          DNS record contents and full WAF rule expressions.
+        required: false
+        type: number
+        default: 5
+
+# NOTE: `permissions` is deliberately not declared here. A called workflow cannot
+# hold more than its caller granted, so each caller sets its own least-privilege
+# scope and this job inherits it. Declaring `pull-requests: write` here would
+# break terraform-apply.yml, which does not grant it.
+
+jobs:
+  terraform:
+    name: ${{ inputs.mode }} ${{ inputs.account }} / ${{ inputs.layer }}
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+
+    # Serialise every operation against a single state key. `use_lockfile = true`
+    # below is the real protection - R2 has no DynamoDB equivalent, so state
+    # locking relies on S3 conditional writes - and this is the belt to its
+    # braces. It also stops two runs queueing on one approval gate.
+    #
+    # cancel-in-progress is false on purpose: cancelling mid-apply is how you get
+    # resources that exist in Cloudflare but not in state.
+    concurrency:
+      group: tf-${{ inputs.account }}-${{ inputs.layer }}
+      cancel-in-progress: false
+
+    defaults:
+      run:
+        shell: bash
+
+    env:
+      TF_IN_AUTOMATION: '1'
+      TF_INPUT: '0'
+      TF_PLUGIN_CACHE_DIR: ${{ github.workspace }}/.terraform-plugin-cache
+      LAYER_DIR: deployment/layers/${{ inputs.layer }}
+      ACCOUNT_DIR: deployment/accounts/${{ inputs.account }}
+      MODE: ${{ inputs.mode }}
+      # Config values reach the shell through the environment rather than by
+      # `${{ }}` interpolation into a script body, so a value containing shell
+      # metacharacters cannot become part of the command.
+      STATE_KEY: ${{ inputs.account }}/${{ inputs.layer }}.tfstate
+      TF_BACKEND_BUCKET: ${{ vars.TF_BACKEND_BUCKET }}
+      TF_BACKEND_ENDPOINT: ${{ vars.TF_BACKEND_ENDPOINT }}
+      # Terraform reads the Cloudflare token and the R2 backend credentials from
+      # the environment only. Nothing is ever written to a .tf or .tfvars file.
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check inputs and required configuration
+        run: |
+          set -euo pipefail
+          case "$MODE" in
+            plan|apply) ;;
+            *) echo "::error::mode must be 'plan' or 'apply', got '$MODE'"; exit 1 ;;
+          esac
+
+          missing=()
+          [[ -n "${CLOUDFLARE_API_TOKEN:-}"  ]] || missing+=("secret CLOUDFLARE_API_TOKEN (environment '${{ inputs.environment }}')")
+          [[ -n "${AWS_ACCESS_KEY_ID:-}"     ]] || missing+=("secret R2_ACCESS_KEY_ID")
+          [[ -n "${AWS_SECRET_ACCESS_KEY:-}" ]] || missing+=("secret R2_SECRET_ACCESS_KEY")
+          [[ -n "${TF_BACKEND_BUCKET:-}"     ]] || missing+=("variable TF_BACKEND_BUCKET")
+          [[ -n "${TF_BACKEND_ENDPOINT:-}"   ]] || missing+=("variable TF_BACKEND_ENDPOINT")
+          [[ -d "$LAYER_DIR"                 ]] || missing+=("layer directory $LAYER_DIR")
+          [[ -d "$ACCOUNT_DIR"               ]] || missing+=("account directory $ACCOUNT_DIR")
+          if [[ ${#missing[@]} -gt 0 ]]; then
+            printf '::error::missing %s\n' "${missing[@]}"
+            echo "See .github/workflows/README.md for the environments, secrets and variables this needs." >&2
+            exit 1
+          fi
+
+      - name: Setup Terraform ${{ inputs.terraform_version }}
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.terraform_version }}
+          # The wrapper rewrites exit codes, which breaks `plan -detailed-exitcode`.
+          terraform_wrapper: false
+
+      - name: Cache provider plugins
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.TF_PLUGIN_CACHE_DIR }}
+          key: tf-plugins-${{ runner.os }}-${{ hashFiles('deployment/layers/*/.terraform.lock.hcl') }}
+          restore-keys: tf-plugins-${{ runner.os }}-
+
+      - name: Generate the R2 backend block
+        run: |
+          set -euo pipefail
+          mkdir -p "$TF_PLUGIN_CACHE_DIR"
+
+          # The backend block is committed COMMENTED OUT (see the layer's
+          # terraform.tf) so that `init -backend=false` works with no R2
+          # dependency for offline CI. The pipeline therefore generates it, and
+          # passes the account-specific parts at init time so no state location is
+          # committed.
+          #
+          # If someone uncomments the committed block, two backend blocks exist and
+          # Terraform fails with an unhelpful message. Catch it here instead.
+          if grep -rhqE '^[[:space:]]*backend[[:space:]]+"' "$LAYER_DIR"/*.tf; then
+            echo "::error::$LAYER_DIR has an uncommented backend block, and this" \
+                 "pipeline generates backend.generated.tf. Keep the committed block" \
+                 "commented out, or delete this step."
+            exit 1
+          fi
+
+          # use_lockfile uses S3 conditional writes, which R2 supports. It needs
+          # Terraform >= 1.11, which the layers' `required_version = ">= 1.11.0"`
+          # enforces and the pinned version above satisfies. Both matter: the pin
+          # covers this pipeline, the constraint covers anyone running locally.
+          cat >"$LAYER_DIR/backend.generated.tf" <<'EOF'
+          # Generated by .github/workflows/_terraform-run.yml. Never committed.
+          terraform {
+            backend "s3" {
+              region                      = "auto"
+              use_path_style              = true
+              use_lockfile                = true
+              skip_credentials_validation = true
+              skip_metadata_api_check     = true
+              skip_region_validation      = true
+              skip_requesting_account_id  = true
+              skip_s3_checksum            = true
+            }
+          }
+          EOF
+
+      - name: Terraform init
+        run: |
+          set -euo pipefail
+          # One state key per account per layer. A waf apply cannot propose
+          # destroying a zone because zones are not in its state.
+          cd "$LAYER_DIR"
+          terraform init -reconfigure -input=false \
+            -backend-config="bucket=${TF_BACKEND_BUCKET}" \
+            -backend-config="key=${STATE_KEY}" \
+            -backend-config="endpoints={\"s3\":\"${TF_BACKEND_ENDPOINT}\"}"
+
+      # -----------------------------------------------------------------------
+      # PLAN
+      # -----------------------------------------------------------------------
+      - name: Terraform plan
+        id: plan
+        if: inputs.mode == 'plan'
+        run: |
+          set -euo pipefail
+          # Which account var files this layer takes is derived from the config,
+          # not hardcoded - see .github/scripts/tf-varfiles.sh. Written to a file
+          # first so a non-zero exit from the script fails this step (a process
+          # substitution into mapfile would swallow it).
+          bash .github/scripts/tf-varfiles.sh "$LAYER_DIR" "$ACCOUNT_DIR" >varfiles.txt
+          mapfile -t VARFILES <varfiles.txt
+          if [[ ${#VARFILES[@]} -eq 0 ]]; then
+            echo "::error::no var files in $ACCOUNT_DIR map to $LAYER_DIR"
+            exit 1
+          fi
+          printf 'var file: %s\n' "${VARFILES[@]}"
+
+          cd "$LAYER_DIR"
+          set +e
+          terraform plan -out=tfplan -detailed-exitcode -lock-timeout=5m "${VARFILES[@]}"
+          ec=$?
+          set -e
+          # -detailed-exitcode: 0 = no changes, 1 = error, 2 = changes to make.
+          # Only 1 is a failure.
+          echo "exit_code=$ec" >>"$GITHUB_OUTPUT"
+          if [[ $ec -eq 1 ]]; then
+            exit 1
+          fi
+        # The waf and load_balancing layers resolve zone keys to zone IDs with
+        # data "cloudflare_zone" at plan time. If the zones layer has not created
+        # the zone yet, that data source fails and this step fails with it -
+        # expected, and why terraform-apply.yml applies zones first.
+
+      - name: Summarise the plan
+        id: summary
+        if: inputs.mode == 'plan'
+        run: |
+          set -euo pipefail
+          cd "$LAYER_DIR"
+
+          # `terraform show -json` contains every attribute value. Only resource
+          # addresses and actions are extracted from it, so the published summary
+          # carries no zone IDs, DNS record contents or WAF expressions. The JSON
+          # is deleted here and never uploaded.
+          terraform show -json tfplan >tfplan.json
+          jq -r '
+            [.resource_changes[]? | select(.change.actions != ["no-op"])]
+            | if length == 0 then "No changes."
+              else (map("- `" + (.change.actions | join("+")) + "` " + .address) | join("\n"))
+              end
+          ' tfplan.json >plan-summary.md
+
+          counts=$(jq -r '
+            [.resource_changes[]?.change.actions] | flatten
+            | "add=\(map(select(. == "create")) | length)"
+              + " change=\(map(select(. == "update")) | length)"
+              + " destroy=\(map(select(. == "delete")) | length)"
+          ' tfplan.json)
+          echo "counts=$counts" >>"$GITHUB_OUTPUT"
+          rm -f tfplan.json
+
+          {
+            echo "### \`${{ inputs.account }}\` / \`${{ inputs.layer }}\` — $counts"
+            echo
+            cat plan-summary.md
+            echo
+            echo "_Resource addresses and actions only. Attribute values stay in the \`${{ inputs.plan_artifact }}\` artifact._"
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Warn on planned destroys
+        if: inputs.mode == 'plan'
+        env:
+          COUNTS: ${{ steps.summary.outputs.counts }}
+        run: |
+          set -euo pipefail
+          if [[ "$COUNTS" == *"destroy=0"* ]]; then
+            exit 0
+          fi
+          echo "::warning title=Destroy planned::${{ inputs.account }}/${{ inputs.layer }}: $COUNTS." \
+               "On the zones layer, destroying a zone takes every DNS record in it." \
+               "Read the plan artifact before approving."
+
+      - name: Upload the plan
+        if: inputs.mode == 'plan'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.plan_artifact }}
+          path: ${{ env.LAYER_DIR }}/tfplan
+          retention-days: ${{ inputs.plan_retention_days }}
+          if-no-files-found: error
+
+      - name: Comment the summary on the pull request
+        if: inputs.mode == 'plan' && inputs.comment_on_pr && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COUNTS: ${{ steps.summary.outputs.counts }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          {
+            echo "#### Terraform plan — \`${{ inputs.account }}\` / \`${{ inputs.layer }}\`"
+            echo
+            echo "\`$COUNTS\`"
+            echo
+            cat "$LAYER_DIR/plan-summary.md"
+            echo
+            echo "Attribute values are not posted here. Full plan: [run #${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})."
+          } >comment.md
+          gh pr comment "$PR_NUMBER" --body-file comment.md
+
+      # -----------------------------------------------------------------------
+      # APPLY
+      # -----------------------------------------------------------------------
+      - name: Download the approved plan
+        if: inputs.mode == 'apply'
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.plan_artifact }}
+          path: ${{ env.LAYER_DIR }}
+
+      - name: Terraform apply
+        if: inputs.mode == 'apply'
+        run: |
+          set -euo pipefail
+          cd "$LAYER_DIR"
+          if [[ ! -f tfplan ]]; then
+            echo "::error::no saved plan to apply - refusing to plan and apply in one step"
+            exit 1
+          fi
+          # No -var-file and no -auto-approve: applying a saved plan takes neither.
+          # The plan file already holds the resolved variable values, which is
+          # exactly why apply cannot diverge from what was reviewed.
+          terraform apply -lock-timeout=5m -input=false tfplan
+
+      - name: Record what was applied
+        if: always() && inputs.mode == 'apply'
+        run: |
+          echo "### Applied \`${{ inputs.account }}\` / \`${{ inputs.layer }}\` — ${{ job.status }}" \
+            >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Remove generated files
+        if: always()
+        run: |
+          rm -f "$LAYER_DIR/backend.generated.tf" "$LAYER_DIR/tfplan" \
+                "$LAYER_DIR/tfplan.json" varfiles.txt comment.md

@@ -1,0 +1,122 @@
+# Plan - talks to Cloudflare, changes nothing.
+#
+# Runs on every pull request that touches the Terraform tree, and on demand. It
+# has no apply path at all: nothing in this file can modify an account, which is
+# why it can run on a branch without an approval gate.
+#
+# What it needs, per account, is a READ-ONLY Cloudflare token in the
+# `<account>-plan` environment. See .github/workflows/README.md.
+
+name: Terraform Plan
+
+on:
+  pull_request:
+    paths:
+      - 'deployment/**'
+      - 'modules/**'
+      - '.tflint.hcl'
+      - '.github/workflows/terraform-plan.yml'
+      - '.github/workflows/_terraform-run.yml'
+      - '.github/scripts/**'
+  workflow_dispatch:
+    inputs:
+      account:
+        description: 'Account directory name, or "all".'
+        required: false
+        default: 'all'
+        type: string
+      layer:
+        description: 'Layer directory name, or "all".'
+        required: false
+        default: 'all'
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: write # the plan summary is posted as a PR comment
+
+concurrency:
+  group: tf-plan-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  discover:
+    name: select affected pairs
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    outputs:
+      matrix: ${{ steps.select.outputs.matrix }}
+      any: ${{ steps.select.outputs.any }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Both sides of the diff must be present locally.
+          fetch-depth: 0
+
+      - name: Select
+        id: select
+        env:
+          # On a pull request, diff against the merge base rather than main's tip,
+          # so unrelated commits landing on main do not widen this run.
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || '' }}
+          HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          # A manual run has no meaningful base to diff against, so it plans every
+          # pair the narrowing allows.
+          FORCE_ALL: ${{ github.event_name == 'workflow_dispatch' }}
+          ONLY_ACCOUNT: ${{ inputs.account || 'all' }}
+          ONLY_LAYER: ${{ inputs.layer || 'all' }}
+        run: bash .github/scripts/tf-matrix.sh
+
+  # A pull request that adds a NEW zone and its waf/load_balancing config in the
+  # same change will fail the waf and load_balancing plans, because those layers
+  # resolve the zone through data "cloudflare_zone" and it does not exist yet.
+  # That is the documented cost of layers not reading each other's state
+  # (deployment/README.md). It is not a pipeline bug, and the sequence is:
+  # merge, let terraform-apply.yml create the zone, then re-run this workflow via
+  # workflow_dispatch for the remaining layers.
+  plan:
+    name: plan
+    needs: discover
+    if: needs.discover.outputs.any == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.discover.outputs.matrix) }}
+    uses: ./.github/workflows/_terraform-run.yml
+    with:
+      account: ${{ matrix.account }}
+      layer: ${{ matrix.layer }}
+      mode: plan
+      environment: ${{ matrix.account }}-plan
+      plan_artifact: tfplan-${{ matrix.account }}-${{ matrix.layer }}-${{ github.run_id }}-${{ github.run_attempt }}
+      comment_on_pr: true
+    secrets: inherit
+
+  plan-complete:
+    name: plan complete
+    runs-on: ubuntu-latest
+    needs: [discover, plan]
+    if: always()
+    steps:
+      - name: Report
+        run: |
+          set -euo pipefail
+          discover='${{ needs.discover.result }}'
+          plan='${{ needs.plan.result }}'
+          echo "discover=$discover plan=$plan"
+
+          if [[ "$discover" == "skipped" ]]; then
+            echo "::error::plan was refused - fork pull requests cannot access account credentials"
+            exit 1
+          fi
+          if [[ "$discover" != "success" ]]; then
+            echo "::error::could not determine which pairs to plan"
+            exit 1
+          fi
+          case "$plan" in
+            success) echo "All selected plans succeeded." ;;
+            skipped) echo "No Terraform-affecting change - nothing to plan." ;;
+            *)       echo "::error::at least one plan failed"; exit 1 ;;
+          esac

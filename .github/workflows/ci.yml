@@ -1,0 +1,385 @@
+# CI - correctness checks that need no credentials and touch no Cloudflare account.
+# Runs on every pull request and every push to main. `terraform-plan.yml` handles
+# anything that needs to talk to Cloudflare.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TF_VERSION: '1.14.6'
+  TFLINT_VERSION: 'v0.63.1'
+  TF_IN_AUTOMATION: '1'
+  TF_INPUT: '0'
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # ---------------------------------------------------------------------------
+  fmt:
+    name: terraform fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+      - run: terraform fmt -check -recursive -diff
+
+  # ---------------------------------------------------------------------------
+  lint:
+    name: tflint
+    runs-on: ubuntu-latest
+    env:
+      # Absolute path so --recursive keeps using the repository root config as it
+      # descends into each directory rather than silently linting with defaults.
+      TFLINT_CONFIG_FILE: ${{ github.workspace }}/.tflint.hcl
+      # tflint --init pulls rulesets from the GitHub API; without a token it hits
+      # the anonymous rate limit.
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install TFLint ${{ env.TFLINT_VERSION }}
+        run: |
+          set -euo pipefail
+          # The release archive is downloaded and unpacked directly rather than
+          # piping the upstream install script into a shell, so the only thing
+          # executed is the pinned, published binary.
+          curl -fsSL -o tflint.zip \
+            "https://github.com/terraform-linters/tflint/releases/download/${TFLINT_VERSION}/tflint_linux_amd64.zip"
+          sudo unzip -o tflint.zip tflint -d /usr/local/bin
+          rm -f tflint.zip
+          tflint --version
+
+      - run: tflint --init
+      - run: tflint --recursive --format compact
+
+  # ---------------------------------------------------------------------------
+  validate:
+    name: terraform validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Validate every layer and every module
+        run: |
+          set -euo pipefail
+          failed=()
+
+          # Layers first: they exercise the modules through the call graph.
+          # -backend=false is what the commented-out backend block in each
+          # terraform.tf exists to permit - no R2 bucket, no credentials.
+          for dir in deployment/layers/*/; do
+            echo "::group::validate $dir"
+            if ! (terraform -chdir="$dir" init -backend=false -input=false \
+                  && terraform -chdir="$dir" validate); then
+              failed+=("$dir")
+            fi
+            echo "::endgroup::"
+          done
+
+          # Then each module standalone, so a module cannot be merged broken even
+          # if no layer calls it yet. _TEMPLATE is scaffolding with placeholder
+          # content and is not expected to validate.
+          for dir in modules/*/; do
+            [[ "$(basename "$dir")" == "_TEMPLATE" ]] && continue
+            echo "::group::validate $dir"
+            if ! (terraform -chdir="$dir" init -backend=false -input=false \
+                  && terraform -chdir="$dir" validate); then
+              failed+=("$dir")
+            fi
+            echo "::endgroup::"
+          done
+
+          # Every directory is reported, not just the first to break.
+          if [[ ${#failed[@]} -gt 0 ]]; then
+            printf '::error::validate failed: %s\n' "${failed[@]}"
+            exit 1
+          fi
+
+  # ---------------------------------------------------------------------------
+  # An offline plan is the strongest check available without credentials: it
+  # proves each committed account profile still produces a valid plan.
+  #
+  # Only layers that create their own zones can do this. `waf` and
+  # `load_balancing` resolve zone IDs through data "cloudflare_zone", which is a
+  # real API read at plan time - see deployment/README.md. Which layers qualify
+  # is derived here rather than listed, so a new layer is classified correctly
+  # without editing this workflow.
+  offline-plan:
+    name: terraform plan (offline)
+    runs-on: ubuntu-latest
+    env:
+      # Every resource in an offline-plannable layer is a create, so the provider
+      # is never asked to call the Cloudflare API and this value is never used.
+      CLOUDFLARE_API_TOKEN: 'offline-plan-no-api-calls'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Plan every offline-plannable layer against every account
+
+        run: |
+          set -euo pipefail
+          planned=0
+          skipped=()
+
+          for layer_dir in deployment/layers/*/; do
+            layer="$(basename "$layer_dir")"
+            if grep -rhqE '^[[:space:]]*data[[:space:]]+"cloudflare_' "$layer_dir"*.tf; then
+              skipped+=("$layer (reads the Cloudflare API at plan time)")
+              continue
+            fi
+
+            # A real init: the backend block is committed commented out, so this
+            # uses the local backend and needs no R2 access. `-backend=false`
+            # would be rejected by plan.
+            terraform -chdir="$layer_dir" init -input=false
+
+            for account_dir in deployment/accounts/*/; do
+              account="$(basename "$account_dir")"
+              echo "::group::plan $layer / $account"
+              bash .github/scripts/tf-varfiles.sh "${layer_dir%/}" "${account_dir%/}" >varfiles.txt
+              mapfile -t VARFILES <varfiles.txt
+              if [[ ${#VARFILES[@]} -eq 0 ]]; then
+                echo "::error::no var files map $account_dir to $layer_dir"
+                exit 1
+              fi
+              # -refresh=false and -lock=false: there is no state and no backend.
+              terraform -chdir="$layer_dir" plan \
+                -input=false -lock=false -refresh=false "${VARFILES[@]}"
+              echo "::endgroup::"
+              planned=$((planned + 1))
+            done
+          done
+
+          {
+            echo "### Offline plans: $planned"
+            if [[ ${#skipped[@]} -gt 0 ]]; then
+              echo
+              echo "Not offline-plannable, covered by terraform-plan.yml instead:"
+              printf -- '- %s\n' "${skipped[@]}"
+            fi
+          } >>"$GITHUB_STEP_SUMMARY"
+
+          if [[ $planned -eq 0 ]]; then
+            echo "::error::no layer could be planned offline - expected at least one"
+            exit 1
+          fi
+
+      - name: Remove plan leftovers
+        if: always()
+        run: rm -f varfiles.txt
+
+
+  config-guard:
+    name: config guards
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Every account var file is claimed by at least one layer
+        run: |
+          set -euo pipefail
+          # An account tfvars that no layer declares the variables for is dead
+          # config: an operator edits it, nothing plans, and nothing says so.
+          declare -A CLAIMED=()
+          for layer_dir in deployment/layers/*/; do
+            for account_dir in deployment/accounts/*/; do
+              while read -r arg; do
+                CLAIMED["${arg#-var-file=}"]=1
+              done < <(bash .github/scripts/tf-varfiles.sh "${layer_dir%/}" "${account_dir%/}")
+            done
+          done
+
+          orphans=()
+          for f in deployment/accounts/*/*.tfvars; do
+            case "$(basename "$f")" in *.local.tfvars) continue ;; esac
+            claimed=false
+            for key in "${!CLAIMED[@]}"; do
+              [[ "$(basename "$key")" == "$(basename "$f")" ]] && claimed=true
+            done
+            [[ "$claimed" == true ]] || orphans+=("$f")
+          done
+
+          if [[ ${#orphans[@]} -gt 0 ]]; then
+            printf '::error::no layer declares the variables in %s\n' "${orphans[@]}"
+            echo "Either a layer should declare them, or the file should be deleted." >&2
+            exit 1
+          fi
+
+      - name: Backend blocks stay commented out
+        run: |
+          set -euo pipefail
+          # CI runs `init -backend=false` and _terraform-run.yml generates the
+          # backend block itself. An uncommented committed block breaks both.
+          bad=()
+          for layer_dir in deployment/layers/*/; do
+            if grep -rhqE '^[[:space:]]*backend[[:space:]]+"' "$layer_dir"*.tf; then
+              bad+=("$layer_dir")
+            fi
+          done
+          if [[ ${#bad[@]} -gt 0 ]]; then
+            printf '::error::uncommented backend block in %s\n' "${bad[@]}"
+            echo "The pipeline generates backend.generated.tf at init time; keep the" \
+                 "committed block commented out. See deployment/README.md." >&2
+            exit 1
+          fi
+
+      - name: Nothing secret is tracked in git
+        run: |
+          set -euo pipefail
+          # .gitignore is default-deny for *.tfvars with explicit exceptions. This
+          # asserts the exceptions still work in both directions, so a future edit
+          # to .gitignore cannot quietly start tracking a real tenant file.
+          fail=0
+
+          must_be_ignored=(
+            deployment/layers/zones/terraform.tfvars
+            deployment/layers/zones/local.auto.tfvars
+            deployment/accounts/account_a/secrets.local.tfvars
+            deployment/layers/zones/terraform.tfstate
+            deployment/layers/zones/backend.generated.tf
+            deployment/layers/zones/tfplan
+          )
+          for p in "${must_be_ignored[@]}"; do
+            if ! git check-ignore -q "$p"; then
+              echo "::error::$p is NOT gitignored but must be"
+              fail=1
+            fi
+          done
+
+          must_be_committable=(
+            deployment/layers/zones/defaults.auto.tfvars
+            deployment/accounts/account_a/account.tfvars
+          )
+          for p in "${must_be_committable[@]}"; do
+            if git check-ignore -q "$p"; then
+              echo "::error::$p IS gitignored but the deployment needs it committed"
+              fail=1
+            fi
+          done
+
+          # And nothing dangerous has already slipped into the index.
+          if git ls-files | grep -E '\.tfstate$|\.tfstate\.backup$|(^|/)terraform\.tfvars$|\.local\.tfvars$|(^|/)tfplan$'; then
+            echo "::error::the files listed above are tracked and must not be"
+            fail=1
+          fi
+
+          exit $fail
+
+      - name: Self-test the account/layer mapping
+        run: |
+          set -euo pipefail
+          # The plan and apply pipelines decide what to run from this script. A
+          # silent regression here means a change gets merged and never planned,
+          # which is the worst failure mode available - so the derivation is
+          # tested rather than trusted.
+          assert_matrix() { # <description> <changed files> <expected matrix json>
+            local desc="$1" files="$2" expected="$3" actual
+            actual="$(CHANGED_FILES="$files" bash .github/scripts/tf-matrix.sh 2>/dev/null \
+              | sed -n 's/^matrix=//p')"
+            if [[ "$actual" != "$expected" ]]; then
+              echo "::error::$desc"
+              echo "  expected: $expected" >&2
+              echo "  actual:   $actual" >&2
+              return 1
+            fi
+            echo "ok: $desc"
+          }
+
+          rc=0
+          assert_matrix "a waf policy change plans only the waf layer, only that account" \
+            "deployment/accounts/account_a/waf.tfvars" \
+            '[{"account":"account_a","layer":"waf"}]' || rc=1
+
+          assert_matrix "a docs-only change plans nothing" \
+            "deployment/README.md" \
+            '[]' || rc=1
+
+          assert_matrix "the zone inventory reaches every layer for that account" \
+            "deployment/accounts/account_b/zones.tfvars" \
+            '[{"account":"account_b","layer":"load_balancing"},{"account":"account_b","layer":"waf"},{"account":"account_b","layer":"zones"}]' || rc=1
+
+          # Apply order must put the zone-creating layer strictly first. If this
+          # regresses, waf and load_balancing plan against zones that do not
+          # exist yet and fail.
+          order="$(FORCE_ALL=true bash .github/scripts/tf-matrix.sh 2>/dev/null | sed -n 's/^apply_order=//p')"
+          first="$(jq -r '.[0] | join(",")' <<<"$order")"
+          if [[ "$first" != "zones" ]]; then
+            echo "::error::apply tier 1 should be exactly 'zones', got '$first' (full order: $order)"
+            rc=1
+          else
+            echo "ok: apply order starts with zones ($order)"
+          fi
+
+          # terraform-apply.yml declares a fixed number of sequential stages,
+          # because a GitHub Actions job graph cannot grow one at runtime.
+          tiers="$(FORCE_ALL=true bash .github/scripts/tf-matrix.sh 2>/dev/null | sed -n 's/^tier_count=//p')"
+          if [[ "$tiers" -gt 2 ]]; then
+            echo "::error::the dependency graph now has $tiers tiers, but" \
+                 "terraform-apply.yml only defines stages for 2. Add a tier stage there."
+            rc=1
+          fi
+
+          exit $rc
+
+  # Carried over from the Azure DevOps pipeline: layers pin their module source to
+  # a tag for real deployments (see the commented `git::` source in each layer),
+  # so main needs to produce tags.
+  #
+  # Patch only. Minor and major bumps are deliberate decisions - a breaking change
+  # to a module interface is not something a pipeline should guess at - so create
+  # those tags by hand.
+  release-tag:
+    name: publish patch tag
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [fmt, lint, validate, offline-plan, config-guard]
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute and push the next patch tag
+        run: |
+          set -euo pipefail
+          git fetch --tags --quiet
+          latest="$(git tag --list 'v*' --sort=-v:refname | head -n1)"
+          if [[ -z "$latest" ]]; then
+            next="v1.0.0"
+          else
+            base="${latest#v}"
+            IFS='.' read -r major minor patch <<<"$base"
+            next="v${major}.${minor}.$((patch + 1))"
+          fi
+          echo "latest: ${latest:-none} -> next: $next"
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$next" -m "Release $next"
+          git push origin "$next"
+          echo "### Tagged \`$next\`" >>"$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,69 @@
+# ---- Terraform ----
+# Local provider/module install dirs
+**/.terraform/*
+
+# Keep the dependency lock file (commit it) but ignore the plugin cache
+!**/.terraform.lock.hcl
+
+# State files - MUST never be committed (contain resource data / secrets)
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+
+# Crash logs
+crash.log
+crash.*.log
+
+# ---- Variable files ----
+# Default-deny. Variable files are the most likely place for a tenant identifier
+# or a pasted secret to end up, so nothing is committable unless listed below.
+*.tfvars
+*.tfvars.json
+!*.tfvars.example
+
+# Exceptions: the per-layer platform baselines and the per-account config trees.
+#
+# The layer defaults are customer-agnostic - no account IDs, no customer names.
+# The account trees DO carry account IDs and domains: those are configuration, not
+# secrets, and this repository is private with RBAC. Tokens and R2 keys are never
+# in either - they arrive as CLOUDFLARE_API_TOKEN / AWS_* at runtime. Review any
+# change to these files with that distinction in mind.
+!deployment/layers/*/defaults.auto.tfvars
+!deployment/accounts/*/*.tfvars
+
+# Operator-local overrides and real tenant values: never committable, anywhere.
+# Re-stated after the exceptions above so no negation can reach them.
+**/local.auto.tfvars
+**/terraform.tfvars
+**/*.local.tfvars
+**/*.auto.tfvars.json
+
+# CLI config / credentials
+.terraformrc
+terraform.rc
+
+# Override files (local-only experiments)
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Saved plans
+#
+# A plan file holds resolved zone IDs, DNS record contents and full WAF rule
+# expressions - treat it like state, not like a build artifact.
+*.tfplan
+tfplan
+tfplan.json
+
+# ---- Pipeline-generated ----
+# The R2 backend block is committed commented out so CI can run
+# `terraform init -backend=false` with no state dependency. The pipeline writes
+# the real one at init time and deletes it afterwards.
+# See .github/workflows/_terraform-run.yml.
+**/backend.generated.tf
+
+# Scratch files written by workflow steps.
+plan-summary.md
+varfiles.txt
+comment.md
