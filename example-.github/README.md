@@ -1,1 +1,1 @@
-When copying to a proper repo; remove the "example-" - this just stops automated runs on this demo repo example.
+When copying to a proper repo; remove the "example-" - this just stops automated runs on this demo repo example (Actions is disabled) or when copied into a repo and then published branch before completed.
