@@ -18,6 +18,28 @@ Landing Zones, or CFLZ. If you have worked with ALZ, the shape here should be
 familiar. A reviewed set of modules, a baseline every account gets, and per account
 configuration that sits apart from the logic.
 
+<img width="2063" height="3381" alt="CFLZ" src="https://images.harryshelton.com/CFLZ.png" />
+
+
+## Platform Landing Zone (Account & Enterprise Governance)
+
+The Platform Landing Zone establishes your organisation's primary Cloudflare edge foundation. It defines how you structure your Cloudflare Accounts, enforce global security governance, and deliver shared edge capabilities centrally. Most organisations maintain one primary Platform Landing Zone per main Enterprise Account or administrative scope.
+
+A Platform Landing Zone consists of account-level governance configurations and centralized infrastructure services. A core function of the platform layer is providing a standardized, automated mechanism to vend zone-level Application Landing Zones to development and workload teams.
+
+- Establishes the overarching administrative structure across your Cloudflare footprint. It organizes account-level RBAC roles, audit logging, and global security policies (such as baseline WAF rulesets, Account-level Rate Limiting, API Shield schemas, and Zero Trust identity policies). This layer separates platform-wide policy from individual domain configurations, applying governance consistently without creating administrative overhead.
+- Shared capabilities provisioned centrally for all domains and workloads. Common examples include central Logpush streams (exporting to Azure Sentinel, SIEM, or R2 buckets), unified Identity Provider integration (e.g., Microsoft Entra ID), global Anycast DNS routing, and enterprise mTLS configurations. Only centralize capabilities that provide clear security, operational, or economic benefits across multiple workloads.
+- Providing a repeatable, automated process for requesting, building, and vending Application Landing Zones (Domains/Zones) to workload teams. Driven by Infrastructure-as-Code (Terraform & GitOps), this vending process guarantees that every newly onboarded domain automatically inherits your organization's security and compliance baselines.
+
+## Application Landing Zone (Zone & Workload Level)
+
+Each application, microservice, or web property operates within a dedicated Application Landing Zone (spanning one or more Cloudflare Zones). An Application Landing Zone contains the edge configurations required to support that specific workload across development, staging, and production environments. It encapsulates all Cloudflare resources owned and managed by the workload team—including DNS records, zone-specific WAF rules, Cloudflare Workers/Pages, R2 buckets, and Load Balancers.
+
+Based on operational requirements, the platform team assigns each Application Landing Zone to a specific environment archetype (e.g., Public Web App, Internal/Corp Zero Trust, or Edge Compute Worker). Every zone inherits global policies and guardrails enforced at the Platform level while giving workload teams the autonomy to manage domain-specific logic.
+
+- The CloudflareLandingZone (CFLZ) repository acts as an open-source accelerator to implement recommended Cloudflare architecture patterns. You can deploy this module directly through Azure DevOps or GitHub Actions pipelines, extend the underlying HCL code, or customize the sub-modules to fit your enterprise landing zone requirements.
+
+
 ## Why code and state
 
 Terraform state is a record of what actually exists. That gives three things a
