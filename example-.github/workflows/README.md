@@ -36,9 +36,10 @@ Terraform source, so adding an account, a layer or a module needs no edit here:
   same variable.
 - **Apply order**: a layer that *creates* zones must apply before a layer that
   *looks one up* with `data "cloudflare_zone"`, since that read fails until the
-  zone exists. Today: `zones` and `account_governance` first, then `waf` and
-  `load_balancing` concurrently. `account_governance` is in the first tier because
-  it touches no zone at all, not because anything waits on it.
+  zone exists. Today: `zones`, `account_governance` and `zerotrust`
+  first, then `waf` and `load_balancing` concurrently. `account_governance` and
+  `zerotrust` are in the first tier because they touch no zone at all, not
+  because anything waits on them.
 
 `ci.yml` asserts all three, so a regression in the derivation fails a PR rather
 than silently causing a merged change never to be planned.
@@ -67,7 +68,7 @@ two tier stages. If a new layer makes the graph deeper, both `discover` and
 ### Environments
 
 Per account: **one plan environment, plus one apply environment per layer.** For
-two accounts and four layers that is ten environments.
+two accounts and five layers that is twelve environments.
 
 | Environment                          | Reviewers    | `CLOUDFLARE_API_TOKEN` scope                                                                                                                                    |
 | -------------------------------------| --------------| -----------------------------------------------------------------------------------------------------------------------------------------------------------------|
@@ -76,6 +77,7 @@ two accounts and four layers that is ten environments.
 | `account_a-waf-apply`                | **required** | `Zone WAF:Edit`, `Zone:Read`, notably *not* `Zone:Edit`                                                                                                         |
 | `account_a-load_balancing-apply`     | **required** | `Account Load Balancers:Edit`, `Zone Load Balancers:Edit`, `Zone:Read`                                                                                          |
 | `account_a-account_governance-apply` | **required** | `Account Settings:Edit`, and nothing at zone scope                                                                                                              |
+| `account_a-zerotrust-apply`          | **required** | `Access: Organizations, Identity Providers, and Groups:Edit`, `Access: Apps and Policies:Edit`, `Access: Service Tokens:Edit`, all at account scope             |
 
 …and the same for `account_b`. Each token is scoped to **one account and one
 layer**: the scopes are the ones documented in each layer's `providers.tf`, and
@@ -84,9 +86,31 @@ token cannot delete a zone.
 
 The `account_governance` token deserves separate thought. `Account Settings:Edit`
 is what invites members and creates user groups, which makes it the only token in
-the set that can grant somebody else access to the account. It holds nothing at
-zone scope in exchange, so it cannot touch DNS or a firewall rule, but treat its
-reviewer list as the tightest of the four.
+the set that can grant somebody else access to the Cloudflare account. It holds
+nothing at zone scope in exchange, so it cannot touch DNS or a firewall rule, but
+treat its reviewer list as the tightest of the five.
+
+The `zerotrust` token is the other one to think about. `Access: Organizations,
+Identity Providers, and Groups:Edit` can change the team name, add a login method
+and rewrite every Access group, which is enough to reach everything sitting
+behind Access - the internal systems rather than the Cloudflare dashboard. Give
+it the same reviewer list as `account_governance`.
+
+The `zerotrust` apply environment also carries one secret no other environment
+does: **`TF_VAR_IDENTITY_PROVIDER_SECRETS`**, a JSON object of OAuth client
+secrets keyed the same way as the `identity_providers` map, exported as
+`TF_VAR_identity_provider_secrets` for the run.
+
+```
+TF_VAR_IDENTITY_PROVIDER_SECRETS = {"entra_id":"<Entra app registration client secret>"}
+```
+
+It is a GitHub Environment secret rather than a repository secret, so it is
+scoped to the one account it belongs to, and it never appears in a `.tfvars`
+file. It does reach Terraform state in plain text - Cloudflare stores it and
+Terraform records what it sent - which is why this layer's state and its plan
+files are treated as credential material. See
+[../../deployment/README.md](../../deployment/README.md).
 
 On the apply environments, also set **Deployment branches** to `main` only, so a
 branch cannot reach a write token.

@@ -197,11 +197,21 @@ request, read what CI says, push a fix. `ci.yml` runs on every push and covers:
 | Mapping self test | The account and layer derivation in `.github/scripts/` still produces what it should |
 
 Only `zones` can be planned without credentials. `waf` and `load_balancing` resolve
-zones through a data source, and `account_governance` resolves role and permission
-group names the same way; either is a real API read at plan time. Those three are
-covered by `validate` in CI, and by `terraform-plan.yml` on a pull request using a
-read-only token. Which layers qualify is derived, not listed, so a new layer is
-classified correctly without editing the workflow.
+zones through a data source, `account_governance` resolves role and permission
+group names the same way, and `zerotrust` reads the account's existing Zero Trust
+organization; each is a real API read at plan time. Those four are covered by
+`validate` in CI, and by `terraform-plan.yml` on a pull request using a read-only
+token. Which layers qualify is derived, not listed, so a new layer is classified
+correctly without editing the workflow.
+
+A layer that reads the API is still testable offline, and a new guardrail in one
+should be proven before review. Copy the layer to a scratch directory, delete its
+`terraform.tf` and its data source file, repoint the module `source` at the real
+path, and replace each `data.cloudflare_x.this` reference with a `local.stub_x`
+you write by hand. Take the stub's shape from `terraform providers schema -json`
+rather than the registry documentation, which flattens nesting modes. Plan it
+against the account's committed `.tfvars` with a dummy `CLOUDFLARE_API_TOKEN`, and
+every precondition in `preflight.tf` can then be made to fire on demand.
 
 If a formatting failure is the only thing between you and green, the CI log contains
 the diff.
@@ -224,8 +234,10 @@ plans cleanly, your check is doing nothing. Remove the bad value in a follow up
 commit before asking for review, and say in the pull request description which run
 proved the check fires, so a reviewer does not have to take it on trust.
 
-For guardrails on `waf` or `load_balancing`, the same trick works against
-`terraform-plan.yml` rather than `ci.yml`, since those layers need a real read.
+For guardrails on `waf`, `load_balancing`, `account_governance` or `zerotrust`,
+the same trick works against `terraform-plan.yml` rather than `ci.yml`, since
+those layers need a real read - or offline, with the stubbed data source
+described above.
 
 ## Pull requests
 
