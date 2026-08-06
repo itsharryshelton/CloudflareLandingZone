@@ -118,8 +118,8 @@ A few examples of what gets caught: a proxied record with an explicit TTL, a pro
 TXT record, two DNS records that collide once names are qualified, a `zone_key`
 pointing at nothing, a load balancer hostname outside its zone, a pool whose minimum
 healthy origin count exceeds its origin count, a health check timeout longer than its
-interval, and a user group handing permissions to somebody who was never declared as a
-member.
+interval, a user group handing permissions to somebody who was never declared as a
+member, and an Access application every one of whose policies refuses the request.
 
 Two are worth calling out because they are safety properties rather than
 correctness ones. The WAF baseline rules are parameterised, and selecting
@@ -129,6 +129,14 @@ spirit, `account_governance` refuses to assign Super Administrator - whether it 
 asked for by name or by ID - until somebody deliberately removes it from the
 restricted list, because that is the one role that can rewrite the account's own
 access model.
+
+`zerotrust` has two of its own. An Access policy with `decision = "bypass"` is
+refused by default, because it removes authentication entirely from every
+application it is attached to and would otherwise arrive as a one-word edit to a
+customer's configuration. And changing the Zero Trust team name is refused unless
+somebody says so explicitly, because it renames the team domain: every Access
+URL changes, every enrolled WARP device has to re-enrol, and the old name is
+released for anyone else to claim.
 
 ## Pipeline
 

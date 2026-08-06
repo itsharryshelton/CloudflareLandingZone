@@ -326,6 +326,10 @@ jobs:
             "deployment/accounts/account_a/account_governance.tfvars" \
             '[{"account":"account_a","layer":"account_governance"}]' || rc=1
 
+          assert_matrix "a Zero Trust change plans only that layer, only that account" \
+            "deployment/accounts/account_a/zerotrust.tfvars" \
+            '[{"account":"account_a","layer":"zerotrust"}]' || rc=1
+
           # Apply order must put the zone-creating layer in the first tier and the
           # zone-consuming layers in a later one. If this regresses, waf and
           # load_balancing plan against zones that do not exist yet and fail.

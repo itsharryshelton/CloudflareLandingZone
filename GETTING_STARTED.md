@@ -78,7 +78,8 @@ deployment/accounts/account_a/
 ├── dns.tfvars                  zone settings and DNS records
 ├── waf.tfvars                  firewall and rate limiting policies
 ├── load_balancing.tfvars       load balancers, pools, health checks
-└── account_governance.tfvars   who can sign in to the account, and with what
+├── account_governance.tfvars   who can sign in to the account, and with what
+└── zerotrust.tfvars            Cloudflare Access: who reaches what, and how
 ```
 
 Everything under `deployment/layers/` and `modules/` is the engine. If you find
@@ -353,6 +354,225 @@ Three things the plan will refuse:
 To remove somebody, delete their `account_members` entry and any `member_keys`
 mentioning them. Expect the plan to show a destroy, and check it is only theirs.
 
+## Task: put an application behind Cloudflare Access
+
+Edit `deployment/accounts/<account>/zerotrust.tfvars`. Four things live there:
+the login methods Access offers, the audiences it recognises, the policies it
+evaluates, and the applications those policies protect.
+
+Read a plan from this file as carefully as the account governance one. It
+decides who reaches internal systems, and a destroy here shuts a door somebody
+is standing at.
+
+### Before the first apply on a new account: the team name
+
+Cloudflare Access lives under a team domain, `<team>.cloudflareaccess.com`. An
+account that has never used Zero Trust has not chosen one, and **Terraform
+cannot choose it for you** - the Cloudflare provider updates the Zero Trust
+organization rather than creating it, so there has to be one to update.
+
+Do it once, in the dashboard under Zero Trust, then Settings, then Custom Pages,
+which asks for the team name the first time the section is opened. Then set it
+in the account tree:
+
+```hcl
+zero_trust_team_name         = "acme"
+zero_trust_organization_name = "Acme Internal Applications"
+```
+
+Leave `zero_trust_team_name` out entirely and the layer adopts whatever team
+name the account already has, which is what you want when taking over an account
+somebody configured by hand.
+
+Getting it wrong is worse than it looks, so the plan refuses it. Changing the
+team name renames the team domain: every Access application URL changes, every
+enrolled WARP device has to re-enrol, every bookmark breaks, and the old name is
+released for anybody else to register. If the rename really is intended, set
+`allow_team_name_change = true` in
+`deployment/layers/zerotrust/defaults.auto.tfvars`, apply, and set it back.
+
+### Adding an application
+
+```hcl
+access_groups = {
+  platform_engineers = {
+    name = "Platform Engineers"
+    include = {
+      # The Entra group's object ID, copied from Entra. Not its name.
+      entra_groups = [
+        { identity_provider_key = "entra_id", group_id = "22222222-2222-2222-2222-222222222222" },
+      ]
+    }
+  }
+}
+
+access_policies = {
+  platform_engineers_mfa = {
+    name     = "Platform Engineers with MFA"
+    decision = "allow"
+    include  = { group_keys = ["platform_engineers"] }
+    require  = { auth_methods = ["mfa"] }
+  }
+}
+
+access_applications = {
+  grafana = {
+    name        = "Grafana"
+    domain      = "grafana.example.com"
+    policy_keys = ["platform_engineers_mfa"]
+  }
+}
+```
+
+Keys, not IDs. A policy names its groups by key, an application names its
+policies by key, and a rule names its identity provider by key. Get one wrong
+and the plan fails listing the keys that do exist.
+
+`policy_keys` is **ordered**. Cloudflare evaluates an application's policies in
+the order they are listed and the first match decides, so a `deny` goes at the
+front. Reordering the list is a real change and will show in the plan.
+
+Two things that catch people out. The hostname's DNS record has to exist and be
+proxied, or the request never reaches Cloudflare and Access never sees it - that
+is a `dns.tfvars` change in the `zones` layer, not here. And `auth_methods =
+["mfa"]` means the identity provider asserted the user completed multi-factor;
+it is not Cloudflare prompting for a second factor.
+
+### More than one hostname, or a private one
+
+Add them with `extra_destinations`:
+
+```hcl
+access_applications = {
+  grafana = {
+    name        = "Grafana"
+    domain      = "grafana.example.com"
+    policy_keys = ["platform_engineers_mfa"]
+
+    extra_destinations = [
+      # Another public hostname the same app answers on. Needs its own proxied
+      # DNS record.
+      { uri = "metrics.example.com" },
+
+      # Something only reachable over WARP, by IP range or by SNI.
+      { type = "private", cidr = "10.10.0.0/24", l4_protocol = "tcp", port_range = "5432" },
+      { type = "private", hostname = "db.internal" },
+    ]
+  }
+}
+```
+
+Do not restate `domain` here - the layer adds it to the list itself, and the
+plan fails if you list it twice. That matters more than it looks: Cloudflare
+treats the destinations list as the *complete* set of what Access secures, so an
+application whose list left its own hostname out would look protected in the
+dashboard and would not be.
+
+This replaces `self_hosted_domains`, which Cloudflare deprecated in provider 5.x
+and supported only until 21 November 2025.
+
+### Connecting Microsoft Entra ID
+
+Create an app registration in Entra, then:
+
+```hcl
+identity_providers = {
+  entra_id = {
+    name = "Entra ID"
+    type = "azureAD"
+    config = {
+      client_id    = "<Application (client) ID>"
+      directory_id = "<Directory (tenant) ID>"
+
+      # Without this, Entra never sends group membership and every entra_groups
+      # rule silently matches nobody.
+      support_groups = true
+    }
+    scim_config = {
+      enabled          = true
+      user_deprovision = true
+      seat_deprovision = true
+    }
+  }
+}
+```
+
+**The client secret does not go in this file, or in any file.** It reaches
+Terraform from the pipeline as `TF_VAR_identity_provider_secrets`, a JSON object
+keyed the same way as `identity_providers`, held as a secret on the account's
+`zerotrust` apply environment:
+
+```
+TF_VAR_IDENTITY_PROVIDER_SECRETS = {"entra_id":"<the client secret>"}
+```
+
+A secret typed into a `.tfvars` is committed by the next `git add`, because
+account trees are deliberately committable. The plan fails if a provider that
+needs a secret has no entry, and fails again if there is an entry for a provider
+that no longer exists - a secret nobody rotates is a secret nobody misses.
+
+Note that the secret ends up in Terraform state in plain text regardless, along
+with the client secret of every service token, because Cloudflare stores them
+and Terraform records what it sent. That is why state and plan files for this
+layer are treated as credential material rather than configuration. Rotating the
+Entra secret means rotating it in Entra, updating the environment secret, and
+re-applying.
+
+### Giving a machine access
+
+A service token is a client ID and secret pair a caller sends in
+`CF-Access-Client-Id` and `CF-Access-Client-Secret` headers.
+
+```hcl
+service_tokens = {
+  ci_pipeline = { name = "CI Pipeline" }
+}
+
+access_policies = {
+  ci_service_token = {
+    name     = "CI Pipeline Service Token"
+    decision = "non_identity"
+    include  = { service_token_keys = ["ci_pipeline"] }
+  }
+}
+```
+
+`non_identity`, not `allow`: there is no person to authenticate. Set
+`service_auth_401_redirect = true` on any application a machine calls, so a
+failed call gets a 401 rather than a page of login HTML that the caller will
+parse as a successful response.
+
+Cloudflare shows the generated secret once. It is not an output of this layer -
+that would put it in the plan comment on the pull request - so read it from the
+dashboard when the token is first created and put it straight into whatever
+secret store the caller uses.
+
+### What the plan will refuse
+
+- **`decision = "bypass"`.** It removes authentication entirely from every
+  application the policy is attached to. Restricted by default; allowing it
+  means editing `restricted_policy_decisions` in
+  `deployment/layers/zerotrust/defaults.auto.tfvars` on a pull request that says
+  why.
+- **An email or domain outside the permitted list**, if `allowed_email_domains`
+  is set for this deployment. Only `include` rules are checked - excluding an
+  outside address is not the problem.
+- **An application whose policies all say deny**, which nobody could reach.
+- **A rule set with no conditions in it**, which is a restriction somebody
+  believes is in force and is not.
+- **A key matching nothing** - a group, policy, service token or identity
+  provider key that does not exist.
+- **`group_keys` inside an `access_groups` rule.** A group nesting another group
+  the layer also creates is a Terraform dependency cycle. Use `group_ids` for a
+  group managed elsewhere, or merge the two rule sets.
+
+One more that is a provider limitation rather than a guardrail:
+`allowed_idp_keys` on an application cannot name an identity provider created in
+the same run, and the failure is an unhelpful provider error about unknown
+values. Apply the provider first and the application after, or use
+`login_method_keys` in a policy instead - which is enforced rather than merely
+displayed on the login page.
+
 ## Task: onboard a customer account
 
 Part of this is configuration and part of it is administration, so expect to need
@@ -360,14 +580,16 @@ somebody with repository admin rights.
 
 Configuration, in a pull request:
 
-1. Create `deployment/accounts/<name>/` and copy the six files from `account_a`.
+1. Create `deployment/accounts/<name>/` and copy the seven files from `account_a`.
 2. Put the real Cloudflare account ID in `account.tfvars`. It is the 32 character hex
    string in the dashboard URL, and also on any zone's Overview page. It is not a
    secret.
-3. Fill in `zones.tfvars` and `dns.tfvars`. Delete the example WAF, load balancer and
-   account governance entries rather than leaving them in place - the example members
-   are `example.com` addresses that will fail as soon as a domain allowlist is set,
-   and inviting people is not something to do by accident on a first apply.
+3. Fill in `zones.tfvars` and `dns.tfvars`. Delete the example WAF, load balancer,
+   account governance and Zero Trust entries rather than leaving them in place - the
+   example members are `example.com` addresses that will fail as soon as a domain
+   allowlist is set, inviting people is not something to do by accident on a first
+   apply, and the example Access application points at a hostname the account does
+   not own.
 
 Administration, before that pull request can apply:
 
@@ -448,6 +670,11 @@ are not a listed reviewer, ask one.
 
 Check the zone is `active` rather than `pending` in the Cloudflare dashboard. If it is
 pending, the registrar is not delegating to Cloudflare yet.
+
+For an Access application specifically: check the DNS record for its hostname exists
+and is **proxied**. An unproxied record bypasses Cloudflare entirely, so Access never
+sees the request and the origin answers it directly - which looks exactly like Access
+being switched off, because for that hostname it is.
 
 ## For platform administrators
 

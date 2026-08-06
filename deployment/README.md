@@ -9,7 +9,8 @@ Everything you edit lives here. The modules under [../modules/](../modules/) sta
 │   ├── zones/                         # own state: zones, settings, DNS
 │   ├── waf/                           # own state: firewall + rate limiting
 │   ├── load_balancing/                # own state: monitors, pools, LBs
-│   └── account_governance/            # own state: members, user groups
+│   ├── account_governance/            # own state: members, user groups
+│   └── zerotrust/                     # own state: Access, policies, tokens, IdPs
 └── accounts/                          # config, one tree per Cloudflare account
     ├── account_a/
     │   ├── account.tfvars             # account id       -> every layer
@@ -17,7 +18,8 @@ Everything you edit lives here. The modules under [../modules/](../modules/) sta
     │   ├── dns.tfvars                 # zone config      -> zones
     │   ├── waf.tfvars                 # policies         -> waf
     │   ├── load_balancing.tfvars      # load balancers   -> load_balancing
-    │   └── account_governance.tfvars  # dashboard access -> account_governance
+    │   ├── account_governance.tfvars  # dashboard access -> account_governance
+    │   └── zerotrust.tfvars           # Access           -> zerotrust
     └── account_b/
         └── ...
 ```
@@ -31,15 +33,16 @@ zones ──┬── waf
         └── load_balancing        (waf and load_balancing are independent)
 
 account_governance                (no zone involved, so no dependency at all)
+zerotrust                         (same, but see below)
 ```
 
-`waf` and `load_balancing` have no relationship to each other, so numbering them would assert a sequence that does not exist. `account_governance` touches no zone, so it neither creates nor resolves one and can apply whenever. Ordering is enforced where it can actually be enforced - pipeline stage dependencies, and the fact that both dependent layers resolve a zone by name and fail if it is absent - not by a filename that merely hints at it.
+`waf` and `load_balancing` have no relationship to each other, so numbering them would assert a sequence that does not exist. `account_governance` touches no zone, so it neither creates nor resolves one and can apply whenever. `zerotrust` holds no zone in its state either, but an Access application only ever sees a request if the DNS record for its hostname exists and is proxied - so `zones` in practice comes first, and the failure if it does not is a login page nobody can reach rather than a Terraform error. Ordering is enforced where it can actually be enforced - pipeline stage dependencies, and the fact that both dependent layers resolve a zone by name and fail if it is absent - not by a filename that merely hints at it.
 
 ## Why split this way
 
 **Account > separate layer run.** One `provider "cloudflare"` block carries one API token, and Terraform cannot pass a dynamic provider alias to a `for_each`'d module. So accounts cannot be `for_each` keys - each account is its own run, with its own token and its own state key. That is also the isolation you want: a token compromised for one customer cannot reach another.
 
-**Product > separate state.**  A WAF or load balancer apply cannot propose destroying a zone, because zones are not in its state. Zone deletion is the worst blast radius in Cloudflare — it takes every DNS record with it. It also lets each layer's pipeline identity hold a narrower token: waf needs `Zone WAF:Edit` + `Zone:Read`, never `Zone:Edit`. The split cuts the other way too: `account_governance` is the only layer whose token can hand somebody else access to the account, and it holds nothing at zone scope in exchange.
+**Product > separate state.**  A WAF or load balancer apply cannot propose destroying a zone, because zones are not in its state. Zone deletion is the worst blast radius in Cloudflare — it takes every DNS record with it. It also lets each layer's pipeline identity hold a narrower token: waf needs `Zone WAF:Edit` + `Zone:Read`, never `Zone:Edit`. The split cuts the other way too: `account_governance` is the only layer whose token can hand somebody else access to the Cloudflare account, and `zerotrust` the only one whose token can hand somebody access to what sits behind Access. Neither holds anything at zone scope in exchange.
 
 **Zone > a `for_each` key, not a directory.** A directory per account×zone would
 mean adding a zone requires adding `.tf` code, duplicated N×M, and a fleet-wide
@@ -50,7 +53,7 @@ version bump would touch N×M module sources. Adding a zone here is two edits to
 
 The waf and load_balancing layers resolve a zone key to a zone ID with `data "cloudflare_zone"` filtered by name, not `terraform_remote_state`. The states stay independent - either layer can be applied, re-inited or relocated without the other noticing.
 
-The cost is real and worth knowing: those layers call the Cloudflare API at plan time, so **only `zones` can be planned offline**, and the other two fail if the zone does not exist yet. Apply `zones` first; `waf` and `load_balancing` can then run in either order, or concurrently. `account_governance` reads the API too - it resolves role and permission group names to IDs - but for its own reasons, and it does not wait on anything. CI validates every layer offline and plans only `zones` without credentials.
+The cost is real and worth knowing: those layers call the Cloudflare API at plan time, so **only `zones` can be planned offline**, and the other two fail if the zone does not exist yet. Apply `zones` first; `waf` and `load_balancing` can then run in either order, or concurrently. `account_governance` reads the API too - it resolves role and permission group names to IDs - and so does `zerotrust`, which reads the account's existing Zero Trust organization so it can adopt the team name rather than demand one. Neither waits on another layer. CI validates every layer offline and plans only `zones` without credentials.
 
 ## Config precedence
 
@@ -91,7 +94,7 @@ terraform plan \
   -var-file=../../accounts/account_a/dns.tfvars
 ```
 
-`waf` takes `account.tfvars`, `zones.tfvars`, `waf.tfvars`. `load_balancing` takes `account.tfvars`, `zones.tfvars`, `load_balancing.tfvars`. `account_governance` takes `account.tfvars` and `account_governance.tfvars`, and no zone inventory at all.
+`waf` takes `account.tfvars`, `zones.tfvars`, `waf.tfvars`. `load_balancing` takes `account.tfvars`, `zones.tfvars`, `load_balancing.tfvars`. `account_governance` takes `account.tfvars` and `account_governance.tfvars`, and no zone inventory at all. `zerotrust` takes `account.tfvars` and `zerotrust.tfvars`, plus `TF_VAR_identity_provider_secrets` in the environment for any identity provider that authenticates against an OAuth application.
 
 ### Remote state
 
@@ -222,9 +225,167 @@ Scoping a policy to less than the whole account needs a resource group, and the
 Cloudflare provider has no resource for creating one. Name an existing group with
 `resource_group_names`; leave it empty and the policy covers the account.
 
+## Zero Trust
+
+Cloudflare Access: the team name the account logs in under, the identity
+providers it offers, the audiences it recognises, the policies it evaluates and
+the applications behind them. Read a plan from this layer the way you read the
+account governance one - it decides who reaches internal systems, and a destroy
+here closes a door somebody is standing at.
+
+Ops name things by key, and the layer resolves the keys:
+
+```hcl
+access_groups = {
+  platform_engineers = {
+    name = "Platform Engineers"
+    include = {
+      entra_groups = [
+        { identity_provider_key = "entra_id", group_id = "<entra group object id>" },
+      ]
+    }
+  }
+}
+
+access_policies = {
+  platform_engineers_mfa = {
+    name     = "Platform Engineers with MFA"
+    decision = "allow"
+    include  = { group_keys = ["platform_engineers"] }
+    require  = { auth_methods = ["mfa"] }
+  }
+}
+
+access_applications = {
+  grafana = {
+    name        = "Grafana"
+    domain      = "grafana.example.com"
+    policy_keys = ["platform_engineers_mfa"]
+  }
+}
+```
+
+`policy_keys` is ordered. Cloudflare evaluates an application's policies in the
+order they are listed and the first match decides, so a `deny` belongs at the
+front.
+
+### The team name is not created here
+
+The account needs a Zero Trust organization before this layer can do anything,
+and Terraform cannot create one. The Cloudflare provider's
+`cloudflare_zero_trust_organization` resource issues an HTTP `PUT`, so it adopts
+and manages an organization that exists and gets `organization_not_found` on an
+account that has never enabled Zero Trust. The resource also has no
+`terraform import`.
+
+So the team name is chosen once, out of band:
+
+```bash
+curl -X POST "https://api.cloudflare.com/client/v4/accounts/<account_id>/access/organizations" \
+  -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  --data '{"name":"Acme Internal Applications","auth_domain":"acme.cloudflareaccess.com"}'
+```
+
+or in the dashboard under Zero Trust, then Settings, then Custom Pages, which
+prompts for it the first time the section is opened. After that, set
+`zero_trust_team_name` and the layer owns it. Leave `zero_trust_team_name` unset
+and the layer adopts whatever team name the account already has, which is the
+right answer when taking over an account somebody configured by hand.
+
+Changing the team name later renames the team domain: every Access application
+URL changes, every enrolled WARP device has to re-enrol, and the old name is
+released for anybody else to register. The layer refuses unless
+`allow_team_name_change` is set.
+
+### Secrets
+
+An identity provider's OAuth client secret - the Entra ID app registration's -
+**never goes in a tfvars file**. It reaches Terraform as
+`TF_VAR_identity_provider_secrets`, a map keyed the same way as
+`identity_providers`, read from the layer's apply environment:
+
+```bash
+export TF_VAR_identity_provider_secrets='{"entra_id":"<the secret>"}'
+```
+
+Two consequences worth stating plainly. `accounts/*/*.tfvars` is deliberately
+un-ignored so account trees can be committed, so a secret written there is
+committed by the next `git add`. And the value is in Terraform state in plain
+text whatever route it takes, alongside the client secret of every service
+token, because Cloudflare shows a generated secret once and Terraform records
+what it received. This layer's state is a credential store: keep it in R2 behind
+environment-held keys, never commit it, and treat a saved plan file as equally
+sensitive. A leak means rotating every service token and every identity provider
+secret in it.
+
+Service token client secrets are deliberately not outputs, so they do not end up
+in the plan comment on a pull request.
+
+### Governing defaults
+
+| Setting | Default | Effect |
+|---|---|---|
+| `restricted_policy_decisions` | `["bypass"]` | The plan fails if a policy asks for `bypass`, which removes authentication entirely from every application it is attached to. Allowing it is a deliberate edit here on its own pull request. |
+| `allowed_email_domains` | `[]` (any) | Set it and an `include` rule admitting an address or domain from anywhere else fails the plan. `exclude` rules are left alone - excluding an outside address is not the problem. |
+| `lock_dashboard_to_read_only` | `false` | Turn it on once the account is steady and the Zero Trust dashboard becomes read-only for everybody, whatever their role, which makes this repository the only route to an Access change. |
+| `allow_team_name_change` | `false` | A typo in `zero_trust_team_name` fails the plan instead of renaming the team domain. |
+| `default_session_duration` | `"24h"` | How long a session survives before re-authentication, for anything that sets none of its own. |
+| `default_service_token_duration` | `"8760h"` | A year. Cloudflare also accepts `"forever"`; a credential nobody is obliged to rotate outlives whoever created it. |
+| `user_seat_expiration_inactive_time` | `"730h"` | Cloudflare's minimum. It is what stops a leaver holding a seat indefinitely. |
+
+### Destinations, not self_hosted_domains
+
+An application's hostnames go in `destinations`. Cloudflare deprecated the
+top-level `self_hosted_domains` list in provider 5.x - supported only until 21
+November 2025 - and `destinations` replaces it, with public hostnames and
+private (WARP-reachable) IPs and SNIs in one list.
+
+```hcl
+access_applications = {
+  grafana = {
+    name        = "Grafana"
+    domain      = "grafana.example.com"
+    policy_keys = ["platform_engineers_mfa"]
+
+    extra_destinations = [
+      { uri = "metrics.example.com" },
+      { type = "private", cidr = "10.10.0.0/24", l4_protocol = "tcp", port_range = "5432" },
+    ]
+  }
+}
+```
+
+The one trap: `destinations` is the **complete** set of what Access secures, not
+a list of extras on top of `domain`. Cloudflare's own wording is "if destinations
+are provided, then self_hosted_domains will be ignored", and `domain` is only
+"the primary hostname ... displayed if the app is visible in the App Launcher".
+Send a destinations list that omits the primary hostname and the application
+stops being protected on its own domain while the dashboard still shows that
+domain against it.
+
+The layer therefore prepends `domain` to the list for you, and the plan refuses
+a list that restates it or that names the same destination twice. Every hostname
+in the list still needs its own proxied DNS record.
+
+### Two limitations worth knowing before you hit them
+
+`group_keys` cannot be used inside an `access_groups` rule. A group nesting
+another group the same layer creates is a Terraform dependency cycle rather than
+anything Cloudflare would complain about, and the resulting message would name a
+local rather than the configuration. Nest an externally managed group with
+`group_ids`, or merge the two rule sets. The plan says so.
+
+`allowed_idp_keys` on an application cannot name an identity provider created in
+the same run. Cloudflare models the field as a set, and a set holding an ID that
+is only known after apply is unknown in its entirety, which the provider rejects
+at plan time. Apply the provider first and the application after, or express the
+restriction as `login_method_keys` in a policy - which is enforced rather than
+merely displayed, and copes with an ID that is not known yet.
+
 ## Adding a new account
 
-1. `mkdir accounts/<name>/`, copy the six tfvars files from `account_a`.
+1. `mkdir accounts/<name>/`, copy the seven tfvars files from `account_a`.
 2. Set `cloudflare_account_id`, the zone inventory, and the per-layer config.
 3. Provision a scoped API token per layer, and a state key prefix `<name>/`.
 4. Add the account to the pipeline matrix.
