@@ -95,13 +95,18 @@ validation blocks. Cross field and cross item checks live in preconditions, in
 A few examples of what gets caught: a proxied record with an explicit TTL, a proxied
 TXT record, two DNS records that collide once names are qualified, a `zone_key`
 pointing at nothing, a load balancer hostname outside its zone, a pool whose minimum
-healthy origin count exceeds its origin count, and a health check timeout longer
-than its interval.
+healthy origin count exceeds its origin count, a health check timeout longer than its
+interval, and a user group handing permissions to somebody who was never declared as a
+member.
 
-One is worth calling out because it is a safety property rather than a
-correctness one. The WAF baseline rules are parameterised, and selecting
+Two are worth calling out because they are safety properties rather than
+correctness ones. The WAF baseline rules are parameterised, and selecting
 `block_admin_from_untrusted` with an empty trusted IP list would render as "block
-admin access from everywhere", including from you. The plan fails instead.
+admin access from everywhere", including from you. The plan fails instead. In the same
+spirit, `account_governance` refuses to assign Super Administrator - whether it is
+asked for by name or by ID - until somebody deliberately removes it from the
+restricted list, because that is the one role that can rewrite the account's own
+access model.
 
 ## Pipeline
 

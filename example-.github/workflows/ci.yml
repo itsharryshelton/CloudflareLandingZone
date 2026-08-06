@@ -318,20 +318,32 @@ jobs:
             "deployment/README.md" \
             '[]' || rc=1
 
-          assert_matrix "the zone inventory reaches every layer for that account" \
+          assert_matrix "the zone inventory reaches only the layers that declare it" \
             "deployment/accounts/account_b/zones.tfvars" \
             '[{"account":"account_b","layer":"load_balancing"},{"account":"account_b","layer":"waf"},{"account":"account_b","layer":"zones"}]' || rc=1
 
-          # Apply order must put the zone-creating layer strictly first. If this
-          # regresses, waf and load_balancing plan against zones that do not
-          # exist yet and fail.
+          assert_matrix "an account governance change plans only that layer, only that account" \
+            "deployment/accounts/account_a/account_governance.tfvars" \
+            '[{"account":"account_a","layer":"account_governance"}]' || rc=1
+
+          # Apply order must put the zone-creating layer in the first tier and the
+          # zone-consuming layers in a later one. If this regresses, waf and
+          # load_balancing plan against zones that do not exist yet and fail.
+          #
+          # Tier 1 is not asserted to be *only* zones: a layer that touches no
+          # zone at all - account_governance, for one - has no upstream dependency
+          # and correctly belongs there too.
           order="$(FORCE_ALL=true bash .github/scripts/tf-matrix.sh 2>/dev/null | sed -n 's/^apply_order=//p')"
-          first="$(jq -r '.[0] | join(",")' <<<"$order")"
-          if [[ "$first" != "zones" ]]; then
-            echo "::error::apply tier 1 should be exactly 'zones', got '$first' (full order: $order)"
+          tier1="$(jq -r '.[0] | join(",")' <<<"$order")"
+          tier2="$(jq -r '.[1] // [] | join(",")' <<<"$order")"
+          if ! jq -e '.[0] | index("zones") != null' <<<"$order" >/dev/null; then
+            echo "::error::apply tier 1 must contain 'zones', got '$tier1' (full order: $order)"
+            rc=1
+          elif [[ "$tier2" != "load_balancing,waf" ]]; then
+            echo "::error::apply tier 2 should be 'load_balancing,waf', got '$tier2' (full order: $order)"
             rc=1
           else
-            echo "ok: apply order starts with zones ($order)"
+            echo "ok: zones applies in tier 1, ahead of the layers that look a zone up ($order)"
           fi
 
           # terraform-apply.yml declares a fixed number of sequential stages,

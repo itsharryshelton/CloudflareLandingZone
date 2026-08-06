@@ -73,11 +73,12 @@ You only ever edit files under `deployment/accounts/`.
 
 ```
 deployment/accounts/account_a/
-├── account.tfvars          the Cloudflare account ID
-├── zones.tfvars            which zones exist: key -> domain name
-├── dns.tfvars              zone settings and DNS records
-├── waf.tfvars              firewall and rate limiting policies
-└── load_balancing.tfvars   load balancers, pools, health checks
+├── account.tfvars              the Cloudflare account ID
+├── zones.tfvars                which zones exist: key -> domain name
+├── dns.tfvars                  zone settings and DNS records
+├── waf.tfvars                  firewall and rate limiting policies
+├── load_balancing.tfvars       load balancers, pools, health checks
+└── account_governance.tfvars   who can sign in to the account, and with what
 ```
 
 Everything under `deployment/layers/` and `modules/` is the engine. If you find
@@ -297,6 +298,61 @@ yet, so offering it would produce plans that fail on apply.
 New to Cloudflare expressions? Build and test one in the dashboard under Security,
 then Rules, and paste the expression here rather than writing it blind.
 
+## Task: give somebody access to the Cloudflare dashboard
+
+Edit `deployment/accounts/<account>/account_governance.tfvars`. Two things happen
+there: people are invited, and permissions are handed out through named groups.
+
+Read a plan from this file more carefully than any other. It is the one that grants
+and revokes real people's access, and deleting an entry locks that person out on the
+next apply.
+
+Add the person, then put them in the group that carries the permissions they need:
+
+```hcl
+account_members = {
+  new_starter = {
+    email = "new.starter@example.com"
+    # No role_names, so they get the platform default: enough to sign in and
+    # nothing else. The real permissions come from the group below.
+  }
+}
+
+user_groups = {
+  dns_operators = {
+    name        = "DNS Operators"
+    member_keys = ["new_starter"]
+    policies = [
+      { permission_group_names = ["DNS Write", "Zone Read"] },
+    ]
+  }
+}
+```
+
+Names, not IDs. Roles and permission groups are named exactly as the dashboard shows
+them under Manage Account, then Members. Get one wrong and the plan fails listing
+what the account actually has, which is usually faster than hunting for the right
+wording in the dashboard.
+
+They will not be able to sign in until they accept the invitation Cloudflare emails
+them. Until then the `member_statuses` output says `pending`, and that is the first
+thing to check when access has apparently been granted but nothing works.
+
+Three things the plan will refuse:
+
+- **Super Administrator.** Restricted by default, whether asked for by name or by
+  ID, because it is the one role that can rewrite the account's own access model.
+  Granting it means editing `restricted_role_names` in
+  `deployment/layers/account_governance/defaults.auto.tfvars` on a pull request that
+  says why.
+- **An address outside the permitted domains**, if `allowed_email_domains` is set for
+  this deployment.
+- **A `member_keys` entry that matches no member**, which would otherwise leave
+  somebody signed in and staring at an empty dashboard.
+
+To remove somebody, delete their `account_members` entry and any `member_keys`
+mentioning them. Expect the plan to show a destroy, and check it is only theirs.
+
 ## Task: onboard a customer account
 
 Part of this is configuration and part of it is administration, so expect to need
@@ -304,12 +360,14 @@ somebody with repository admin rights.
 
 Configuration, in a pull request:
 
-1. Create `deployment/accounts/<name>/` and copy the five files from `account_a`.
+1. Create `deployment/accounts/<name>/` and copy the six files from `account_a`.
 2. Put the real Cloudflare account ID in `account.tfvars`. It is the 32 character hex
    string in the dashboard URL, and also on any zone's Overview page. It is not a
    secret.
-3. Fill in `zones.tfvars` and `dns.tfvars`. Delete the example WAF and load balancer
-   entries rather than leaving them in place.
+3. Fill in `zones.tfvars` and `dns.tfvars`. Delete the example WAF, load balancer and
+   account governance entries rather than leaving them in place - the example members
+   are `example.com` addresses that will fail as soon as a domain allowlist is set,
+   and inviting people is not something to do by accident on a first apply.
 
 Administration, before that pull request can apply:
 

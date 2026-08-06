@@ -36,7 +36,9 @@ Terraform source, so adding an account, a layer or a module needs no edit here:
   same variable.
 - **Apply order**: a layer that *creates* zones must apply before a layer that
   *looks one up* with `data "cloudflare_zone"`, since that read fails until the
-  zone exists. Today: `zones`, then `waf` and `load_balancing` concurrently.
+  zone exists. Today: `zones` and `account_governance` first, then `waf` and
+  `load_balancing` concurrently. `account_governance` is in the first tier because
+  it touches no zone at all, not because anything waits on it.
 
 `ci.yml` asserts all three, so a regression in the derivation fails a PR rather
 than silently causing a merged change never to be planned.
@@ -65,19 +67,26 @@ two tier stages. If a new layer makes the graph deeper, both `discover` and
 ### Environments
 
 Per account: **one plan environment, plus one apply environment per layer.** For
-two accounts and three layers that is eight environments.
+two accounts and four layers that is ten environments.
 
-| Environment                      | Reviewers    | `CLOUDFLARE_API_TOKEN` scope                                                                                                         |
-| ----------------------------------| --------------| --------------------------------------------------------------------------------------------------------------------------------------|
-| `account_a-plan`                 | none         | read-only: `Zone:Read`, `DNS:Read`, `Zone Settings:Read`, `Zone WAF:Read`, `Account Load Balancers:Read`, `Zone Load Balancers:Read` |
-| `account_a-zones-apply`          | **required** | `Zone:Edit`, `DNS:Edit`, `Zone Settings:Edit`                                                                                        |
-| `account_a-waf-apply`            | **required** | `Zone WAF:Edit`, `Zone:Read`, notably *not* `Zone:Edit`                                                                              |
-| `account_a-load_balancing-apply` | **required** | `Account Load Balancers:Edit`, `Zone Load Balancers:Edit`, `Zone:Read`                                                               |
+| Environment                          | Reviewers    | `CLOUDFLARE_API_TOKEN` scope                                                                                                                                    |
+| -------------------------------------| --------------| -----------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `account_a-plan`                     | none         | read-only: `Zone:Read`, `DNS:Read`, `Zone Settings:Read`, `Zone WAF:Read`, `Account Load Balancers:Read`, `Zone Load Balancers:Read`, `Account Settings:Read` |
+| `account_a-zones-apply`              | **required** | `Zone:Edit`, `DNS:Edit`, `Zone Settings:Edit`                                                                                                                    |
+| `account_a-waf-apply`                | **required** | `Zone WAF:Edit`, `Zone:Read`, notably *not* `Zone:Edit`                                                                                                         |
+| `account_a-load_balancing-apply`     | **required** | `Account Load Balancers:Edit`, `Zone Load Balancers:Edit`, `Zone:Read`                                                                                          |
+| `account_a-account_governance-apply` | **required** | `Account Settings:Edit`, and nothing at zone scope                                                                                                              |
 
 …and the same for `account_b`. Each token is scoped to **one account and one
 layer**: the scopes are the ones documented in each layer's `providers.tf`, and
 splitting them is the reason the layers were split in the first place. A WAF
 token cannot delete a zone.
+
+The `account_governance` token deserves separate thought. `Account Settings:Edit`
+is what invites members and creates user groups, which makes it the only token in
+the set that can grant somebody else access to the account. It holds nothing at
+zone scope in exchange, so it cannot touch DNS or a firewall rule, but treat its
+reviewer list as the tightest of the four.
 
 On the apply environments, also set **Deployment branches** to `main` only, so a
 branch cannot reach a write token.
