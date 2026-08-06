@@ -119,7 +119,11 @@ Ask yourself whether the module would make sense to somebody who has never seen
 3. Document the minimum API token scope in `providers.tf`. Somebody creating
    tokens will look there first.
 4. If it binds to a zone, copy `zone_lookup.tf` and the `referenced_zones` local
-   so it resolves keys by name instead of reading another layer's state.
+   so it resolves keys by name instead of reading another layer's state. If it
+   binds to something else Cloudflare identifies by an opaque per-account ID -
+   roles, permission groups, resource groups - do the equivalent with a data
+   source of its own, so an account tree never carries a hex string. See
+   `account_governance/permission_lookup.tf`.
 5. Add `preflight.tf` for any new key reference.
 6. Add `accounts/*/<product>.tfvars`, and a `<account>-<product>-apply`
    environment per account.
@@ -192,10 +196,12 @@ request, read what CI says, push a fix. `ci.yml` runs on every push and covers:
 | Config guards | Every account var file maps to a layer, backend blocks stay commented, nothing secret is tracked |
 | Mapping self test | The account and layer derivation in `.github/scripts/` still produces what it should |
 
-Only `zones` can be planned without credentials, because `waf` and `load_balancing`
-resolve zones through a data source and that reads the API. Those two are covered by
-`validate` in CI, and by `terraform-plan.yml` on a pull request using a read-only
-token.
+Only `zones` can be planned without credentials. `waf` and `load_balancing` resolve
+zones through a data source, and `account_governance` resolves role and permission
+group names the same way; either is a real API read at plan time. Those three are
+covered by `validate` in CI, and by `terraform-plan.yml` on a pull request using a
+read-only token. Which layers qualify is derived, not listed, so a new layer is
+classified correctly without editing the workflow.
 
 If a formatting failure is the only thing between you and green, the CI log contains
 the diff.
