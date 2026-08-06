@@ -1,147 +1,96 @@
 # Cloudflare Landing Zones (CFLZ)
 
-Terraform for managing Cloudflare at enterprise scale: many accounts, many zones, one set of reviewed modules.
+Enterprise-grade Infrastructure-as-Code (IaC) for managing multi-account, multi-zone Cloudflare footprints through a single set of standardized, reviewed modules.
 
 New here? Go to [GETTING_STARTED.md](GETTING_STARTED.md).
 
 ## Why a landing zone
 
-A landing zone is a cloud adoption term. It is the agreed baseline an environment
-lands in before any workload arrives: identity, network, security posture, naming and
-guardrails decided once and applied the same way everywhere. The alternative is every
-environment being a one off, built by whoever was on shift, and nobody being able to
-say what is configured where.
+A Landing Zone is the agreed baseline an enterprise environment lands in before any workload arrives. Identity, network topologies, security posture, naming conventions, and guardrails are decided once and enforced universally. Without one, every environment becomes an ad-hoc build, creating configuration drift and audit blind spots.
 
-Azure Landing Zones (ALZ) is the pattern most enterprises have met. This repository
-applies the same idea to Cloudflare, and borrows the naming on purpose: Cloudflare
-Landing Zones, or CFLZ. If you have worked with ALZ, the shape here should be
-familiar. A reviewed set of modules, a baseline every account gets, and per account
-configuration that sits apart from the logic.
+Azure Landing Zones (ALZ) established this standard for cloud adoption. CFLZ applies the exact same enterprise architectural rigour to Cloudflare.
+
+### The Core Principles
+
+- GitOps Over "Click-Ops"
+- Declarative State & Drift Detection
+- Separation of Logic & Configuration
 
 <img width="2063" height="3381" alt="CFLZ" src="https://images.harryshelton.com/CFLZ.png" />
 
+## Architectural Framework
 
-## Platform Landing Zone (Account & Enterprise Governance)
+CFLZ mirrors the Microsoft Cloud Adoption Framework (CAF) hierarchy, adapting it to the Cloudflare edge ecosystem.
+
+### Platform Landing Zone (Account & Enterprise Governance)
 
 The Platform Landing Zone establishes your organisation's primary Cloudflare edge foundation. It defines how you structure your Cloudflare Accounts, enforce global security governance, and deliver shared edge capabilities centrally. Most organisations maintain one primary Platform Landing Zone per main Enterprise Account or administrative scope.
 
 A Platform Landing Zone consists of account-level governance configurations and centralized infrastructure services. A core function of the platform layer is providing a standardized, automated mechanism to vend zone-level Application Landing Zones to development and workload teams.
 
 - Establishes the overarching administrative structure across your Cloudflare footprint. It organizes account-level RBAC roles, audit logging, and global security policies (such as baseline WAF rulesets, Account-level Rate Limiting, API Shield schemas, and Zero Trust identity policies). This layer separates platform-wide policy from individual domain configurations, applying governance consistently without creating administrative overhead.
-- Shared capabilities provisioned centrally for all domains and workloads. Common examples include central Logpush streams (exporting to Azure Sentinel, SIEM, or R2 buckets), unified Identity Provider integration (e.g., Microsoft Entra ID), global Anycast DNS routing, and enterprise mTLS configurations. Only centralize capabilities that provide clear security, operational, or economic benefits across multiple workloads.
+- Shared capabilities provisioned centrally for all domains and workloads. Common examples include central Logpush streams (exporting to Azure Sentinel, SIEM, or R2 buckets), unified Identity Provider integration (e.g., Microsoft Entra ID), global Anycast DNS routing, and enterprise mTLS configurations. Only centralise capabilities that provide clear security, operational, or economic benefits across multiple workloads.
 - Providing a repeatable, automated process for requesting, building, and vending Application Landing Zones (Domains/Zones) to workload teams. Driven by Infrastructure-as-Code (Terraform & GitOps), this vending process guarantees that every newly onboarded domain automatically inherits your organization's security and compliance baselines.
 
-## Application Landing Zone (Zone & Workload Level)
+### Application Landing Zone (Zone & Workload Level)
 
-Each application, microservice, or web property operates within a dedicated Application Landing Zone (spanning one or more Cloudflare Zones). An Application Landing Zone contains the edge configurations required to support that specific workload across development, staging, and production environments. It encapsulates all Cloudflare resources owned and managed by the workload team—including DNS records, zone-specific WAF rules, Cloudflare Workers/Pages, R2 buckets, and Load Balancers.
+Each web application, microservice, or domain operates inside a dedicated Application Landing Zone. It encapsulates all Cloudflare resources owned and operated by specific workload teams across development, staging, and production environments.
 
-Based on operational requirements, the platform team assigns each Application Landing Zone to a specific environment archetype (e.g., Public Web App, Internal/Corp Zero Trust, or Edge Compute Worker). Every zone inherits global policies and guardrails enforced at the Platform level while giving workload teams the autonomy to manage domain-specific logic.
+- Manages zone DNS records, custom WAF rules, Cloudflare Workers/Pages, R2 buckets, and Load Balancers.
+- Assigns zones to specific environment templates (e.g., Public Web App, Internal/Corp Zero Trust, or Edge Compute Worker), allowing teams domain autonomy while inheriting global platform guardrails.
 
-- The CloudflareLandingZone (CFLZ) repository acts as an open-source accelerator to implement recommended Cloudflare architecture patterns. You can deploy this module directly through Azure DevOps or GitHub Actions pipelines, extend the underlying HCL code, or customize the sub-modules to fit your enterprise landing zone requirements.
+### Repository Structure
 
+CFLZ abstracts infrastructure logic away from customer data, allowing onboarding or DNS modifications to occur strictly as configuration edits.
 
-## Why code and state
+```text
+├── modules/                   # Agnostic building blocks (flat arguments, real IDs)
+├── deployment/
+│   ├── layers/                # Fleet-shaped orchestrators calling baseline modules
+│   └── accounts/              # Customer & account configuration (.tfvars live here)
+```
 
-Terraform state is a record of what actually exists. That gives three things a
-collection of change requests cannot. A plan shows the exact change before it
-happens, so a reviewer approves a diff rather than an intention. Drift is detectable,
-because anything changed outside the pipeline shows up as a difference on the next
-plan. And history is real: `git log` explains why a setting is the way it is, and who
-approved it.
+- modules/: Agnostic, reusable modules that know nothing about specific accounts or API keys.
+- deployment/layers/: Top-level orchestration layers that compose modules into complete environments.
+- deployment/accounts/: The only directory operators edit. Contains .tfvars per Cloudflare account.
 
-## Why not the dashboard
+## Built-in Guardrails & Pre-flight Checks
 
-Cloudflare is an API first company and the dashboard is a client of that API, so
-scripting against it directly works fine. What API calls do not give you is intent
-recorded somewhere reviewable, a diff before the change, or a source of truth for
-current configuration. Every change is fire and forget, and the only record is
-whatever the operator wrote in the ticket.
+CFLZ prioritises fail-safe operations. Instead of failing halfway through a live apply, invalid or dangerous configurations fail during the plan phase via native HCL validation and precondition blocks.
 
-Terraform is the enterprise standard for this, the Cloudflare provider is first
-party, and auditors and new engineers can both read it. The dashboard stays useful for
-reading state and for analytics. It is not where changes get made.
+### Safety Guardrails
+- Super Administrator Lockout Prevention: The account_governance layer refuses to assign the Super Administrator role (by name or ID) unless explicitly unlocked in code, protecting the root access model.
+- WAF Admin Lockout: Selecting block_admin_from_untrusted without providing a trusted IP list will immediately fail execution, preventing self-lockout.
+- Zero Trust Bypass Restrictions: Access policies configured with decision = "bypass" are rejected by default to prevent accidental exposure of protected endpoints.
+- Team Domain Protection: Renaming a Zero Trust Team domain requires explicit confirmation flags, preventing broken Access URLs and forced WARP client re-enrolments.
 
-## What this is
+### Configuration Correctness Checks
+- DNS Validation: Catches record collisions, proxied TXT records, or proxied records with explicit TTLs before submission.
+- Load Balancer Logic: Verifies pool health-check timeouts are shorter than intervals, and ensures minimum healthy origin counts do not exceed pool capacity.
+- Identity Integrity: Validates that user groups do not assign permissions to undeclared members.
 
-A template repository that separates infrastructure logic from customer
-configuration, so that onboarding a customer or changing their DNS is a
-configuration edit rather than a code change.
+## Deployment & Multi-Tenant Model
+While the repository supports standalone deployments out of the box, enterprise environments should follow two core architectural patterns:
 
-The modules under [modules/](modules/) are agnostic building blocks. They take flat
-arguments and real IDs, and know nothing about accounts, keys or profiles. The
-layers under [deployment/layers/](deployment/layers/) own the fleet shaped view and
-call those modules. Configuration lives in
-[deployment/accounts/](deployment/accounts/), one directory per Cloudflare account,
-and it is the only thing an operator edits.
+### 1. Isolated Per-Customer Repositories
+Do not run multiple customers inside a single repository directory. Managing multiple clients under one repo shares pipeline permissions and state keys, exposing all clients to a single operator error.
 
-This repository is the upstream. It gets copied to a per customer repository where
-operators change `.tfvars` files. Module and layer changes happen here and reach
-customers as a version bump.
+> Best Practice: Copy or fork this repository into the customer’s own isolated estate (their GitHub Org, their R2 state bucket, their scoped API tokens).
 
-## Setup
-
-Two recommendations for anyone standing this up properly. Neither is enforced by the
-code, and the repository works without them, but they are the shape it was designed
-for.
-
-**One deployment per customer.** The account split under
-[deployment/accounts/](deployment/accounts/) exists so that a single customer with more
-than one Cloudflare account can be managed in one place. It is not a way to hold
-several customers side by side. Doing that puts every customer's configuration behind
-one set of repository permissions and one pipeline, so an operator with access to one
-customer has access to all of them, and a mistake in a shared layer reaches everyone at
-once. Ideally the deployment lives in the customer's own estate: their GitHub
-organisation, their R2 bucket for state, their API tokens. Credentials then only ever
-grant access to the account they belong to.
-
-**Modules in their own repository.** [modules/](modules/) currently sits alongside the
-deployment in this repository, which is convenient while both are moving. 
-
-At best practice, the modules are their own repository, tagged, and referenced by URL:
+### 2. Externalised Versioned Modules
+While modules/ sits inside this repository for development convenience for this template repo: production environments should reference tagged, external module repositories:
 
 ```hcl
 module "zone_base" {
-  source = "git::https://github.com/<org>/cloudflare-lz-modules.git//modules/zone_base?ref=v1.4.0"
+  source = "git::https://github.com/<your-org>/cloudflare-lz-modules.git//modules/zone_base?ref=v1.4.0"
 }
 ```
+This guarantees that changes on main do not automatically alter live infrastructure until a customer explicitly bumps their module version.
 
-That gives each customer an explicit module version rather than whatever happened to be
-on `main` when they last pulled, and lets a module change be tested once and rolled out
-per customer on their own timetable.
 
-Bad configuration fails at plan time with a message naming the offending input,
-rather than halfway through an apply. Single field checks live in `variables.tf` as
-validation blocks. Cross field and cross item checks live in preconditions, in
-`main.tf` for modules and `preflight.tf` for layers.
+## CI/CD Pipeline & State Management
 
-A few examples of what gets caught: a proxied record with an explicit TTL, a proxied
-TXT record, two DNS records that collide once names are qualified, a `zone_key`
-pointing at nothing, a load balancer hostname outside its zone, a pool whose minimum
-healthy origin count exceeds its origin count, a health check timeout longer than its
-interval, a user group handing permissions to somebody who was never declared as a
-member, and an Access application every one of whose policies refuses the request.
-
-Two are worth calling out because they are safety properties rather than
-correctness ones. The WAF baseline rules are parameterised, and selecting
-`block_admin_from_untrusted` with an empty trusted IP list would render as "block
-admin access from everywhere", including from you. The plan fails instead. In the same
-spirit, `account_governance` refuses to assign Super Administrator - whether it is
-asked for by name or by ID - until somebody deliberately removes it from the
-restricted list, because that is the one role that can rewrite the account's own
-access model.
-
-`zerotrust` has two of its own. An Access policy with `decision = "bypass"` is
-refused by default, because it removes authentication entirely from every
-application it is attached to and would otherwise arrive as a one-word edit to a
-customer's configuration. And changing the Zero Trust team name is refused unless
-somebody says so explicitly, because it renames the team domain: every Access
-URL changes, every enrolled WARP device has to re-enrol, and the old name is
-released for anyone else to claim.
-
-## Pipeline
-
-GitHub Actions. See [.github/workflows/README.md](.github/workflows/README.md) for
-the environments, secrets and token scopes.
+CFLZ uses GitHub Actions driven strictly by GitOps workflows. Terraform is executed only inside the pipeline—never on local developer workstations.
 
 | Workflow | Trigger | Touches Cloudflare |
 |---|---|---|
@@ -171,26 +120,16 @@ always a recorded plan behind it.
 | [.github/workflows/README.md](.github/workflows/README.md) | Pipeline, environments, token scopes, security notes |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Changing the Terraform rather than the configuration |
 
-A module documents itself. Its inputs, defaults and guardrails live in the
-`description` and `validation` blocks in its own `variables.tf`, and the reasoning
-lives in the header comments of `locals.tf` and `main.tf`. There are no separate
-module READMEs to drift out of date.
+> ## A Note on Feature Coverage & Maintenance
+> This project is designed to give you a solid, enterprise-ready starting point for deploying Cloudflare Landing Zones, but it doesn't cover every single Cloudflare feature out of the box. You may find that your specific deployment requires tweaking the `.tf` files to add new variables or support additional resources.  
+> 
+> While core capabilities are tested, I can't test every edge case or keep up with every provider update instantly. If you hit a gap, find a bug, or want to add a feature, please check out [`CONTRIBUTING.md`](CONTRIBUTING.md) and submit a Pull Request!
+> At a minimum, before I commit I've formatted & validated terraform formatting and run offline tests against the guardrails; and tested the deployment where I'm able to. I do not have a timeline for features, I add when I have the time or think needs adding next; any requests please submit.
 
 ## Licence
 
-Apache License 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+Distributed under the Apache License 2.0 - See [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
-Copy it, modify it, run it for customers, keep your changes private. Apache-2.0 asks
-you to keep the licence and notice, state what you changed, and it grants patent
-rights explicitly. It was chosen over MPL-2.0 for that reason: this repository is
-meant to be copied into a per customer repository and edited there, and MPL-2.0's
-file level copyleft would oblige whoever did that to publish their edits.
-
-One thing to be aware of if you adopt this. The code here is Apache-2.0, but Terraform
-itself is not open source from version 1.6 onward. It moved to the Business Source
-License 1.1, now with IBM as licensor. That is a licence for the tool you run, not for
-this repository, and it does restrict using Terraform to build a competing product.
-Check it against your own use if you sell services built on this.
-[OpenTofu](https://opentofu.org/) is the MPL-2.0 fork if that matters to you, and
-nothing here depends on Terraform-only behaviour, though the pipeline pins Terraform
-and has not been tested against OpenTofu.
+### Open-Source & BSL Considerations
+- Apache-2.0 License: You are free to copy, modify, and run this code for commercial clients privately without triggering file-level copyleft obligations (unlike MPL-2.0).
+- Terraform BSL / OpenTofu: Terraform (v1.6+) is licensed under the Business Source License (BSL 1.1) by IBM. CFLZ relies on standard HCL features and is fully compatible with OpenTofu (MPL-2.0) if your organization requires a completely open-source toolchain.
