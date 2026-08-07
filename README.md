@@ -1,8 +1,8 @@
 # Cloudflare Landing Zones (CFLZ)
 
-Enterprise-grade Infrastructure-as-Code (IaC) for managing multi-account, multi-zone Cloudflare footprints through a single set of standardized, reviewed modules.
+Enterprise-grade Infrastructure-as-Code (IaC) for managing multi-account, multi-zone Cloudflare footprints through a single set of standardised modules.
 
-New here? Go to [GETTING_STARTED.md](GETTING_STARTED.md).
+New here? Go to the Wiki for the Guides.
 
 ## Why a landing zone
 
@@ -26,11 +26,11 @@ CFLZ mirrors the Microsoft Cloud Adoption Framework (CAF) hierarchy, adapting it
 
 The Platform Landing Zone establishes your organisation's primary Cloudflare edge foundation. It defines how you structure your Cloudflare Accounts, enforce global security governance, and deliver shared edge capabilities centrally. Most organisations maintain one primary Platform Landing Zone per main Enterprise Account or administrative scope.
 
-A Platform Landing Zone consists of account-level governance configurations and centralized infrastructure services. A core function of the platform layer is providing a standardized, automated mechanism to vend zone-level Application Landing Zones to development and workload teams.
+A Platform Landing Zone consists of account-level governance configurations and centralised infrastructure services. A core function of the platform layer is providing a standardised, automated mechanism to vend zone-level Application Landing Zones to development and workload teams.
 
-- Establishes the overarching administrative structure across your Cloudflare footprint. It organizes account-level RBAC roles, audit logging, and global security policies (such as baseline WAF rulesets, Account-level Rate Limiting, API Shield schemas, and Zero Trust identity policies). This layer separates platform-wide policy from individual domain configurations, applying governance consistently without creating administrative overhead.
+- Establishes the overarching administrative structure across your Cloudflare footprint. It organises account-level RBAC roles, audit logging, and global security policies (such as baseline WAF rulesets, Account-level Rate Limiting, API Shield schemas, and Zero Trust identity policies). This layer separates platform-wide policy from individual domain configurations, applying governance consistently without creating administrative overhead.
 - Shared capabilities provisioned centrally for all domains and workloads. Common examples include central Logpush streams (exporting to Azure Sentinel, SIEM, or R2 buckets), unified Identity Provider integration (e.g., Microsoft Entra ID), global Anycast DNS routing, and enterprise mTLS configurations. Only centralise capabilities that provide clear security, operational, or economic benefits across multiple workloads.
-- Providing a repeatable, automated process for requesting, building, and vending Application Landing Zones (Domains/Zones) to workload teams. Driven by Infrastructure-as-Code (Terraform & GitOps), this vending process guarantees that every newly onboarded domain automatically inherits your organization's security and compliance baselines.
+- Providing a repeatable, automated process for requesting, building, and vending Application Landing Zones (Domains/Zones) to workload teams. Driven by Infrastructure-as-Code (Terraform & GitOps), this vending process guarantees that every newly onboarded domain automatically inherits your organisation's security and compliance baselines.
 
 ### Application Landing Zone (Zone & Workload Level)
 

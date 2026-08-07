@@ -1,8 +1,7 @@
 # Contributing
 
 This document is about changing the Terraform. If you only want to configure a
-customer, you want [GETTING_STARTED.md](GETTING_STARTED.md) instead, and you should
-not need to touch a `.tf` file at all.
+customer, you want the Wiki instead, and you should not need to touch a `.tf` file at all.
 
 ## Upstream and downstream
 
