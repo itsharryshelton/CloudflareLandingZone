@@ -57,14 +57,58 @@ variable "min_tls_version" {
   }
 }
 
+variable "tls_1_3" {
+  type        = string
+  default     = "on"
+  description = <<-EOT
+    TLS 1.3 support at the edge. One of: on, off, zrt.
+
+    "zrt" is TLS 1.3 with 0-RTT resumption, which trims a round trip on repeat
+    connections at the cost of making early data replayable. Only choose it if
+    every endpoint reachable over early data is idempotent.
+
+    This is independent of `min_tls_version`: setting min_tls_version = "1.3"
+    forces clients up to 1.3, whereas this decides whether 1.3 is offered at all.
+  EOT
+
+  validation {
+    condition     = contains(["on", "off", "zrt"], var.tls_1_3)
+    error_message = "tls_1_3 must be one of: on, off, zrt (zrt enables 0-RTT resumption)."
+  }
+}
+
+variable "always_use_https" {
+  type        = string
+  default     = "on"
+  description = <<-EOT
+    Redirect every plaintext HTTP request to HTTPS at the edge. One of: on, off.
+
+    Off is almost never right on a proxied zone: it leaves the plaintext
+    listener answering rather than redirecting, so a client that reaches port 80
+    is served over it.
+  EOT
+
+  validation {
+    condition     = contains(["on", "off"], var.always_use_https)
+    error_message = "always_use_https must be one of: on, off."
+  }
+}
+
 variable "zone_settings" {
   type        = map(string)
   description = <<-EOT
     Additional string-valued zone settings, applied as individual
-    cloudflare_zone_setting resources (map of setting_id => value). Merged with
-    the secure baseline defaults below; the dedicated `ssl_mode` and
-    `min_tls_version` variables always take precedence over any matching key
-    here. Only string-valued settings are supported by this variable; for
+    cloudflare_zone_setting resources (map of setting_id => value). Merged over
+    the secure baseline in locals.tf; the dedicated `ssl_mode`,
+    `min_tls_version`, `tls_1_3` and `always_use_https` variables always take
+    precedence over any matching key here.
+
+    The baseline is a local rather than this variable's default on purpose: a
+    caller that sets zone_settings at all REPLACES a default wholesale, which is
+    exactly what the deployment layers do, and the baseline used to disappear
+    without a trace when they did.
+
+    Only string-valued settings are supported by this variable; for
     numeric or object-valued settings (e.g. browser_cache_ttl), add a
     cloudflare_zone_setting resource directly. See:
     https://registry.terraform.io/providers/cloudflare/cloudflare/latest/docs/resources/zone_setting
@@ -72,14 +116,7 @@ variable "zone_settings" {
     Note: zone settings cannot be deleted through the Cloudflare API. Removing a
     key here drops it from Terraform state but leaves the value live on the zone.
   EOT
-  default = {
-    always_use_https         = "on"
-    tls_1_3                  = "on"
-    automatic_https_rewrites = "on"
-    opportunistic_encryption = "on"
-    browser_check            = "on"
-    http3                    = "on"
-  }
+  default     = {}
 
   validation {
     condition     = alltrue([for id, value in var.zone_settings : trimspace(id) != "" && trimspace(value) != ""])

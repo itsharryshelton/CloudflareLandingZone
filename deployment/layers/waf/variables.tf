@@ -27,14 +27,72 @@ variable "zones" {
     independent.
 
     - `domain_name` - The apex domain (e.g. example.com).
+    - `zone_tier`   - (Optional) The zone's Cloudflare rate plan. Defaults to
+                      var.default_zone_tier. Read here to gate `bot_traffic`,
+                      which depends on Bot Management fields that lower plans do
+                      not expose. This layer never changes a plan - only the
+                      zones layer can do that.
   EOT
   type = map(object({
     domain_name = string
+    zone_tier   = optional(string)
   }))
 
   validation {
     condition     = alltrue([for key in keys(var.zones) : can(regex("^[a-z0-9_]+$", key))])
     error_message = "zones keys must be lowercase alphanumeric with underscores."
+  }
+
+  validation {
+    condition = alltrue([
+      for zone in var.zones : zone.zone_tier == null || contains([
+        "free", "lite", "pro", "pro_plus", "business", "enterprise",
+        "partners_free", "partners_pro", "partners_business",
+        "partners_enterprise", "partners_ent",
+      ], coalesce(zone.zone_tier, "free"))
+    ])
+    error_message = "zones[*].zone_tier must be one of: free, lite, pro, pro_plus, business, enterprise, partners_free, partners_pro, partners_business, partners_enterprise, partners_ent."
+  }
+}
+
+variable "default_zone_tier" {
+  type        = string
+  default     = "free"
+  description = "Rate plan assumed for a zone whose inventory entry does not name one. Must match what the zones layer was given, or bot traffic gating here will not agree with the gating there."
+
+  validation {
+    condition = contains([
+      "free", "lite", "pro", "pro_plus", "business", "enterprise",
+      "partners_free", "partners_pro", "partners_business",
+      "partners_enterprise", "partners_ent",
+    ], var.default_zone_tier)
+    error_message = "default_zone_tier must be one of: free, lite, pro, pro_plus, business, enterprise, partners_free, partners_pro, partners_business, partners_enterprise, partners_ent."
+  }
+}
+
+variable "bot_traffic_min_tier" {
+  type        = string
+  default     = "pro"
+  description = <<-EOT
+    Lowest rate plan allowed to carry `bot_traffic` rules. A policy that sets
+    bot_traffic on a zone below this fails the plan.
+
+    Pro by default, and it is a judgement call rather than a documented
+    threshold. Cloudflare publishes no plan floor for cf.verified_bot_category,
+    but the neighbouring cf.bot_management.* fields require Enterprise with Bot
+    Management, and verified bot handling below Pro is Bot Fight Mode, which has
+    no per-category concept at all. If your account's entitlement differs,
+    change this rather than working around it - being wrong in either direction
+    only costs a plan-time error instead of an apply-time one.
+  EOT
+
+  validation {
+    condition = contains([
+      "free", "lite", "pro", "pro_plus", "business", "enterprise",
+      "partners_free", "partners_pro", "partners_business",
+      "partners_enterprise", "partners_ent",
+    ], var.bot_traffic_min_tier)
+    error_message = "bot_traffic_min_tier must be a valid Cloudflare rate plan ID."
   }
 }
 
@@ -45,6 +103,24 @@ variable "waf_policies" {
     at all, which costs nothing.
 
     - `zone_key`                - The key of the zone this policy binds to. Taken from `var.zones`.
+    - `bot_traffic`             - (Optional) Per-behaviour handling of verified bot traffic:
+                                  `search`, `agent` and `training`, each one of allow, log,
+                                  managed_challenge, js_challenge, challenge or block.
+                                  Emitted as rules at the TOP of the custom ruleset, before
+                                  the baseline and tenant rules, so an allow can short-circuit
+                                  them. Requires a zone tier of at least
+                                  var.bot_traffic_min_tier.
+
+                                  This is in the waf layer, not the zones layer, because
+                                  Cloudflare allows one entry-point ruleset per phase per
+                                  zone and this layer owns http_request_firewall_custom. The
+                                  coarse zone-level controls (Bot Fight Mode, Super Bot Fight
+                                  Mode, ai_bots_protection) are `bot_management` in the zones
+                                  layer's dns.tfvars.
+
+                                  Matches VERIFIED bots only. An AI crawler that hides what
+                                  it is has no category and is unaffected - use
+                                  ai_bots_protection in the zones layer for that.
     - `baseline_custom_rules`   - (Optional) Names of baseline rules from the platform
                                   catalogue in locals.waf.tf.
     - `baseline_rate_limits`    - (Optional) Names of baseline rate limits from the same catalogue.
@@ -65,6 +141,13 @@ variable "waf_policies" {
     baseline_rate_limits    = optional(list(string), [])
     custom_ruleset_name     = optional(string)
     rate_limit_ruleset_name = optional(string)
+    bot_traffic = optional(object({
+      search             = optional(string)
+      agent              = optional(string)
+      training           = optional(string)
+      category_overrides = optional(map(list(string)), {})
+      enabled            = optional(bool, true)
+    }))
     custom_block_rules = optional(list(object({
       name        = string
       expression  = string

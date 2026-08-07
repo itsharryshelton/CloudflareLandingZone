@@ -21,3 +21,9 @@ waf_trusted_ip_ranges = []
 # Deliberately empty. Geoblocking is a per-customer regulatory decision, so set it
 # in the account that needs it rather than defaulting it on for everyone.
 waf_blocked_countries = []
+
+# Must match the zones layer's default_zone_tier
+default_zone_tier = "free"
+
+# Lowest plan allowed to carry bot_traffic rules
+bot_traffic_min_tier = "pro"

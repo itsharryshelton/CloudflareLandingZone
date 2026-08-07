@@ -63,11 +63,14 @@ CFLZ prioritises fail-safe operations. Instead of failing halfway through a live
 - WAF Admin Lockout: Selecting block_admin_from_untrusted without providing a trusted IP list will immediately fail execution, preventing self-lockout.
 - Zero Trust Bypass Restrictions: Access policies configured with decision = "bypass" are rejected by default to prevent accidental exposure of protected endpoints.
 - Team Domain Protection: Renaming a Zero Trust Team domain requires explicit confirmation flags, preventing broken Access URLs and forced WARP client re-enrolments.
+- Billing Change Visibility: Terraform never alters a zone's rate plan unless subscription management is explicitly enabled, and any run that would do so prints a warning naming every zone and the plan it moves to. An accidental downgrade strips WAF, rate limiting and Bot Management entitlements from a live zone.
 
 ### Configuration Correctness Checks
 - DNS Validation: Catches record collisions, proxied TXT records, or proxied records with explicit TTLs before submission.
 - Load Balancer Logic: Verifies pool health-check timeouts are shorter than intervals, and ensures minimum healthy origin counts do not exceed pool capacity.
 - Identity Integrity: Validates that user groups do not assign permissions to undeclared members.
+- Plan Tier Gating: Each zone declares its Cloudflare tier, and a bot management setting the tier cannot support fails the plan naming the field and the plan it needs, rather than failing part-way through an apply on a Cloudflare error that names neither.
+- Bot Rule Placement: Per-category bot rules are emitted into the single ruleset Cloudflare permits per phase per zone, ahead of the baseline and tenant rules, so an allow can take effect without a second ruleset silently fighting the first.
 
 ## Deployment & Multi-Tenant Model
 While the repository supports standalone deployments out of the box, enterprise environments should follow two core architectural patterns:

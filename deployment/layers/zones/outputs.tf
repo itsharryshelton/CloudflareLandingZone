@@ -19,6 +19,25 @@ output "name_servers" {
   value       = { for key, zone in module.zones : key => zone.name_servers }
 }
 
+output "zone_rules" {
+  description = "Per-zone tier, what that tier unlocks, and whether this layer owns the plan and the bot posture. `subscription_id` is null unless the rate plan is managed here."
+  value = {
+    for key, rules in module.zone_rules : key => {
+      zone_tier              = rules.zone_tier
+      tier_capabilities      = rules.tier_capabilities
+      subscription_id        = rules.subscription_id
+      subscription_state     = rules.subscription_state
+      bot_management_managed = rules.bot_management_managed
+      using_latest_bot_model = rules.using_latest_bot_model
+    }
+  }
+}
+
+output "zone_tiers" {
+  description = "Zone key => rate plan. The waf layer gates bot traffic rules on the same value, taken from the same inventory file, so a mismatch here means the two layers were given different zones.tfvars."
+  value       = { for key, zone in local.zones : key => zone.zone_tier }
+}
+
 output "dns_record_ids" {
   description = "Per-zone map of internal DNS record key (TYPE/fqdn/content) to Cloudflare record ID."
   value       = { for key, zone in module.zones : key => zone.dns_record_ids }

@@ -8,6 +8,11 @@ output "waf_policies" {
   }
 }
 
+output "bot_traffic_rules" {
+  description = "Per-policy bot traffic rules as deployed, rule description => Cloudflare expression. Empty for a policy with no bot_traffic. Check this to confirm which verified bot categories each behaviour resolved to before trusting an allow."
+  value       = { for key, policy in module.waf : key => policy.bot_traffic_rules }
+}
+
 output "resolved_zone_ids" {
   description = "Zone key => zone ID as resolved by name. Useful for confirming this layer bound to the zones you expected."
   value       = { for key, zone in data.cloudflare_zone.this : key => zone.id }

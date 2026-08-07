@@ -20,6 +20,106 @@ variable "rate_limit_ruleset_name" {
   description = "Display name for the rate limiting ruleset (http_ratelimit phase)."
 }
 
+variable "bot_traffic" {
+  type = object({
+    search             = optional(string)
+    agent              = optional(string)
+    training           = optional(string)
+    category_overrides = optional(map(list(string)), {})
+    enabled            = optional(bool, true)
+  })
+  default     = null
+  description = <<-EOT
+    Per-behaviour handling of verified bot traffic, emitted as rules at the TOP
+    of the http_request_firewall_custom ruleset - before the baseline and tenant
+    rules, so that an allow can take effect.
+
+    This lives in the waf module rather than in zone_rules because Cloudflare
+    permits exactly one entry-point ruleset per phase per zone, and this module
+    owns that phase. The coarse, zone-level controls (Bot Fight Mode, Super Bot
+    Fight Mode, ai_bots_protection) are in ../zone_rules.
+
+    Behaviours, using Cloudflare's current AI bot taxonomy:
+      - `search`   - indexes content so it can answer questions about it later.
+      - `agent`    - acts in real time on a person's behalf (chat fetch bots,
+                     browser-use agents).
+      - `training` - crawls content to train or fine-tune a model.
+
+    Each takes an action, or is left unset to be ignored entirely:
+      allow | log | managed_challenge | js_challenge | challenge | block
+
+    "allow" is emitted as a `skip` rule scoped to this ruleset, which is what
+    letting a bot through actually means at the edge - it stops evaluation
+    before the tenant's own block rules see the request.
+
+    Limits worth knowing before relying on this:
+      - It matches VERIFIED bots only. An AI crawler that does not identify
+        itself, or spoofs a user agent, has no cf.verified_bot_category and is
+        not touched by these rules. Use `ai_bots_protection` in the zone_rules
+        module for that traffic.
+      - cf.verified_bot_category is a Bot Management field. Cloudflare publishes
+        no plan floor for it, but the neighbouring cf.bot_management.* fields
+        require Enterprise with Bot Management. If the zone lacks entitlement
+        the ruleset is rejected at apply time, not at plan.
+
+    - `category_overrides` - (Optional) Replace the cf.verified_bot_category
+                             values a behaviour matches, keyed by behaviour.
+                             Defaults are in locals.tf. Use this when Cloudflare
+                             adds a category before this module does.
+    - `enabled`            - (Optional) Deploy the bot rules but leave them
+                             inactive. Defaults to true.
+  EOT
+
+  validation {
+    condition = alltrue([
+      for action in [
+        try(var.bot_traffic.search, null),
+        try(var.bot_traffic.agent, null),
+        try(var.bot_traffic.training, null),
+      ] :
+      action == null || contains(
+        ["allow", "log", "managed_challenge", "js_challenge", "challenge", "block"],
+        coalesce(action, "allow"),
+      )
+    ])
+    error_message = "bot_traffic.search, .agent and .training must each be one of: allow, log, managed_challenge, js_challenge, challenge, block - or left unset to leave that behaviour alone."
+  }
+
+  validation {
+    condition = alltrue([
+      for behaviour in keys(try(var.bot_traffic.category_overrides, {})) :
+      contains(["search", "agent", "training"], behaviour)
+    ])
+    error_message = "bot_traffic.category_overrides keys must be one of: search, agent, training."
+  }
+
+  validation {
+    condition = alltrue(flatten([
+      for behaviour, categories in try(var.bot_traffic.category_overrides, {}) : [
+        for category in categories : trimspace(category) != "" && !strcontains(category, "\"")
+      ]
+    ]))
+    error_message = "bot_traffic.category_overrides values must be non-empty category names without double quotes - they are interpolated into a Cloudflare expression."
+  }
+
+  validation {
+    # The behaviour is looked up through a uniformly-typed map rather than by
+    # indexing var.bot_traffic directly: that object mixes strings, a map and a
+    # bool, so Terraform cannot index it with a computed key.
+    condition = alltrue([
+      for behaviour in keys(try(var.bot_traffic.category_overrides, {})) :
+      contains([
+        for name, action in {
+          search   = try(var.bot_traffic.search, null)
+          agent    = try(var.bot_traffic.agent, null)
+          training = try(var.bot_traffic.training, null)
+        } : name if action != null
+      ], behaviour)
+    ])
+    error_message = "bot_traffic.category_overrides names a behaviour that has no action set. Overriding the categories of a behaviour that is not being acted on has no effect and is more likely a typo."
+  }
+}
+
 variable "custom_block_rules" {
   type = list(object({
     name        = string

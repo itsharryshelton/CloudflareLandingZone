@@ -1,39 +1,29 @@
-# ---------------------------------------------------------------------------
-# Normalisation and keying for everything the operator supplies via variables.
-#
-# All of the "make the operator-facing schema safe" logic lives here so that
-# main.tf only ever consumes already-normalised, provider-shaped values. Cheap
-# structural guarantees (types, enums, required fields) are enforced by
-# validation blocks in variables.tf; anything that needs cross-field or
-# cross-record reasoning is derived here and asserted with a precondition in
-# main.tf.
-# ---------------------------------------------------------------------------
-
 locals {
-  # -------------------------------------------------------------------------
   # Zone settings
-  # -------------------------------------------------------------------------
 
-  # Secure baseline + caller overrides. The dedicated ssl_mode / min_tls_version
-  # variables win over anything supplied through var.zone_settings.
+  # The secure baseline. It lives here rather than as var.zone_settings' default
+  # because a caller that sets zone_settings at all replaces that default
+  zone_settings_baseline = {
+    automatic_https_rewrites = "on"
+    opportunistic_encryption = "on"
+    browser_check            = "on"
+    http3                    = "on"
+  }
+
+  # Baseline, then caller overrides, then the dedicated variables - which win
+  # over anything supplied through var.zone_settings.
   zone_settings = merge(
+    local.zone_settings_baseline,
     var.zone_settings,
     {
-      ssl             = var.ssl_mode
-      min_tls_version = var.min_tls_version
+      ssl              = var.ssl_mode
+      min_tls_version  = var.min_tls_version
+      tls_1_3          = var.tls_1_3
+      always_use_https = var.always_use_https
     }
   )
 
-  # -------------------------------------------------------------------------
   # DNS records
-  # -------------------------------------------------------------------------
-
-  # NOTE: the set of proxiable record types (A, AAAA, CNAME) is enforced by a
-  # validation block in variables.tf rather than a local here, because variable
-  # validation cannot reference locals.
-
-  # Lower-cased, whitespace- and trailing-dot-trimmed input names, positionally
-  # aligned with var.dns_records.
   dns_input_names = [
     for record in var.dns_records : trimsuffix(lower(trimspace(record.name)), ".")
   ]
@@ -63,11 +53,6 @@ locals {
 
   # Stable, unique key per record so reordering the input list never forces a
   # replacement. type+name+content is unique for well-formed record sets.
-  #
-  # Grouped with `...` deliberately: a plain `for` object expression aborts with
-  # Terraform's generic "Duplicate object key" error pointing into this file,
-  # which tells the operator nothing useful. Grouping keeps evaluation alive so
-  # main.tf can fail the plan with an actionable message instead.
   dns_records_grouped = {
     for record in local.dns_records_normalised :
     "${record.type}/${record.name}/${record.content}" => record...
