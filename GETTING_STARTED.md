@@ -49,8 +49,8 @@ Only affected work runs. Change `accounts/account_a/waf.tfvars` and only the `wa
 layer for `account_a` is planned. Change a module and every layer that calls it is
 planned, for every account.
 
-`zones` goes first, then `waf` and `load_balancing`. The apply workflow handles that
-ordering for you.
+`zones` goes first, then `waf`, `load_balancing` and `r2`. The apply workflow handles
+that ordering for you.
 
 There is no destroy button. Removing a zone from configuration will show up as a
 destroy in a plan, and you should treat that with suspicion, because it takes every
@@ -78,6 +78,7 @@ deployment/accounts/account_a/
 ├── dns.tfvars                  zone settings, TLS posture, bot posture, DNS records
 ├── waf.tfvars                  firewall and rate limiting policies
 ├── load_balancing.tfvars       load balancers, pools, health checks
+├── r2.tfvars                   object storage buckets, CORS, lifecycle, retention
 ├── account_governance.tfvars   who can sign in to the account, and with what
 └── zerotrust.tfvars            Cloudflare Access: who reaches what, and how
 ```
@@ -209,9 +210,9 @@ The key, `shop` here, is permanent. Renaming it later destroys the zone and recr
 it, taking every DNS record with it. Keys are scoped to their account, so
 `account_a`'s `primary` and `account_b`'s `primary` are unrelated.
 
-### Use two pull requests if the zone also needs WAF or a load balancer
+### Use two pull requests if the zone also needs WAF, a load balancer or an R2 custom domain
 
-The `waf` and `load_balancing` layers find a zone by looking its domain name up
+The `waf`, `load_balancing` and `r2` layers find a zone by looking its domain name up
 through the Cloudflare API. Before the zone exists there is nothing to find, so a
 pull request that adds a zone *and* its WAF policy will fail the `waf` plan and you
 will not be able to merge it.
@@ -219,8 +220,8 @@ will not be able to merge it.
 Split it:
 
 1. First pull request adds the zone. Merge and approve the apply.
-2. Second pull request adds the WAF or load balancer configuration. Its plan now
-   resolves the zone and succeeds.
+2. Second pull request adds the WAF, load balancer or custom domain configuration.
+   Its plan now resolves the zone and succeeds.
 
 The apply workflow itself is not the problem here. It plans tier 2 only after tier 1
 has applied, so if both changes ever do land on `main` together it still works. It is
@@ -238,7 +239,7 @@ zone's Overview page. Set them at the registrar. The zone goes `active` within
 minutes to hours.
 
 Until it does, expect `waf` and `load_balancing` plans for that zone to fail on the
-lookup.
+lookup, and `r2` too if a bucket is served from a hostname in it.
 
 ## Task: add a WAF rule
 
@@ -425,6 +426,101 @@ plan. Before turning it on:
 
 The plan prints a warning listing every zone whose plan the run would change.
 Read it. It is a `check`, so it does not block the apply.
+
+## Task: add an R2 bucket
+
+Edit `deployment/accounts/<account>/r2.tfvars`. The key is the Terraform address,
+`name` is the bucket in Cloudflare, and both are permanent - changing either
+destroys and recreates the bucket, which takes every object with it. R2 has no
+versioning, so nothing comes back.
+
+```hcl
+r2_buckets = {
+  app_uploads = {
+    name = "account-a-app-uploads"
+
+    lifecycle_rules = [
+      { id = "expire-raw", prefix = "raw/", delete_objects_after_days = 30 },
+    ]
+  }
+}
+```
+
+That is the whole thing for a private bucket read server-side. Leave
+`lifecycle_rules` out entirely and the bucket inherits the platform baseline,
+which aborts incomplete multipart uploads after seven days - worth having,
+because those parts bill like stored objects and never show up in a listing.
+
+Ages are in whole days. The two `*_on_date` fields are the exception and want a
+full timestamp, `2027-01-01T00:00:00Z`, because R2 rejects a bare date.
+
+### Serving a bucket publicly
+
+Put it on a hostname in a zone you own:
+
+```hcl
+public_assets = {
+  name = "account-a-public-assets"
+
+  custom_domains = [
+    { zone_key = "primary", hostname = "assets.example.com" },
+  ]
+
+  cors_rules = [
+    {
+      allowed_origins = ["https://app.example.com"]
+      allowed_methods = ["GET", "HEAD"]
+    },
+  ]
+}
+```
+
+The hostname must sit inside that zone's domain, and the zone has to exist
+already - see [the two-pull-request note](#use-two-pull-requests-if-the-zone-also-needs-waf-a-load-balancer-or-an-r2-custom-domain).
+
+**Do not also add the hostname to `dns.tfvars`.** Cloudflare creates the DNS
+record for you when the custom domain is attached, and that record is owned by
+R2 rather than by you. The `zones` layer will not delete it - it only manages
+records it created itself - but if you declare the same hostname there as well,
+its apply tries to create a record that already exists and fails. One hostname,
+one place: `r2.tfvars`.
+
+Everything in a bucket served this way is public. R2 has no per-object
+permissions, so anyone who knows or guesses a key can read it. Put a Worker or
+Cloudflare Access in front of anything that is not genuinely meant for the world.
+
+The plan will refuse `public_r2_dev_domain = true`, which is the `pub-<hash>.r2.dev`
+URL. It serves the same content with no cache, no branding and no zone controls,
+and Cloudflare means it for development. A custom domain is the answer for
+anything real. It will also refuse `allowed_origins = ["*"]` - list the origins
+that need access.
+
+### Retention
+
+`lock_rules` stops objects being deleted or overwritten until retention expires.
+Nobody can override it: not the application, not an operator with full R2
+credentials, and not this pipeline.
+
+```hcl
+lock_rules = [
+  { id = "retain-audit-logs", prefix = "audit/", retain_for_days = 365 },
+]
+```
+
+Add one only where somebody has asked for it in writing. `retain_indefinitely`
+means those objects, and the bucket holding them, can never be removed.
+
+Keep lock prefixes clear of any lifecycle rule that deletes. R2 accepts the
+combination and then refuses each deletion silently, so the storage is paid for
+indefinitely; the plan fails rather than letting that happen.
+
+### What is not here
+
+R2 access keys, and objects. A key is a credential and credentials never enter
+Terraform state. Uploading objects is the application's job - if you genuinely
+need Terraform to place a file in a bucket, that is the AWS provider's
+`aws_s3_object` against the R2 S3 endpoint, and it needs a credential this
+repository deliberately does not hold.
 
 ## Task: give somebody access to the Cloudflare dashboard
 
@@ -762,7 +858,7 @@ and the fix is in the message.
 
 | Message | What happened |
 |---|---|
-| `failed to make http request` on `waf` or `load_balancing` | The zone does not exist yet. Add the zone in its own pull request first. |
+| `failed to make http request` on `waf`, `load_balancing` or `r2` | The zone does not exist yet. Add the zone in its own pull request first. |
 | `zone_key does not match any entry in var.zones` | A typo, or you added a policy for a zone you have not declared. Valid keys are listed in the error. |
 | `zone_config has entries with no matching zone in var.zones` | A key in `dns.tfvars` that is not in `zones.tfvars`. Without the check that zone would deploy with no DNS records. |
 | `Unknown baseline rule name` | Misspelt catalogue entry. The error lists every valid name. |
@@ -782,6 +878,12 @@ and the fix is in the message.
 | `health_check_timeout ... must be shorter than health_check_interval` | Probes would overlap. |
 | `must leave mitigation_timeout unset or 0` | A log-only rate limit takes no timeout. Delete the line. |
 | `custom_block_rules[*].action must be one of` | Probably `skip`, which is not supported. |
+| `These buckets ask for anonymous public access on their r2.dev URL` | The r2.dev domain serves every object to anyone. Use a `custom_domains` entry, or unlock `allow_public_r2_dev_domains` on its own pull request. |
+| `These CORS rules allow every origin on the internet` | `allowed_origins = ["*"]`. List the origins that actually need access. |
+| `These lifecycle rules delete objects with an empty prefix` | That is the whole bucket on a schedule, and R2 has no versioning. Scope it with a `prefix`. |
+| `A lifecycle rule would delete objects that an object lock rule retains` | R2 accepts both and then refuses the deletion silently, so the storage is paid for forever. Narrow one of the two prefixes. |
+| `A custom domain hostname is not inside the zone it references` | The hostname must sit under that zone's domain. |
+| `Each lifecycle_rules[*] date must be a full RFC3339 timestamp` | `2027-01-01` is rejected by R2; write `2027-01-01T00:00:00Z`. |
 | `missing: secret CLOUDFLARE_API_TOKEN (environment ...)` | The environment for that account and layer does not exist yet, or has no token. Administration, not configuration. |
 
 ### The plan wants to destroy something

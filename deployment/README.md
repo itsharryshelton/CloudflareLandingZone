@@ -9,15 +9,17 @@ Everything you edit lives here. The modules under [../modules/](../modules/) sta
 │   ├── zones/                         # own state: zones, settings, DNS
 │   ├── waf/                           # own state: firewall + rate limiting
 │   ├── load_balancing/                # own state: monitors, pools, LBs
+│   ├── r2/                            # own state: buckets, CORS, lifecycle, domains
 │   ├── account_governance/            # own state: members, user groups
 │   └── zerotrust/                     # own state: Access, policies, tokens, IdPs
 └── accounts/                          # config, one tree per Cloudflare account
     ├── account_a/
     │   ├── account.tfvars             # account id       -> every layer
-    │   ├── zones.tfvars               # zone inventory   -> zones, waf, load_balancing
+    │   ├── zones.tfvars               # zone inventory   -> zones, waf, load_balancing, r2
     │   ├── dns.tfvars                 # zone config      -> zones
     │   ├── waf.tfvars                 # policies         -> waf
     │   ├── load_balancing.tfvars      # load balancers   -> load_balancing
+    │   ├── r2.tfvars                  # object storage   -> r2
     │   ├── account_governance.tfvars  # dashboard access -> account_governance
     │   └── zerotrust.tfvars           # Access           -> zerotrust
     └── account_b/
@@ -30,13 +32,14 @@ Layers are named after the Cloudflare product they manage, with no ordering pref
 
 ```
 zones ──┬── waf
-        └── load_balancing        (waf and load_balancing are independent)
+        ├── load_balancing        (waf, load_balancing and r2 are independent)
+        └── r2                    (only when a bucket has a custom domain)
 
 account_governance                (no zone involved, so no dependency at all)
 zerotrust                         (same, but see below)
 ```
 
-`waf` and `load_balancing` have no relationship to each other, so numbering them would assert a sequence that does not exist. `account_governance` touches no zone, so it neither creates nor resolves one and can apply whenever. `zerotrust` holds no zone in its state either, but an Access application only ever sees a request if the DNS record for its hostname exists and is proxied - so `zones` in practice comes first, and the failure if it does not is a login page nobody can reach rather than a Terraform error. Ordering is enforced where it can actually be enforced - pipeline stage dependencies, and the fact that both dependent layers resolve a zone by name and fail if it is absent - not by a filename that merely hints at it.
+`waf`, `load_balancing` and `r2` have no relationship to each other, so numbering them would assert a sequence that does not exist. `account_governance` touches no zone, so it neither creates nor resolves one and can apply whenever. `zerotrust` holds no zone in its state either, but an Access application only ever sees a request if the DNS record for its hostname exists and is proxied - so `zones` in practice comes first, and the failure if it does not is a login page nobody can reach rather than a Terraform error. `r2` only reaches for a zone when a bucket is served from a custom domain; a deployment of private buckets looks nothing up. Ordering is enforced where it can actually be enforced - pipeline stage dependencies, and the fact that the dependent layers resolve a zone by name and fail if it is absent - not by a filename that merely hints at it.
 
 ## Why split this way
 
@@ -51,9 +54,9 @@ version bump would touch N×M module sources. Adding a zone here is two edits to
 
 ## Layers do not read each other's state
 
-The waf and load_balancing layers resolve a zone key to a zone ID with `data "cloudflare_zone"` filtered by name, not `terraform_remote_state`. The states stay independent - either layer can be applied, re-inited or relocated without the other noticing.
+The waf, load_balancing and r2 layers resolve a zone key to a zone ID with `data "cloudflare_zone"` filtered by name, not `terraform_remote_state`. The states stay independent - any of them can be applied, re-inited or relocated without the others noticing.
 
-The cost is real and worth knowing: those layers call the Cloudflare API at plan time, so **only `zones` can be planned offline**, and the other two fail if the zone does not exist yet. Apply `zones` first; `waf` and `load_balancing` can then run in either order, or concurrently. `account_governance` reads the API too - it resolves role and permission group names to IDs - and so does `zerotrust`, which reads the account's existing Zero Trust organization so it can adopt the team name rather than demand one. Neither waits on another layer. CI validates every layer offline and plans only `zones` without credentials.
+The cost is real and worth knowing: those layers call the Cloudflare API at plan time, so **only `zones` can be planned offline**, and the others fail if the zone does not exist yet. Apply `zones` first; `waf`, `load_balancing` and `r2` can then run in any order, or concurrently. `account_governance` reads the API too - it resolves role and permission group names to IDs - and so does `zerotrust`, which reads the account's existing Zero Trust organization so it can adopt the team name rather than demand one. Neither waits on another layer. CI validates every layer offline and plans only `zones` without credentials.
 
 ## Config precedence
 
@@ -94,7 +97,7 @@ terraform plan \
   -var-file=../../accounts/account_a/dns.tfvars
 ```
 
-`waf` takes `account.tfvars`, `zones.tfvars`, `waf.tfvars`. `load_balancing` takes `account.tfvars`, `zones.tfvars`, `load_balancing.tfvars`. `account_governance` takes `account.tfvars` and `account_governance.tfvars`, and no zone inventory at all. `zerotrust` takes `account.tfvars` and `zerotrust.tfvars`, plus `TF_VAR_identity_provider_secrets` in the environment for any identity provider that authenticates against an OAuth application.
+`waf` takes `account.tfvars`, `zones.tfvars`, `waf.tfvars`. `load_balancing` takes `account.tfvars`, `zones.tfvars`, `load_balancing.tfvars`. `r2` takes `account.tfvars`, `zones.tfvars`, `r2.tfvars`. `account_governance` takes `account.tfvars` and `account_governance.tfvars`, and no zone inventory at all. `zerotrust` takes `account.tfvars` and `zerotrust.tfvars`, plus `TF_VAR_identity_provider_secrets` in the environment for any identity provider that authenticates against an OAuth application.
 
 ### Remote state
 
@@ -131,7 +134,7 @@ Resources reference each other by **logical key**, never by ID. A WAF policy say
 
 Keys are scoped to their account, so `account_a`'s `primary` and `account_b`'s `primary` are unrelated.
 
-`preflight.tf` in each layer catches what neither variable validation nor a module block can: a `zone_key` pointing at nothing, a `zone_config` key with no matching zone, two WAF policies fighting over one zone, a load balancer hostname outside its zone's domain, and a user group naming a member who was never declared. All fail the plan with the offender named.
+`preflight.tf` in each layer catches what neither variable validation nor a module block can: a `zone_key` pointing at nothing, a `zone_config` key with no matching zone, two WAF policies fighting over one zone, a load balancer hostname outside its zone's domain, an R2 bucket asking to be served anonymously, and a user group naming a member who was never declared. All fail the plan with the offender named.
 
 ## WAF Baseline
 
@@ -224,6 +227,116 @@ hatch for adopting this on an account that already has people in it.
 Scoping a policy to less than the whole account needs a resource group, and the
 Cloudflare provider has no resource for creating one. Name an existing group with
 `resource_group_names`; leave it empty and the policy covers the account.
+
+## R2
+
+Object storage: the buckets, their CORS and lifecycle policy, their retention
+rules, and the hostnames they are served from.
+
+```hcl
+r2_buckets = {
+  public_assets = {
+    name = "account-a-public-assets"
+
+    cors_rules = [
+      {
+        allowed_origins = ["https://app.example.com"]
+        allowed_methods = ["GET", "HEAD"]
+        max_age_seconds = 3600
+      },
+    ]
+
+    lifecycle_rules = [
+      { id = "expire-raw", prefix = "raw/", delete_objects_after_days = 30 },
+    ]
+
+    custom_domains = [
+      { zone_key = "primary", hostname = "assets.example.com" },
+    ]
+  }
+}
+```
+
+### A custom domain's DNS record is not yours to declare
+
+Attaching a custom domain makes Cloudflare create the DNS record itself, in the
+zone, pointing the hostname at the bucket. That record is owned by R2 and is not
+editable in the dashboard.
+
+The `zones` layer will not touch it. `cloudflare_dns_record` is declared with a
+`for_each` over the records in `dns.tfvars`, so Terraform holds one resource per
+record it created and nothing else - there is no data source enumerating the
+zone and no prune. A record it did not make is invisible to it, and an apply
+cannot propose destroying it. You do not need to add it to dns.tfvars!
+
+### The AWS provider is no longer needed for this
+
+Cloudflare's Terraform examples still say the provider "can only manage buckets"
+and point at the AWS provider for
+[CORS and object lifecycles](https://developers.cloudflare.com/r2/examples/terraform-aws/).
+That page is written against provider v4. Since 5.x the Cloudflare provider owns
+all of it natively - `cloudflare_r2_bucket_cors`, `_lifecycle`, `_lock`,
+`r2_custom_domain` and `r2_managed_domain` - and this layer uses those.
+
+The distinction matters because the AWS route needs an R2 **access key**: an S3
+credential with read and write over the objects themselves. Adding one to every
+pipeline environment to configure CORS would put data-plane access in a place
+that only needs control-plane access. This layer's token cannot read or delete a
+single object.
+
+The AWS provider is still the answer for uploading objects (`aws_s3_object`),
+which is deliberately out of scope here - a landing zone provisions the bucket,
+the application owns what is in it.
+
+### Three settings cannot be deleted, only overwritten
+
+Cloudflare's API has no delete for a bucket's lifecycle policy, its lock rules or
+its r2.dev setting, and the provider warns as much at plan time. A resource that
+simply disappeared from the graph would leave its last-applied policy live in R2
+while Terraform reported it gone, so the module declares all three
+unconditionally and expresses "none" as an empty rule list. Emptying
+`lifecycle_rules` therefore genuinely clears the policy. CORS does support
+delete, so it is created only when there are rules.
+
+The same reasoning is why the r2.dev public URL is declared for every bucket
+rather than only the public ones: it is the single toggle that turns a private
+bucket into an anonymously readable one, it is two clicks away in the dashboard,
+and a plan that said "no changes" while it was on would be wrong.
+
+### Governing defaults
+
+| Setting | Default | Effect |
+|---|---|---|
+| `allow_public_r2_dev_domains` | `false` | A bucket asking for its `pub-<hash>.r2.dev` URL fails the plan. That URL serves every object to anyone, unauthenticated and uncached, and Cloudflare positions it as a development convenience. Serve objects publicly through `custom_domains`, where the hostname sits in a zone you own and inherits its cache, WAF and TLS posture. |
+| `allow_wildcard_cors_origins` | `false` | `allowed_origins = ["*"]` fails the plan. A wildcard lets any page a visitor opens read the bucket from their browser, using their network position. |
+| `allow_bucket_wide_object_expiry` | `false` | A lifecycle rule that deletes objects with an empty prefix fails the plan. An empty prefix means the whole bucket, R2 has no versioning, and it is usually a typo in `prefix`. Aborting incomplete multipart uploads is unaffected. |
+| `default_bucket_location` | `null` | Cloudflare places each bucket near its first write. Set it (`"weur"`) to land the fleet in one region. A hint, honoured only at creation. |
+| `default_jurisdiction` | `null` | Set it (`"eu"`) where residency is a regulatory requirement. Unlike location it is a guarantee - and it is fixed, so moving an existing bucket means recreating it with its objects. |
+| `default_storage_class` | `"Standard"` | InfrequentAccess is cheaper to store and dearer to read, with a minimum billable duration, so a fast-turnover bucket costs more in it. Move ageing objects across with a lifecycle rule. |
+| `default_custom_domain_min_tls` | `"1.2"` | Cloudflare's own default is 1.0. |
+
+### What this layer does not hold
+
+No R2 access keys. A key is a credential, credentials never enter Terraform
+state, and an S3 key with object write is a data-loss tool rather than an
+infrastructure one.
+
+And not the Terraform state bucket. Every layer in this repository keeps its
+state in R2, and a layer that managed the bucket its own state lives in could
+propose destroying it - a plan that cannot be applied safely in either order.
+Create the state bucket out of band, once, and leave it out of `r2_buckets`.
+
+### One thing to know before you rely on a lock rule
+
+An object under an active lock rule cannot be deleted or overwritten by anybody
+until its retention expires: not the application, not an operator with full R2
+credentials, and not this pipeline. That is the point of it and also the risk -
+a rule is far easier to add than to live with, and `retain_indefinitely` means
+the objects, and the bucket holding them, can never be removed.
+
+The module fails the plan where a lifecycle deletion overlaps a lock rule's
+prefix. R2 accepts that combination and then refuses the deletion object by
+object, so the storage is paid for indefinitely and nothing reports why.
 
 ## Zero Trust
 
@@ -385,7 +498,7 @@ merely displayed, and copes with an ID that is not known yet.
 
 ## Adding a new account
 
-1. `mkdir accounts/<name>/`, copy the seven tfvars files from `account_a`.
+1. `mkdir accounts/<name>/`, copy the eight tfvars files from `account_a`.
 2. Set `cloudflare_account_id`, the zone inventory, and the per-layer config.
 3. Provision a scoped API token per layer, and a state key prefix `<name>/`.
 4. Add the account to the pipeline matrix.

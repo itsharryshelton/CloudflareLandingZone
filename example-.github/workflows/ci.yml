@@ -320,7 +320,7 @@ jobs:
 
           assert_matrix "the zone inventory reaches only the layers that declare it" \
             "deployment/accounts/account_b/zones.tfvars" \
-            '[{"account":"account_b","layer":"load_balancing"},{"account":"account_b","layer":"waf"},{"account":"account_b","layer":"zones"}]' || rc=1
+            '[{"account":"account_b","layer":"load_balancing"},{"account":"account_b","layer":"r2"},{"account":"account_b","layer":"waf"},{"account":"account_b","layer":"zones"}]' || rc=1
 
           assert_matrix "an account governance change plans only that layer, only that account" \
             "deployment/accounts/account_a/account_governance.tfvars" \
@@ -330,9 +330,13 @@ jobs:
             "deployment/accounts/account_a/zerotrust.tfvars" \
             '[{"account":"account_a","layer":"zerotrust"}]' || rc=1
 
+          assert_matrix "an R2 change plans only that layer, only that account" \
+            "deployment/accounts/account_a/r2.tfvars" \
+            '[{"account":"account_a","layer":"r2"}]' || rc=1
+
           # Apply order must put the zone-creating layer in the first tier and the
-          # zone-consuming layers in a later one. If this regresses, waf and
-          # load_balancing plan against zones that do not exist yet and fail.
+          # zone-consuming layers in a later one. If this regresses, waf,
+          # load_balancing and r2 plan against zones that do not exist yet and fail.
           #
           # Tier 1 is not asserted to be *only* zones: a layer that touches no
           # zone at all - account_governance, for one - has no upstream dependency
@@ -343,8 +347,8 @@ jobs:
           if ! jq -e '.[0] | index("zones") != null' <<<"$order" >/dev/null; then
             echo "::error::apply tier 1 must contain 'zones', got '$tier1' (full order: $order)"
             rc=1
-          elif [[ "$tier2" != "load_balancing,waf" ]]; then
-            echo "::error::apply tier 2 should be 'load_balancing,waf', got '$tier2' (full order: $order)"
+          elif [[ "$tier2" != "load_balancing,r2,waf" ]]; then
+            echo "::error::apply tier 2 should be 'load_balancing,r2,waf', got '$tier2' (full order: $order)"
             rc=1
           else
             echo "ok: zones applies in tier 1, ahead of the layers that look a zone up ($order)"

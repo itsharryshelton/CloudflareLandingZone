@@ -37,9 +37,10 @@ Terraform source, so adding an account, a layer or a module needs no edit here:
 - **Apply order**: a layer that *creates* zones must apply before a layer that
   *looks one up* with `data "cloudflare_zone"`, since that read fails until the
   zone exists. Today: `zones`, `account_governance` and `zerotrust`
-  first, then `waf` and `load_balancing` concurrently. `account_governance` and
-  `zerotrust` are in the first tier because they touch no zone at all, not
-  because anything waits on them.
+  first, then `waf`, `load_balancing` and `r2` concurrently. `account_governance`
+  and `zerotrust` are in the first tier because they touch no zone at all, not
+  because anything waits on them. `r2` is in the second because a bucket can be
+  served from a custom domain, even where no bucket currently is.
 
 `ci.yml` asserts all three, so a regression in the derivation fails a PR rather
 than silently causing a merged change never to be planned.
@@ -68,14 +69,15 @@ two tier stages. If a new layer makes the graph deeper, both `discover` and
 ### Environments
 
 Per account: **one plan environment, plus one apply environment per layer.** For
-two accounts and five layers that is twelve environments.
+two accounts and six layers that is fourteen environments.
 
 | Environment                          | Reviewers    | `CLOUDFLARE_API_TOKEN` scope                                                                                                                                    |
 | -------------------------------------| --------------| -----------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `account_a-plan`                     | none         | read-only: `Zone:Read`, `DNS:Read`, `Zone Settings:Read`, `Zone WAF:Read`, `Account Load Balancers:Read`, `Zone Load Balancers:Read`, `Account Settings:Read` |
+| `account_a-plan`                     | none         | read-only: `Zone:Read`, `DNS:Read`, `Zone Settings:Read`, `Zone WAF:Read`, `Account Load Balancers:Read`, `Zone Load Balancers:Read`, `Workers R2 Storage:Read`, `Account Settings:Read` |
 | `account_a-zones-apply`              | **required** | `Zone:Edit`, `DNS:Edit`, `Zone Settings:Edit`                                                                                                                    |
 | `account_a-waf-apply`                | **required** | `Zone WAF:Edit`, `Zone:Read`, notably *not* `Zone:Edit`                                                                                                         |
 | `account_a-load_balancing-apply`     | **required** | `Account Load Balancers:Edit`, `Zone Load Balancers:Edit`, `Zone:Read`                                                                                          |
+| `account_a-r2-apply`                 | **required** | `Workers R2 Storage:Edit` at account scope; plus `Zone:Read` and `Zone DNS:Edit` only if a bucket has a custom domain                                            |
 | `account_a-account_governance-apply` | **required** | `Account Settings:Edit`, and nothing at zone scope                                                                                                              |
 | `account_a-zerotrust-apply`          | **required** | `Access: Organizations, Identity Providers, and Groups:Edit`, `Access: Apps and Policies:Edit`, `Access: Service Tokens:Edit`, all at account scope             |
 
@@ -83,6 +85,13 @@ two accounts and five layers that is twelve environments.
 layer**: the scopes are the ones documented in each layer's `providers.tf`, and
 splitting them is the reason the layers were split in the first place. A WAF
 token cannot delete a zone.
+
+`Workers R2 Storage:Edit` is a control-plane permission: it creates, configures and deletes buckets, but it
+cannot read or write a single object. Object access goes through an R2 access
+key, which is a separate S3 credential that this repository deliberately never
+creates or holds - see [../../deployment/README.md](../../deployment/README.md).
+The exception is `R2_ACCESS_KEY_ID` below, which is scoped to the state bucket
+alone.
 
 The `account_governance` token deserves separate thought. `Account Settings:Edit`
 is what invites members and creates user groups, which makes it the only token in
@@ -123,9 +132,9 @@ never satisfy a required check.
 
 ## Operating notes
 
-**A PR that adds a new zone *and* its WAF or load balancer config in one change
-will fail the `waf` / `load_balancing` plans.** Those layers resolve the zone via
-`data "cloudflare_zone"`, and it does not exist yet.
+**A PR that adds a new zone *and* its WAF, load balancer or R2 custom domain
+config in one change will fail the `waf` / `load_balancing` / `r2` plans.** Those
+layers resolve the zone via `data "cloudflare_zone"`, and it does not exist yet.
 
 Split it into two pull requests: the zone first, then whatever depends on it. By the
 time the second is planned the zone exists and the lookup resolves.
