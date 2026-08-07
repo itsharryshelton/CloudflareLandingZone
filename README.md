@@ -64,6 +64,8 @@ CFLZ prioritises fail-safe operations. Instead of failing halfway through a live
 - Zero Trust Bypass Restrictions: Access policies configured with decision = "bypass" are rejected by default to prevent accidental exposure of protected endpoints.
 - Team Domain Protection: Renaming a Zero Trust Team domain requires explicit confirmation flags, preventing broken Access URLs and forced WARP client re-enrolments.
 - Billing Change Visibility: Terraform never alters a zone's rate plan unless subscription management is explicitly enabled, and any run that would do so prints a warning naming every zone and the plan it moves to. An accidental downgrade strips WAF, rate limiting and Bot Management entitlements from a live zone.
+- R2 Public Exposure Control: A bucket asking for its anonymous `r2.dev` URL, or a CORS rule allowing every origin, fails the plan naming the bucket. Both are one dashboard click away and both make object data readable from any visitor's browser.
+- R2 Irreversible Deletion Guard: A lifecycle rule that expires objects across an entire bucket needs an explicit unlock, because R2 has no versioning and nothing deleted comes back. A lifecycle deletion that collides with an object lock rule fails the plan too - Cloudflare accepts that pair and then refuses the deletion silently, forever.
 
 ### Configuration Correctness Checks
 - DNS Validation: Catches record collisions, proxied TXT records, or proxied records with explicit TTLs before submission.

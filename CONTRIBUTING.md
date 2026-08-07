@@ -196,13 +196,19 @@ request, read what CI says, push a fix. `ci.yml` runs on every push and covers:
 | Config guards | Every account var file maps to a layer, backend blocks stay commented, nothing secret is tracked |
 | Mapping self test | The account and layer derivation in `.github/scripts/` still produces what it should |
 
-Only `zones` can be planned without credentials. `waf` and `load_balancing` resolve
-zones through a data source, `account_governance` resolves role and permission
-group names the same way, and `zerotrust` reads the account's existing Zero Trust
-organization; each is a real API read at plan time. Those four are covered by
-`validate` in CI, and by `terraform-plan.yml` on a pull request using a read-only
-token. Which layers qualify is derived, not listed, so a new layer is classified
-correctly without editing the workflow.
+Only `zones` can be planned without credentials. `waf`, `load_balancing` and `r2`
+resolve zones through a data source, `account_governance` resolves role and
+permission group names the same way, and `zerotrust` reads the account's existing
+Zero Trust organization; each is a real API read at plan time. Those five are
+covered by `validate` in CI, and by `terraform-plan.yml` on a pull request using
+a read-only token. Which layers qualify is derived, not listed, so a new layer is
+classified correctly without editing the workflow.
+
+`r2` is the one that classifies conservatively. It reads a zone only for a
+bucket served from a custom domain, so a deployment of private buckets makes no
+API call at all - but the `data` block is in the source either way, so the
+derivation puts it in the second tier regardless. That is the right direction to
+be wrong in.
 
 A layer that reads the API is still testable offline, and a new guardrail in one
 should be proven before review. Copy the layer to a scratch directory, delete its
@@ -234,10 +240,12 @@ plans cleanly, your check is doing nothing. Remove the bad value in a follow up
 commit before asking for review, and say in the pull request description which run
 proved the check fires, so a reviewer does not have to take it on trust.
 
-For guardrails on `waf`, `load_balancing`, `account_governance` or `zerotrust`,
-the same trick works against `terraform-plan.yml` rather than `ci.yml`, since
-those layers need a real read - or offline, with the stubbed data source
-described above.
+For guardrails on `waf`, `load_balancing`, `r2`, `account_governance` or
+`zerotrust`, the same trick works against `terraform-plan.yml` rather than
+`ci.yml`, since those layers need a real read - or offline, with the stubbed data
+source described above. `r2` is easier than the rest: a bucket with no
+`custom_domains` reads nothing, so every guardrail except the two zone checks can
+be fired with a dummy token and no stubbing at all.
 
 ## Pull requests
 
