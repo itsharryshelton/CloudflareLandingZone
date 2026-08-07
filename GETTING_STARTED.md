@@ -74,8 +74,8 @@ You only ever edit files under `deployment/accounts/`.
 ```
 deployment/accounts/account_a/
 ├── account.tfvars              the Cloudflare account ID
-├── zones.tfvars                which zones exist: key -> domain name
-├── dns.tfvars                  zone settings and DNS records
+├── zones.tfvars                which zones exist: key -> domain name, and its tier
+├── dns.tfvars                  zone settings, TLS posture, bot posture, DNS records
 ├── waf.tfvars                  firewall and rate limiting policies
 ├── load_balancing.tfvars       load balancers, pools, health checks
 ├── account_governance.tfvars   who can sign in to the account, and with what
@@ -298,6 +298,133 @@ yet, so offering it would produce plans that fail on apply.
 
 New to Cloudflare expressions? Build and test one in the dashboard under Security,
 then Rules, and paste the expression here rather than writing it blind.
+
+## Task: set a zone's tier
+
+Every zone declares the Cloudflare plan it is on, in `zones.tfvars`:
+
+```hcl
+zones = {
+  primary = { domain_name = "example.com", zone_tier = "business" }
+  mail    = { domain_name = "example.org" }
+}
+```
+
+Leave `zone_tier` out and the zone falls back to `default_zone_tier`, which is
+`free`. Valid values are the plan IDs Cloudflare's API accepts: `free`, `lite`,
+`pro`, `pro_plus`, `business`, `enterprise`, and the reseller equivalents
+`partners_free`, `partners_pro`, `partners_business`, `partners_enterprise`,
+`partners_ent`.
+
+It lives in `zones.tfvars` rather than `dns.tfvars` because the `waf` layer needs
+it too, and that layer is only ever given the inventory file.
+
+**By default this describes the plan, it does not buy it.** Nothing in a normal
+run changes a Cloudflare subscription. What `zone_tier` does is gate features: a
+bot management setting the plan cannot support fails the plan, naming the field
+and the tier it needs, instead of failing mid-apply with a Cloudflare error that
+names neither.
+
+If you do want Terraform to own the plan itself, set
+`manage_zone_subscriptions = true` on the `zones` layer, or `manage_subscription
+= true` on one zone in `dns.tfvars`. Read the warning under "Managing
+subscriptions changes billing" before you do.
+
+## Task: control bot and AI crawler traffic
+
+Bot handling is split across two layers, and the split is not arbitrary.
+Cloudflare allows exactly one entry-point ruleset per phase per zone, and the
+`waf` layer already owns the phase the per-category rules need.
+
+**Coarse, zone-level posture, in `dns.tfvars`:**
+
+```hcl
+zone_config = {
+  primary = {
+    bot_management = {
+      sbfm_definitely_automated = "block"
+      sbfm_likely_automated     = "managed_challenge"
+      sbfm_verified_bots        = "allow"
+
+      ai_bots_protection = "block"
+      crawler_protection = "enabled"
+    }
+  }
+}
+```
+
+**Per-behaviour rules, in `waf.tfvars`:**
+
+```hcl
+waf_policies = {
+  primary = {
+    zone_key = "primary"
+
+    bot_traffic = {
+      search   = "allow"
+      agent    = "managed_challenge"
+      training = "block"
+    }
+  }
+}
+```
+
+The three behaviours are Cloudflare's current AI bot taxonomy:
+
+| Behaviour | What the bot is doing |
+|---|---|
+| `search` | Indexes your content so it can answer questions about it later |
+| `agent` | Acts in real time on a person's behalf, such as a chat fetch bot or a browser-use agent |
+| `training` | Crawls your content to train or fine-tune a model, absorbing it permanently |
+
+Each takes `allow`, `log`, `managed_challenge`, `js_challenge`, `challenge` or
+`block`. Leave one out and that behaviour is not touched.
+
+Two things worth understanding before you rely on this:
+
+- **These rules only see verified bots.** A crawler that does not identify
+  itself, or spoofs a browser user agent, has no category and passes straight
+  through them. That traffic is what `ai_bots_protection` in `dns.tfvars` is for.
+  Use both.
+- **`allow` is a skip.** The bot rules are emitted at the top of the zone's
+  custom ruleset, ahead of the baseline and your own rules, and `allow` stops
+  evaluation there. That ordering is the whole point: it is what lets search
+  crawlers through a baseline that would otherwise challenge them. It also means
+  an over-broad `allow` skips your own rules, so keep the categories tight.
+
+Bot rules need the zone on `bot_traffic_min_tier` or above, which defaults to
+`pro`. Set the zone's real `zone_tier` and the plan tells you if it is short.
+
+Which categories a behaviour matches is in
+`modules/waf/locals.tf`. If Cloudflare adds one before this repository does,
+override it per policy rather than waiting:
+
+```hcl
+bot_traffic = {
+  training           = "block"
+  category_overrides = { training = ["AI Crawler", "Some New Category"] }
+}
+```
+
+Check the `bot_traffic_rules` output after a plan to confirm what each behaviour
+actually resolved to.
+
+## Managing subscriptions changes billing
+
+`manage_zone_subscriptions = true` makes `terraform apply` set each zone's rate
+plan. Before turning it on:
+
+- **An upgrade is charged to the account.** A typo in `zone_tier` is a billing
+  event, not a validation error.
+- **A downgrade takes effect immediately on a live zone**, stripping entitlements
+  such as WAF rule allowances, rate limiting and Bot Management in the same
+  apply that changes the plan.
+- **The token needs Billing Read and Billing Write**, which the layer otherwise
+  does not require. Use a separate, deliberately scoped token for that run rather
+  than adding billing rights to the token used for routine DNS work.
+
+The plan prints a warning listing every zone whose plan the run would change.
+Read it. It is a `check`, so it does not block the apply.
 
 ## Task: give somebody access to the Cloudflare dashboard
 
@@ -641,6 +768,11 @@ and the fix is in the message.
 | `Unknown baseline rule name` | Misspelt catalogue entry. The error lists every valid name. |
 | `A baseline WAF rule was selected without the input it depends on` | You asked for a rule whose list is empty. Fill in `waf_trusted_ip_ranges` or `waf_blocked_countries`. |
 | `Two waf_policies entries target the same zone_key` | Cloudflare allows one ruleset per phase per zone. Merge the two policies. |
+| `bot_traffic is configured on a zone below bot_traffic_min_tier` | The zone's `zone_tier` in `zones.tfvars` is below `pro`. Set the plan the zone is really on, or drop `bot_traffic` for that policy. |
+| `bot_management sets fields the zone's tier does not support` | A plan-locked setting on too low a tier. The error names each field and the tier it needs. |
+| `bot_management sets fight_mode = true alongside sbfm_*` | Bot Fight Mode and Super Bot Fight Mode are the same control at two plan levels. Set one. |
+| `bot_traffic.category_overrides sets an empty category list` | An override with no categories would emit `in {}`, which Cloudflare rejects. Remove the behaviour instead. |
+| `BILLING: this run manages the Cloudflare rate plan for N zone(s)` | A warning, not an error. `manage_zone_subscriptions` is on, so the apply will change plans and billing. |
 | `dns_records with proxied = true must use ttl = 1` | Remove the explicit TTL, or set `proxied = false`. |
 | `Only A, AAAA and CNAME records can be proxied` | Set `proxied = false` on that record. |
 | `dns_records contains duplicate type/name/content combinations` | Two records resolving to the same thing. Names are qualified, so `www` and `www.example.com` collide. |

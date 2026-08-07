@@ -26,9 +26,16 @@ variable "zones" {
     independent.
 
     - `domain_name` - The apex domain (e.g. example.com).
+    - `zone_tier`   - (Optional) The zone's Cloudflare rate plan. Unused by this
+                      layer, and declared only so that the shared inventory file
+                      can carry it for the zones and waf layers, which do gate on
+                      it. Terraform rejects a .tfvars attribute that the variable
+                      type does not declare, so omitting it here would break
+                      every layer's run rather than just this one's.
   EOT
   type = map(object({
     domain_name = string
+    zone_tier   = optional(string)
   }))
 
   validation {

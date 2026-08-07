@@ -17,6 +17,11 @@ waf_trusted_ip_ranges = [
 waf_policies = {
   primary = {
     zone_key = "primary"
+    bot_traffic = {
+      search   = "allow"             # indexes content to answer questions about it later
+      agent    = "managed_challenge" # acting in real time on a person's behalf
+      training = "block"             # crawling to train or fine-tune a model
+    }
 
     baseline_custom_rules = [
       "block_admin_from_untrusted",

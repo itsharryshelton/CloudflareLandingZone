@@ -19,5 +19,10 @@ resource "terraform_data" "preflight" {
       condition     = length(local.waf_unsatisfied_baseline_rules) == 0
       error_message = "A baseline WAF rule was selected without the input it depends on: ${join("; ", local.waf_unsatisfied_baseline_rules)}"
     }
+
+    precondition {
+      condition     = length(local.underpowered_bot_traffic) == 0
+      error_message = "bot_traffic is configured on a zone below bot_traffic_min_tier (\"${var.bot_traffic_min_tier}\"): ${join("; ", local.underpowered_bot_traffic)}. Verified bot categories are a Bot Management field, and Cloudflare rejects the entire ruleset when the zone is not entitled to it - which would take the baseline and tenant rules down with the bot rules. Either set the zone's real zone_tier in zones.tfvars, drop bot_traffic for that policy, or lower bot_traffic_min_tier if your account's entitlement genuinely differs."
+    }
   }
 }

@@ -12,6 +12,11 @@ module "waf" {
   for_each = local.waf_policies
   zone_id  = data.cloudflare_zone.this[each.value.zone_key].id
 
+  # Bot traffic is emitted by the module ahead of these, into the same ruleset.
+  # It cannot live in the zones layer: one entry-point ruleset per phase per zone,
+  # and this layer owns http_request_firewall_custom.
+  bot_traffic = each.value.bot_traffic
+
   custom_block_rules  = each.value.custom_block_rules
   rate_limiting_rules = each.value.rate_limiting_rules
 
