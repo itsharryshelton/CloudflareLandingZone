@@ -80,7 +80,8 @@ deployment/accounts/account_a/
 ├── load_balancing.tfvars       load balancers, pools, health checks
 ├── r2.tfvars                   object storage buckets, CORS, lifecycle, retention
 ├── account_governance.tfvars   who can sign in to the account, and with what
-└── zerotrust.tfvars            Cloudflare Access: who reaches what, and how
+├── zerotrust.tfvars            Cloudflare Access: who reaches what, and how
+└── wan.tfvars                  Cloudflare WAN: site tunnels and static routes
 ```
 
 Everything under `deployment/layers/` and `modules/` is the engine. If you find
@@ -262,17 +263,17 @@ waf_policies = {
 
 What is available:
 
-| Rule | What it does | Needs |
-|---|---|---|
+| Rule                         | What it does                                        | Needs                   |
+| ------------------------------| -----------------------------------------------------| -------------------------|
 | `block_admin_from_untrusted` | Blocks admin paths from outside your trusted ranges | `waf_trusted_ip_ranges` |
-| `geoblock_countries` | Blocks listed countries | `waf_blocked_countries` |
-| `block_known_exploit_paths` | Blocks probes for `.env`, `.git` and similar | nothing |
-| `challenge_undisclosed_bots` | Managed challenge for suspicious automation | `waf_trusted_ip_ranges` |
-| `log_trusted_admin_access` | Logs admin access from trusted ranges | `waf_trusted_ip_ranges` |
-| `auth_brute_force` | 20 requests a minute per IP on login paths | nothing |
-| `api_general` | 600 requests a minute per IP under `/api/` | nothing |
-| `origin_error_shield` | Backs off when the origin returns 5xx | nothing |
-| `observe_only` | Logs rates without enforcing, for sizing a limit | nothing |
+| `geoblock_countries`         | Blocks listed countries                             | `waf_blocked_countries` |
+| `block_known_exploit_paths`  | Blocks probes for `.env`, `.git` and similar        | nothing                 |
+| `challenge_undisclosed_bots` | Managed challenge for suspicious automation         | `waf_trusted_ip_ranges` |
+| `log_trusted_admin_access`   | Logs admin access from trusted ranges               | `waf_trusted_ip_ranges` |
+| `auth_brute_force`           | 20 requests a minute per IP on login paths          | nothing                 |
+| `api_general`                | 600 requests a minute per IP under `/api/`          | nothing                 |
+| `origin_error_shield`        | Backs off when the origin returns 5xx               | nothing                 |
+| `observe_only`               | Logs rates without enforcing, for sizing a limit    | nothing                 |
 
 If a rule needs a list and you leave that list empty, the plan fails. That is not
 pedantry. `block_admin_from_untrusted` with no trusted ranges means "block admin
@@ -796,6 +797,114 @@ values. Apply the provider first and the application after, or use
 `login_method_keys` in a policy instead - which is enforced rather than merely
 displayed on the login page.
 
+## Task: connect a site over Cloudflare WAN
+
+Edit `deployment/accounts/<account>/wan.tfvars`. Cloudflare WAN was called Magic
+WAN until recently, and the Terraform resources still carry the old name.
+
+A site needs two things: tunnels, and routes pointing down them.
+
+```hcl
+wan_ipsec_tunnels = {
+  london_primary = {
+    name                = "lon-ipsec-01"
+    cloudflare_endpoint = "192.0.2.10"      # the anycast IP Cloudflare gave you
+    customer_endpoint   = "203.0.113.10"    # the firewall's public IP
+    interface_address   = "10.252.0.0/31"   # Cloudflare's side of the /31
+  }
+
+  london_secondary = {
+    name                = "lon-ipsec-02"
+    cloudflare_endpoint = "192.0.2.10"
+    customer_endpoint   = "203.0.113.11"    # the second circuit
+    interface_address   = "10.252.0.2/31"
+  }
+}
+
+wan_static_routes = {
+  london_lan_primary = {
+    prefix     = "10.10.0.0/16"
+    tunnel_key = "london_primary"
+    priority   = 100
+  }
+
+  london_lan_secondary = {
+    prefix     = "10.10.0.0/16"
+    tunnel_key = "london_secondary"
+    priority   = 200
+  }
+}
+```
+
+Two tunnels, not one, and a route for the prefix down each. The plan refuses a
+prefix with only one route: one tunnel is a single point of failure with a health
+check attached, and there is nowhere for the traffic to go when it fails. Same
+priority on both load-shares across the pair; different priorities makes the
+lower one primary.
+
+**Do not write the next hop yourself.** `tunnel_key` exists because a tunnel is
+numbered from a /31 - two hosts - and the address in `interface_address` is
+*Cloudflare's* end. The customer device gets the other one, and that is what a
+route has to point at. Get it the wrong way round and Cloudflare accepts the
+route, the dashboard shows it as configured, and the traffic disappears. The
+layer does the arithmetic.
+
+Name a tunnel in 15 characters or fewer, letters, numbers, hyphens and
+underscores. Cloudflare rejects anything longer or fancier, and the name is the
+tunnel's identity - renaming one destroys and recreates it, which drops the
+traffic on it.
+
+Use `wan_gre_tunnels` with the same fields for a GRE tunnel. GRE encapsulates but
+does not encrypt, so it belongs on a private circuit; over the internet, use
+IPsec.
+
+### The pre-shared key does not go in the file
+
+It reaches the pipeline as an environment secret on the account's `wan` apply
+environment, keyed the same way as the tunnels:
+
+```
+TF_VAR_WAN_IPSEC_TUNNEL_PSKS = {"london_primary":"<psk>","london_secondary":"<psk>"}
+```
+
+One key per tunnel, 32 or more random characters, never reused between tunnels or
+sites. Anyone holding a PSK and the two endpoint addresses can stand up the
+customer end of that tunnel, and both endpoints are already in this layer's
+state - so treat the key that way. Rotating one means updating the secret and
+re-applying, with the far end changed at the same time, because the tunnel drops
+in between.
+
+Leave a tunnel out of that object and Cloudflare generates a key it never gives
+back. That is a fine choice where the far end is configured by hand: the
+dashboard becomes the only copy.
+
+### What the plan will refuse
+
+- **A prefix with only one route.** Add the second tunnel, or set
+  `allow_single_tunnel_prefixes` in
+  `deployment/layers/wan/defaults.auto.tfvars`.
+- **`health_check_enabled = false`.** Health checks are the whole of the
+  failover: Cloudflare withdraws an unhealthy tunnel from the routing table, and
+  with them off it never does.
+- **`0.0.0.0/0` or `::/0`.** A default route sends everything Cloudflare has no
+  more specific route for towards the customer network.
+- **A public prefix.** Cloudflare WAN routes between your own sites. Advertising
+  public address space through Cloudflare is Magic Transit, which is a different
+  product and is not in this repository.
+- **A `nexthop` that is not one of your tunnels' customer-side addresses**, which
+  is nearly always an address one out.
+- **Two tunnels sharing a name, or sharing a /31.**
+- **A `tunnel_key` matching nothing.**
+
+### What is not here
+
+Enabling Cloudflare WAN, which Cloudflare does when you buy it - there is no
+resource for it, and an account without the entitlement fails every call in this
+layer. Magic Transit and Magic Firewall, both deliberately out of scope. And the
+configuration of the device at the customer end: a tunnel is half a tunnel until
+somebody sets up the far side, and the health check is what tells you which half
+you have.
+
 ## Task: onboard a customer account
 
 Part of this is configuration and part of it is administration, so expect to need
@@ -803,16 +912,17 @@ somebody with repository admin rights.
 
 Configuration, in a pull request:
 
-1. Create `deployment/accounts/<name>/` and copy the seven files from `account_a`.
+1. Create `deployment/accounts/<name>/` and copy the nine files from `account_a`.
 2. Put the real Cloudflare account ID in `account.tfvars`. It is the 32 character hex
    string in the dashboard URL, and also on any zone's Overview page. It is not a
    secret.
 3. Fill in `zones.tfvars` and `dns.tfvars`. Delete the example WAF, load balancer,
-   account governance and Zero Trust entries rather than leaving them in place - the
-   example members are `example.com` addresses that will fail as soon as a domain
-   allowlist is set, inviting people is not something to do by accident on a first
-   apply, and the example Access application points at a hostname the account does
-   not own.
+   account governance, Zero Trust and Cloudflare WAN entries rather than leaving
+   them in place - the example members are `example.com` addresses that will fail
+   as soon as a domain allowlist is set, inviting people is not something to do by
+   accident on a first apply, the example Access application points at a hostname
+   the account does not own, and the example WAN tunnels point at documentation
+   addresses that belong to nobody.
 
 Administration, before that pull request can apply:
 

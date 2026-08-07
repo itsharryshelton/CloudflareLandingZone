@@ -127,6 +127,10 @@ Ask yourself whether the module would make sense to somebody who has never seen
 5. Add `preflight.tf` for any new key reference.
 6. Add `accounts/*/<product>.tfvars`, and a `<account>-<product>-apply`
    environment per account.
+7. If the product needs a credential of its own - a pre-shared key, an OAuth
+   client secret - declare it as a `sensitive` variable that the account tree
+   never assigns, and document that it arrives as `TF_VAR_<name>` from the apply
+   environment. See `wan_ipsec_tunnel_psks` in `layers/wan/variables.tf`.
 
 ## Adding an account
 
@@ -192,17 +196,23 @@ request, read what CI says, push a fix. `ci.yml` runs on every push and covers:
 | `terraform fmt` | Formatting, recursive |
 | `tflint` | Lint, recursive |
 | `terraform validate` | Every layer and every module, offline |
-| `terraform plan` | The `zones` layer against every account, offline, with a dummy token |
+| `terraform plan` | Every offline-plannable layer against every account, with a dummy token |
 | Config guards | Every account var file maps to a layer, backend blocks stay commented, nothing secret is tracked |
 | Mapping self test | The account and layer derivation in `.github/scripts/` still produces what it should |
 
-Only `zones` can be planned without credentials. `waf`, `load_balancing` and `r2`
-resolve zones through a data source, `account_governance` resolves role and
-permission group names the same way, and `zerotrust` reads the account's existing
-Zero Trust organization; each is a real API read at plan time. Those five are
-covered by `validate` in CI, and by `terraform-plan.yml` on a pull request using
-a read-only token. Which layers qualify is derived, not listed, so a new layer is
-classified correctly without editing the workflow.
+Only `zones` and `wan` can be planned without credentials. `waf`,
+`load_balancing` and `r2` resolve zones through a data source,
+`account_governance` resolves role and permission group names the same way, and
+`zerotrust` reads the account's existing Zero Trust organization; each is a real
+API read at plan time. Those five are covered by `validate` in CI, and by
+`terraform-plan.yml` on a pull request using a read-only token. Which layers
+qualify is derived, not listed, so a new layer is classified correctly without
+editing the workflow.
+
+`wan` is account-scoped, resolves nothing by name and holds no data source at
+all, so every guardrail in it can be fired locally with a dummy token and no
+stubbing. That makes it the easiest layer in the repository to test a check
+against, and there is no excuse for an untested one.
 
 `r2` is the one that classifies conservatively. It reads a zone only for a
 bucket served from a custom domain, so a deployment of private buckets makes no
@@ -245,7 +255,8 @@ For guardrails on `waf`, `load_balancing`, `r2`, `account_governance` or
 `ci.yml`, since those layers need a real read - or offline, with the stubbed data
 source described above. `r2` is easier than the rest: a bucket with no
 `custom_domains` reads nothing, so every guardrail except the two zone checks can
-be fired with a dummy token and no stubbing at all.
+be fired with a dummy token and no stubbing at all. `wan` needs neither, since it
+reads nothing under any configuration.
 
 ## Pull requests
 
