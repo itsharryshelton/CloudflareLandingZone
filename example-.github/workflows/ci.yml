@@ -334,6 +334,10 @@ jobs:
             "deployment/accounts/account_a/r2.tfvars" \
             '[{"account":"account_a","layer":"r2"}]' || rc=1
 
+          assert_matrix "a Cloudflare WAN change plans only that layer, only that account" \
+            "deployment/accounts/account_a/wan.tfvars" \
+            '[{"account":"account_a","layer":"wan"}]' || rc=1
+
           # Apply order must put the zone-creating layer in the first tier and the
           # zone-consuming layers in a later one. If this regresses, waf,
           # load_balancing and r2 plan against zones that do not exist yet and fail.

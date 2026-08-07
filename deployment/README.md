@@ -11,7 +11,8 @@ Everything you edit lives here. The modules under [../modules/](../modules/) sta
 │   ├── load_balancing/                # own state: monitors, pools, LBs
 │   ├── r2/                            # own state: buckets, CORS, lifecycle, domains
 │   ├── account_governance/            # own state: members, user groups
-│   └── zerotrust/                     # own state: Access, policies, tokens, IdPs
+│   ├── zerotrust/                     # own state: Access, policies, tokens, IdPs
+│   └── wan/                           # own state: WAN tunnels, static routes
 └── accounts/                          # config, one tree per Cloudflare account
     ├── account_a/
     │   ├── account.tfvars             # account id       -> every layer
@@ -21,7 +22,8 @@ Everything you edit lives here. The modules under [../modules/](../modules/) sta
     │   ├── load_balancing.tfvars      # load balancers   -> load_balancing
     │   ├── r2.tfvars                  # object storage   -> r2
     │   ├── account_governance.tfvars  # dashboard access -> account_governance
-    │   └── zerotrust.tfvars           # Access           -> zerotrust
+    │   ├── zerotrust.tfvars           # Access           -> zerotrust
+    │   └── wan.tfvars                 # site tunnels     -> wan
     └── account_b/
         └── ...
 ```
@@ -37,6 +39,7 @@ zones ──┬── waf
 
 account_governance                (no zone involved, so no dependency at all)
 zerotrust                         (same, but see below)
+wan                               (same, and no zone anywhere in the layer)
 ```
 
 `waf`, `load_balancing` and `r2` have no relationship to each other, so numbering them would assert a sequence that does not exist. `account_governance` touches no zone, so it neither creates nor resolves one and can apply whenever. `zerotrust` holds no zone in its state either, but an Access application only ever sees a request if the DNS record for its hostname exists and is proxied - so `zones` in practice comes first, and the failure if it does not is a login page nobody can reach rather than a Terraform error. `r2` only reaches for a zone when a bucket is served from a custom domain; a deployment of private buckets looks nothing up. Ordering is enforced where it can actually be enforced - pipeline stage dependencies, and the fact that the dependent layers resolve a zone by name and fail if it is absent - not by a filename that merely hints at it.
@@ -56,7 +59,7 @@ version bump would touch N×M module sources. Adding a zone here is two edits to
 
 The waf, load_balancing and r2 layers resolve a zone key to a zone ID with `data "cloudflare_zone"` filtered by name, not `terraform_remote_state`. The states stay independent - any of them can be applied, re-inited or relocated without the others noticing.
 
-The cost is real and worth knowing: those layers call the Cloudflare API at plan time, so **only `zones` can be planned offline**, and the others fail if the zone does not exist yet. Apply `zones` first; `waf`, `load_balancing` and `r2` can then run in any order, or concurrently. `account_governance` reads the API too - it resolves role and permission group names to IDs - and so does `zerotrust`, which reads the account's existing Zero Trust organization so it can adopt the team name rather than demand one. Neither waits on another layer. CI validates every layer offline and plans only `zones` without credentials.
+The cost is real and worth knowing: those layers call the Cloudflare API at plan time, so they cannot be planned offline, and they fail if the zone does not exist yet. Apply `zones` first; `waf`, `load_balancing` and `r2` can then run in any order, or concurrently. `account_governance` reads the API too - it resolves role and permission group names to IDs - and so does `zerotrust`, which reads the account's existing Zero Trust organization so it can adopt the team name rather than demand one. Neither waits on another layer. **`zones` and `wan` are the two layers that can be planned with no credentials at all**: `wan` is account-scoped, resolves nothing by name and holds no data source, so CI plans it against every account on every push.
 
 ## Config precedence
 
@@ -97,7 +100,7 @@ terraform plan \
   -var-file=../../accounts/account_a/dns.tfvars
 ```
 
-`waf` takes `account.tfvars`, `zones.tfvars`, `waf.tfvars`. `load_balancing` takes `account.tfvars`, `zones.tfvars`, `load_balancing.tfvars`. `r2` takes `account.tfvars`, `zones.tfvars`, `r2.tfvars`. `account_governance` takes `account.tfvars` and `account_governance.tfvars`, and no zone inventory at all. `zerotrust` takes `account.tfvars` and `zerotrust.tfvars`, plus `TF_VAR_identity_provider_secrets` in the environment for any identity provider that authenticates against an OAuth application.
+`waf` takes `account.tfvars`, `zones.tfvars`, `waf.tfvars`. `load_balancing` takes `account.tfvars`, `zones.tfvars`, `load_balancing.tfvars`. `r2` takes `account.tfvars`, `zones.tfvars`, `r2.tfvars`. `account_governance` takes `account.tfvars` and `account_governance.tfvars`, and no zone inventory at all. `zerotrust` takes `account.tfvars` and `zerotrust.tfvars`, plus `TF_VAR_identity_provider_secrets` in the environment for any identity provider that authenticates against an OAuth application. `wan` takes `account.tfvars` and `wan.tfvars`, and no zone inventory either, plus `TF_VAR_wan_ipsec_tunnel_psks` in the environment for any IPsec tunnel whose pre-shared key you choose rather than letting Cloudflare generate.
 
 ### Remote state
 
@@ -134,7 +137,7 @@ Resources reference each other by **logical key**, never by ID. A WAF policy say
 
 Keys are scoped to their account, so `account_a`'s `primary` and `account_b`'s `primary` are unrelated.
 
-`preflight.tf` in each layer catches what neither variable validation nor a module block can: a `zone_key` pointing at nothing, a `zone_config` key with no matching zone, two WAF policies fighting over one zone, a load balancer hostname outside its zone's domain, an R2 bucket asking to be served anonymously, and a user group naming a member who was never declared. All fail the plan with the offender named.
+`preflight.tf` in each layer catches what neither variable validation nor a module block can: a `zone_key` pointing at nothing, a `zone_config` key with no matching zone, two WAF policies fighting over one zone, a load balancer hostname outside its zone's domain, an R2 bucket asking to be served anonymously, a Cloudflare WAN static route pointing at a tunnel nothing declares, and a user group naming a member who was never declared. All fail the plan with the offender named.
 
 ## WAF Baseline
 
@@ -496,9 +499,109 @@ at plan time. Apply the provider first and the application after, or express the
 restriction as `login_method_keys` in a policy - which is enforced rather than
 merely displayed, and copes with an ID that is not known yet.
 
+## Cloudflare WAN
+
+Cloudflare WAN, until recently Magic WAN: the GRE and IPsec tunnels between the
+customer's sites and Cloudflare's edge, and the static routes that decide what
+goes down them. Read a plan from this layer as a change to a network rather than
+to a website - a destroy here takes a site off the network, and a changed route
+sends its traffic somewhere else.
+
+Ops name tunnels by key, and the layer resolves the routing:
+
+```hcl
+wan_ipsec_tunnels = {
+  london_primary = {
+    name                = "lon-ipsec-01"
+    cloudflare_endpoint = "192.0.2.10"      # the anycast IP Cloudflare allocated
+    customer_endpoint   = "203.0.113.10"    # the firewall's public IP
+    interface_address   = "10.252.0.0/31"   # Cloudflare's side of the /31
+  }
+}
+
+wan_static_routes = {
+  london_lan_primary = {
+    prefix     = "10.10.0.0/16"
+    tunnel_key = "london_primary"
+    priority   = 100
+  }
+}
+```
+
+### The next hop is the one thing not to write by hand
+
+A tunnel is numbered from a /31, two hosts: the address in `interface_address`
+is **Cloudflare's** end, and the other one is the customer device's. A static
+route's next hop has to be the customer's. Point it at Cloudflare's own address
+and the API accepts it, the dashboard shows the route as configured, and the
+traffic is discarded.
+
+That is why routes take `tunnel_key` rather than `nexthop`. The layer derives the
+address from the tunnel, and a hand-written `nexthop` that matches no tunnel in
+the layer fails the plan unless `allow_static_routes_to_unmanaged_nexthops` is
+set.
+
+### This layer does not enable Cloudflare WAN
+
+It is an Enterprise entitlement, switched on by Cloudflare when it is bought.
+There is no resource that could turn it on, and an account without it fails every
+call in this layer on authorisation rather than on quota. Ordering the product is
+a conversation, not a pull request.
+
+Magic Transit and Magic Firewall are deliberately out of scope. Magic Transit
+advertises your own public prefixes through Cloudflare and Magic Firewall filters
+packets at the edge; both are separate products with their own blast radius, and
+this layer's token holds no permission for the latter at all.
+
+### Secrets
+
+An IPsec pre-shared key **never goes in a tfvars file**. It reaches Terraform as
+`TF_VAR_wan_ipsec_tunnel_psks`, a map keyed the same way as `wan_ipsec_tunnels`,
+read from the layer's apply environment:
+
+```bash
+export TF_VAR_wan_ipsec_tunnel_psks='{"london_primary":"<psk>"}'
+```
+
+The same applies to `TF_VAR_wan_bgp_md5_keys` for a tunnel that peers over BGP,
+though that one is credential-shaped rather than a credential: Cloudflare's own
+documentation says MD5 is not a valid security mechanism and the key is not
+treated as a secret. It prevents misconfiguration, not attack.
+
+The PSK is different, and this layer's state should be treated accordingly. A
+PSK is the whole of a tunnel's authentication, it reaches state in plain text
+whatever route it takes - Cloudflare stores it, Terraform records what it sent -
+and the endpoint addresses it pairs with are in the same file. Treat a leak as a
+network compromise rather than a configuration disclosure, and rotate every key
+in it at both ends. One key per tunnel, 32 or more random characters, never
+reused between tunnels or sites.
+
+Leave a tunnel out of the map entirely and Cloudflare generates a key it never
+hands back. That is a legitimate choice - arguably a better one - but the
+dashboard becomes the only copy, so the far end has to be configured from there.
+
+### Governing defaults
+
+| Setting | Default | Effect |
+|---|---|---|
+| `allow_tunnels_without_health_checks` | `false` | A tunnel setting `health_check_enabled = false` fails the plan. Health checks are the whole of the failover: Cloudflare withdraws an unhealthy tunnel from the Magic routing table, and with checks off the route stays and traffic keeps being sent into a tunnel that is down. |
+| `allow_single_tunnel_prefixes` | `false` | A prefix reachable over exactly one tunnel fails the plan. One tunnel is a single point of failure with a health check attached - the check notices, and there is nowhere for the traffic to go. Cloudflare's guidance is at least two per site. |
+| `allow_default_static_route` | `false` | A `0.0.0.0/0` or `::/0` route fails the plan. It sends everything Cloudflare has no more specific route for towards the customer network, which matches every destination nobody thought about. |
+| `allow_public_static_route_prefixes` | `false` | A prefix outside RFC 1918, RFC 6598 or IPv6 unique-local space fails the plan. Cloudflare WAN routes between your own sites; advertising public space through Cloudflare is Magic Transit, which is a different product. |
+| `allow_static_routes_to_unmanaged_nexthops` | `false` | A `nexthop` belonging to no tunnel in this layer fails the plan, naming the addresses that do. The usual cause is an address one out. |
+| `default_tunnel_health_check_*` | enabled, `mid`, `reply`, `unidirectional` | Declared on every tunnel rather than left to Cloudflare's defaults, so switching a health check off in the dashboard shows up as drift. |
+| `default_static_route_priority` | `100` | Two routes for one prefix at the same priority load-share across both tunnels. Give the standby a higher number where one path is genuinely preferred. |
+
+### What this layer does not hold
+
+No Magic Firewall rules, no Magic Transit prefixes, and no configuration for the
+device at the customer end. A tunnel is half a tunnel until somebody configures
+the far side to match, and Terraform cannot tell "not configured yet" from
+"broken" - the health check can, which is why it is on by default.
+
 ## Adding a new account
 
-1. `mkdir accounts/<name>/`, copy the eight tfvars files from `account_a`.
+1. `mkdir accounts/<name>/`, copy the nine tfvars files from `account_a`.
 2. Set `cloudflare_account_id`, the zone inventory, and the per-layer config.
 3. Provision a scoped API token per layer, and a state key prefix `<name>/`.
 4. Add the account to the pipeline matrix.

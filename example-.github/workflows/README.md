@@ -36,11 +36,11 @@ Terraform source, so adding an account, a layer or a module needs no edit here:
   same variable.
 - **Apply order**: a layer that *creates* zones must apply before a layer that
   *looks one up* with `data "cloudflare_zone"`, since that read fails until the
-  zone exists. Today: `zones`, `account_governance` and `zerotrust`
-  first, then `waf`, `load_balancing` and `r2` concurrently. `account_governance`
-  and `zerotrust` are in the first tier because they touch no zone at all, not
-  because anything waits on them. `r2` is in the second because a bucket can be
-  served from a custom domain, even where no bucket currently is.
+  zone exists. Today: `zones`, `account_governance`, `wan` and `zerotrust`
+  first, then `waf`, `load_balancing` and `r2` concurrently. `account_governance`,
+  `wan` and `zerotrust` are in the first tier because they touch no zone at all,
+  not because anything waits on them. `r2` is in the second because a bucket can
+  be served from a custom domain, even where no bucket currently is.
 
 `ci.yml` asserts all three, so a regression in the derivation fails a PR rather
 than silently causing a merged change never to be planned.
@@ -69,7 +69,7 @@ two tier stages. If a new layer makes the graph deeper, both `discover` and
 ### Environments
 
 Per account: **one plan environment, plus one apply environment per layer.** For
-two accounts and six layers that is fourteen environments.
+two accounts and seven layers that is sixteen environments.
 
 | Environment                          | Reviewers    | `CLOUDFLARE_API_TOKEN` scope                                                                                                                                    |
 | -------------------------------------| --------------| -----------------------------------------------------------------------------------------------------------------------------------------------------------------|
@@ -80,6 +80,7 @@ two accounts and six layers that is fourteen environments.
 | `account_a-r2-apply`                 | **required** | `Workers R2 Storage:Edit` at account scope; plus `Zone:Read` and `Zone DNS:Edit` only if a bucket has a custom domain                                            |
 | `account_a-account_governance-apply` | **required** | `Account Settings:Edit`, and nothing at zone scope                                                                                                              |
 | `account_a-zerotrust-apply`          | **required** | `Access: Organizations, Identity Providers, and Groups:Edit`, `Access: Apps and Policies:Edit`, `Access: Service Tokens:Edit`, all at account scope             |
+| `account_a-wan-apply`                | **required** | `Magic Transit:Edit` at account scope, and nothing else. The permission group is named after the older product and covers the Cloudflare WAN tunnel and route APIs |
 
 …and the same for `account_b`. Each token is scoped to **one account and one
 layer**: the scopes are the ones documented in each layer's `providers.tf`, and
@@ -120,6 +121,33 @@ file. It does reach Terraform state in plain text - Cloudflare stores it and
 Terraform records what it sent - which is why this layer's state and its plan
 files are treated as credential material. See
 [../../deployment/README.md](../../deployment/README.md).
+
+The `wan` apply environment carries secrets on the same terms, and for the same
+reasons. **`TF_VAR_WAN_IPSEC_TUNNEL_PSKS`** is a JSON object of IPsec pre-shared
+keys keyed the same way as the `wan_ipsec_tunnels` map, exported as
+`TF_VAR_wan_ipsec_tunnel_psks` for the run, and
+**`TF_VAR_WAN_BGP_MD5_KEYS`** does the same for BGP session keys where any tunnel
+peers.
+
+```
+TF_VAR_WAN_IPSEC_TUNNEL_PSKS = {"london_primary":"<psk>","london_secondary":"<psk>"}
+```
+
+A PSK is the whole of a tunnel's authentication, and the tunnel endpoints it
+pairs with are in the same state file, so treat a leak of `wan` state as a
+network compromise: rotate every key in it, at both ends. One key per tunnel,
+32 or more random characters, never reused between tunnels or sites.
+
+`TF_VAR_WAN_BGP_MD5_KEYS` is credential-shaped and belongs in an environment
+secret for that reason alone. It is not a security control - Cloudflare's own
+documentation says MD5 is not a valid security mechanism and the key is not
+treated as a secret. It stops accidental peering, not an attacker.
+
+Neither variable is wired into [`_terraform-run.yml`](_terraform-run.yml), and
+nor is `TF_VAR_IDENTITY_PROVIDER_SECRETS`: exporting an unset environment secret
+would hand Terraform an empty string where it expects a map and fail the run for
+every layer that does not need one. Export them in the run step of your own copy
+of that workflow, conditionally on the secret being set.
 
 On the apply environments, also set **Deployment branches** to `main` only, so a
 branch cannot reach a write token.
