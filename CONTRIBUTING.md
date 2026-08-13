@@ -201,9 +201,10 @@ request, read what CI says, push a fix. `ci.yml` runs on every push and covers:
 
 Only `zones` and `wan` can be planned without credentials. `waf`,
 `load_balancing` and `r2` resolve zones through a data source,
-`account_governance` resolves role and permission group names the same way, and
-`zerotrust` reads the account's existing Zero Trust organization; each is a real
-API read at plan time. Those five are covered by `validate` in CI, and by
+`account_governance` resolves role and permission group names the same way,
+`zerotrust` reads the account's existing Zero Trust organization, and `gateway`
+resolves Cloudflare's category and application catalogues; each is a real API
+read at plan time. Those six are covered by `validate` in CI, and by
 `terraform-plan.yml` on a pull request using a read-only token. Which layers
 qualify is derived, not listed, so a new layer is classified correctly without
 editing the workflow.
@@ -249,13 +250,22 @@ plans cleanly, your check is doing nothing. Remove the bad value in a follow up
 commit before asking for review, and say in the pull request description which run
 proved the check fires, so a reviewer does not have to take it on trust.
 
-For guardrails on `waf`, `load_balancing`, `r2`, `account_governance` or
-`zerotrust`, the same trick works against `terraform-plan.yml` rather than
-`ci.yml`, since those layers need a real read - or offline, with the stubbed data
-source described above. `r2` is easier than the rest: a bucket with no
-`custom_domains` reads nothing, so every guardrail except the two zone checks can
-be fired with a dummy token and no stubbing at all. `wan` needs neither, since it
-reads nothing under any configuration.
+For guardrails on `waf`, `load_balancing`, `r2`, `account_governance`,
+`zerotrust` or `gateway`, the same trick works against `terraform-plan.yml`
+rather than `ci.yml`, since those layers need a real read - or offline, with the
+stubbed data source described above. `r2` is easier than the rest: a bucket with
+no `custom_domains` reads nothing, so every guardrail except the two zone checks
+can be fired with a dummy token and no stubbing at all. `wan` needs neither,
+since it reads nothing under any configuration.
+
+`gateway` is the layer the stubbing recipe was worth writing down for, because
+its two data sources are plain lists. Replace
+`data.cloudflare_zero_trust_gateway_categories_list.this.result` with a handful
+of `{ id, name, subcategories }` objects and
+`data.cloudflare_zero_trust_gateway_app_types_list.this.result` with a couple of
+`{ id, name }`, and every precondition in it - including the ones in
+`modules/gateway`, which see only resolved IDs - can be fired against a committed
+account tree with a dummy token.
 
 ## Pull requests
 
