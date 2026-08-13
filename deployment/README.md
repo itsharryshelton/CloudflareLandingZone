@@ -12,6 +12,7 @@ Everything you edit lives here. The modules under [../modules/](../modules/) sta
 │   ├── r2/                            # own state: buckets, CORS, lifecycle, domains
 │   ├── account_governance/            # own state: members, user groups
 │   ├── zerotrust/                     # own state: Access, policies, tokens, IdPs
+│   ├── gateway/                       # own state: SWG DNS, network and HTTP policies
 │   └── wan/                           # own state: WAN tunnels, static routes
 └── accounts/                          # config, one tree per Cloudflare account
     ├── account_a/
@@ -23,6 +24,7 @@ Everything you edit lives here. The modules under [../modules/](../modules/) sta
     │   ├── r2.tfvars                  # object storage   -> r2
     │   ├── account_governance.tfvars  # dashboard access -> account_governance
     │   ├── zerotrust.tfvars           # Access           -> zerotrust
+    │   ├── gateway.tfvars             # egress filtering -> gateway
     │   └── wan.tfvars                 # site tunnels     -> wan
     └── account_b/
         └── ...
@@ -39,6 +41,7 @@ zones ──┬── waf
 
 account_governance                (no zone involved, so no dependency at all)
 zerotrust                         (same, but see below)
+gateway                           (same; it filters egress, which no zone owns)
 wan                               (same, and no zone anywhere in the layer)
 ```
 
@@ -59,7 +62,7 @@ version bump would touch N×M module sources. Adding a zone here is two edits to
 
 The waf, load_balancing and r2 layers resolve a zone key to a zone ID with `data "cloudflare_zone"` filtered by name, not `terraform_remote_state`. The states stay independent - any of them can be applied, re-inited or relocated without the others noticing.
 
-The cost is real and worth knowing: those layers call the Cloudflare API at plan time, so they cannot be planned offline, and they fail if the zone does not exist yet. Apply `zones` first; `waf`, `load_balancing` and `r2` can then run in any order, or concurrently. `account_governance` reads the API too - it resolves role and permission group names to IDs - and so does `zerotrust`, which reads the account's existing Zero Trust organization so it can adopt the team name rather than demand one. Neither waits on another layer. **`zones` and `wan` are the two layers that can be planned with no credentials at all**: `wan` is account-scoped, resolves nothing by name and holds no data source, so CI plans it against every account on every push.
+The cost is real and worth knowing: those layers call the Cloudflare API at plan time, so they cannot be planned offline, and they fail if the zone does not exist yet. Apply `zones` first; `waf`, `load_balancing` and `r2` can then run in any order, or concurrently. `account_governance` reads the API too - it resolves role and permission group names to IDs - and so does `zerotrust`, which reads the account's existing Zero Trust organization so it can adopt the team name rather than demand one, and `gateway`, which resolves Cloudflare's content category, security category and application catalogues so that an account tree can say `"Microsoft 365"` instead of `606`. None of them waits on another layer. **`zones` and `wan` are the two layers that can be planned with no credentials at all**: `wan` is account-scoped, resolves nothing by name and holds no data source, so CI plans it against every account on every push.
 
 ## Config precedence
 
@@ -100,7 +103,7 @@ terraform plan \
   -var-file=../../accounts/account_a/dns.tfvars
 ```
 
-`waf` takes `account.tfvars`, `zones.tfvars`, `waf.tfvars`. `load_balancing` takes `account.tfvars`, `zones.tfvars`, `load_balancing.tfvars`. `r2` takes `account.tfvars`, `zones.tfvars`, `r2.tfvars`. `account_governance` takes `account.tfvars` and `account_governance.tfvars`, and no zone inventory at all. `zerotrust` takes `account.tfvars` and `zerotrust.tfvars`, plus `TF_VAR_identity_provider_secrets` in the environment for any identity provider that authenticates against an OAuth application. `wan` takes `account.tfvars` and `wan.tfvars`, and no zone inventory either, plus `TF_VAR_wan_ipsec_tunnel_psks` in the environment for any IPsec tunnel whose pre-shared key you choose rather than letting Cloudflare generate.
+`waf` takes `account.tfvars`, `zones.tfvars`, `waf.tfvars`. `load_balancing` takes `account.tfvars`, `zones.tfvars`, `load_balancing.tfvars`. `r2` takes `account.tfvars`, `zones.tfvars`, `r2.tfvars`. `account_governance` takes `account.tfvars` and `account_governance.tfvars`, and no zone inventory at all. `zerotrust` takes `account.tfvars` and `zerotrust.tfvars`, plus `TF_VAR_identity_provider_secrets` in the environment for any identity provider that authenticates against an OAuth application. `gateway` takes `account.tfvars` and `gateway.tfvars`, and no zone inventory - egress filtering belongs to the account rather than to any one domain. `wan` takes `account.tfvars` and `wan.tfvars`, and no zone inventory either, plus `TF_VAR_wan_ipsec_tunnel_psks` in the environment for any IPsec tunnel whose pre-shared key you choose rather than letting Cloudflare generate.
 
 ### Remote state
 
@@ -499,6 +502,203 @@ at plan time. Apply the provider first and the application after, or express the
 restriction as `login_method_keys` in a policy - which is enforced rather than
 merely displayed, and copes with an ID that is not known yet.
 
+## Gateway (Secure Web Gateway)
+
+Corporate egress filtering: the DNS, network and HTTP policies that decide what
+leaves the network, what is inspected on the way out, and what is stopped. Read a
+plan from this layer as a change to what people can reach - a new block closes
+something somebody is using today, and a new bypass stops a channel being watched.
+
+### Three pipelines, not one list
+
+DNS, network and HTTP are three separate builders. A policy belongs to exactly
+one of them, and each is ordered independently.
+
+| Type | Sees | Blind to | Actions |
+|---|---|---|---|
+| `dns` | The query, before a connection exists | Everything past the hostname. And any client resolving over DNS-over-HTTPS to somebody else's resolver | allow, block, override, safesearch, ytrestricted |
+| `network` | The L4 connection: ports, protocols, IPs, the TLS SNI | The payload | allow, block, l4_override |
+| `http` | The decrypted request | Anything exempted from inspection | allow, block, off, on, scan, noscan, isolate, noisolate, quarantine, redirect |
+
+DNS filtering is the cheapest place to enforce a block and the easiest to walk
+around, which is why the baseline blocks security categories at DNS **and** at
+HTTP. The second rule is not redundant: a browser that resolves through a
+third-party DoH endpoint never sends Gateway a query, and the HTTP policy sees
+the connection anyway.
+
+### Precedence is the whole of the rule ordering
+
+Gateway walks a builder in ascending precedence and stops at the first allow or
+block that matches. A rule can be perfectly written and never reached.
+
+Precedence is therefore a required field rather than something derived from the
+order of the HCL. A map has no order in Terraform, so deriving it would mean
+sorting on the logical key - and renaming a key would silently reorder the
+firewall. Leave gaps of 100 so a rule can be inserted later without renumbering
+everything after it.
+
+Precedence below `reserved_precedence_ceiling` (100) belongs to the platform
+baseline, and an account tree asking for one fails the plan. That is what makes
+"platform rules first" a fact rather than a convention.
+
+```hcl
+gateway_policies = {
+  allow_sanctioned_smtp_relay = {
+    name       = "Allow the sanctioned SMTP relay"
+    type       = "network"
+    action     = "allow"
+    precedence = 100
+    match = {
+      destination_ip_cidrs = ["203.0.113.25/32"]
+      destination_ports    = [587]
+      protocols            = ["tcp"]
+    }
+  }
+
+  block_direct_smtp = {
+    name       = "Block direct outbound SMTP"
+    type       = "network"
+    action     = "block"
+    precedence = 110
+    match      = { destination_ports = [25, 465, 587], protocols = ["tcp"] }
+  }
+}
+```
+
+Swap those two numbers and the relay stops working, with nothing in the plan to
+suggest why.
+
+### Ops name things; the layer writes the wirefilter
+
+Gateway's API takes expressions - `any(app.ids[*] in {606})`,
+`any(dns.security_category[*] in {68 80})`. The numbers are undocumented anywhere
+an operator would look, they change as Cloudflare adds categories and
+applications, and a wrong one is a rule that silently matches nothing.
+
+So an account tree names things and `catalogue_lookup.tf` resolves them against
+the account at plan time, the same way `account_governance` resolves permission
+group names. An unrecognised category fails the plan listing every valid name; an
+unrecognised application fails it too, with a pointer at the catalogue rather than
+several hundred names inline.
+
+`match` compiles to:
+
+```
+( destination terms OR'd ) and ( each remaining constraint AND'd )
+```
+
+Destination terms are the alternative ways of naming one thing - `domains`,
+`hosts`, `applications`, `content_categories`, `security_categories`,
+`destination_ip_cidrs`, and `sni_domains` / `sni_hosts` on a network policy.
+Constraints narrow it: `source_ip_cidrs`, `destination_ports`, `protocols`,
+`http_methods`, `dlp_profile_ids`, and the upload and download file types.
+`negate` inverts the lot, which is how a default-deny with a carve-out is one rule
+rather than two.
+
+`identity` scopes a policy to people rather than traffic - a policy with an
+identity condition and no traffic condition is perfectly valid, and is how
+"contractors browse through isolation" is written. Group names are the ones the
+identity provider sends, so for Entra ID that needs `support_groups` on the
+provider in the `zerotrust` layer.
+
+A selector the layer does not model goes in `traffic_expression`,
+`identity_expression` or `device_posture_expression` as raw wirefilter. It
+replaces the compiled expression rather than adding to it, and no guardrail can
+see inside one.
+
+### The Microsoft 365 bypass, and what it costs
+
+`action = "off"` is Do Not Inspect: the connection is passed through without TLS
+decryption. Microsoft 365 needs it because several of its clients pin
+certificates and break under inspection.
+
+```hcl
+gateway_baseline_policies   = ["bypass_trusted_applications"]
+gateway_bypass_applications = ["Microsoft 365"]
+```
+
+Naming the application rather than its hostnames means Cloudflare maintains the
+list - a hostname Microsoft adds next month is covered without a pull request.
+
+Two things follow, and both are the reason this is a named baseline rather than a
+line somebody adds quietly. Cloudflare evaluates every Do Not Inspect policy
+**before** all other HTTP policies, so a bypass outranks the DLP and quarantine
+rules whatever their precedence. And nothing inside a bypassed application is
+inspected, logged in detail or matched by a DLP profile - a bypass is a channel
+data can leave through unexamined, which is precisely what the rest of this layer
+exists to prevent.
+
+The plan refuses a Do Not Inspect policy that matches on anything only visible
+after decryption - a DLP profile, a method, a file type. Cloudflare does not
+report that as an error: the rule simply never matches, the traffic keeps being
+decrypted, and the dashboard shows the bypass as configured.
+
+### DLP
+
+A DLP profile is defined in the Zero Trust dashboard under DLP and referenced by
+UUID. Cloudflare exposes no data source that resolves one by name, so this is the
+one place in the layer where an opaque identifier is unavoidable.
+
+```hcl
+gateway_baseline_policies = ["block_dlp_matches"]
+gateway_dlp_profile_ids   = ["<profile uuid>"]
+```
+
+A match is produced by scanning the decrypted request body, so DLP works on HTTP
+policies only, and only where the traffic is actually inspected. The plan refuses
+a DLP selector on a DNS or network policy, and refuses one paired with `off` or
+`noscan`.
+
+### Governing defaults
+
+| Setting | Default | Effect |
+|---|---|---|
+| `reserved_precedence_ceiling` | `100` | An account tree policy claiming a lower precedence fails the plan. Below it belongs to the baseline, and Gateway stops at the first match. |
+| `restricted_actions` | `[]` | Actions the layer refuses, named in the plan. Empty because the action worth the most thought - `off` - is also what a Microsoft 365 deployment needs. Set `["off"]` where inspection is never to be turned off outside the baseline. |
+| `allow_dlp_payload_logging` | `false` | A policy setting `payload_log_enabled` fails the plan. Payload logging stores the fragment that triggered the DLP match - which is the sensitive data the policy exists to protect - in Cloudflare's logs, readable by everyone with log access. Useful while tuning a profile; not something to leave on. |
+| `allow_disabling_dnssec_validation` | `false` | Disabling DNSSEC validation makes that policy's resolution spoofable. The usual cause is a badly signed internal zone, which is a problem to fix at the zone. |
+| `allow_untrusted_certificate_pass_through` | `false` | `pass_through` serves a site whose certificate did not validate with no warning and no log entry, so an expired internal certificate and an interception attempt look identical. |
+| `default_untrusted_cert_action` | `"error"` | Declared on every HTTP allow policy that sets nothing of its own, so a dashboard change shows up as drift. |
+| `default_block_notification` | enabled, with a message | Applied to any block policy that sets no notification. The alternative to telling somebody why a request failed is a ticket saying "the internet is broken" and a user who finds another network. |
+
+### Baseline catalogue
+
+Opted into by name from `gateway_baseline_policies`, parameterised entirely by
+variables so the same rule serves every account. The catalogue is in
+`layers/gateway/locals.gateway.tf`.
+
+| Name | Type | Action | Requires |
+|---|---|---|---|
+| `block_security_threats` | dns | block | `gateway_security_categories` |
+| `block_security_threats_http` | http | block | `gateway_security_categories` |
+| `block_disallowed_content` | dns | block | `gateway_blocked_content_categories` |
+| `bypass_trusted_applications` | http | off | `gateway_bypass_applications` |
+| `block_dlp_matches` | http | block | `gateway_dlp_profile_ids` |
+| `quarantine_risky_downloads` | http | quarantine | `gateway_quarantine_file_types` |
+
+**A baseline whose input is empty fails the plan**, for the same reason the WAF
+baseline does: an empty set renders as `in {}`, which Cloudflare rejects as a
+syntax error, and a bypass rule naming no application would sit in the dashboard
+looking like a control while exempting nothing.
+
+Cloudflare's file sandbox accepts a fixed and fairly short list of formats -
+`exe`, `pdf`, `doc`, `docm`, `docx`, `rtf`, `ppt`, `pptx`, `xls`, `xlsm`, `xlsx`,
+`zip`, `rar`. It is shorter than the set a policy can *match* on, so `dll` and
+`scr` are rejected. Select the traffic with `match.download_file_types` and
+quarantine only what the sandbox can detonate.
+
+### What this layer does not hold
+
+No Gateway lists, DLP profiles, proxy endpoints, account-level Gateway settings,
+browser isolation controls, header injection, egress policies or resolver
+policies. No WARP device enrolment or device posture checks either - a posture
+check is referenced here by ID and defined elsewhere.
+
+And no Access applications, identity providers or service tokens: those are the
+`zerotrust` layer, with their own state and their own token. The split is
+deliberate. The credential that decides what leaves the network is not the
+credential that decides who gets into it.
+
 ## Cloudflare WAN
 
 Cloudflare WAN, until recently Magic WAN: the GRE and IPsec tunnels between the
@@ -601,7 +801,7 @@ the far side to match, and Terraform cannot tell "not configured yet" from
 
 ## Adding a new account
 
-1. `mkdir accounts/<name>/`, copy the nine tfvars files from `account_a`.
+1. `mkdir accounts/<name>/`, copy the ten tfvars files from `account_a`.
 2. Set `cloudflare_account_id`, the zone inventory, and the per-layer config.
 3. Provision a scoped API token per layer, and a state key prefix `<name>/`.
 4. Add the account to the pipeline matrix.

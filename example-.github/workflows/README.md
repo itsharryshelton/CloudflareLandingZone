@@ -36,11 +36,12 @@ Terraform source, so adding an account, a layer or a module needs no edit here:
   same variable.
 - **Apply order**: a layer that *creates* zones must apply before a layer that
   *looks one up* with `data "cloudflare_zone"`, since that read fails until the
-  zone exists. Today: `zones`, `account_governance`, `wan` and `zerotrust`
-  first, then `waf`, `load_balancing` and `r2` concurrently. `account_governance`,
-  `wan` and `zerotrust` are in the first tier because they touch no zone at all,
-  not because anything waits on them. `r2` is in the second because a bucket can
-  be served from a custom domain, even where no bucket currently is.
+  zone exists. Today: `zones`, `account_governance`, `wan`, `zerotrust` and
+  `gateway` first, then `waf`, `load_balancing` and `r2` concurrently.
+  `account_governance`, `wan`, `zerotrust` and `gateway` are in the first tier
+  because they touch no zone at all, not because anything waits on them. `r2` is
+  in the second because a bucket can be served from a custom domain, even where
+  no bucket currently is.
 
 `ci.yml` asserts all three, so a regression in the derivation fails a PR rather
 than silently causing a merged change never to be planned.
@@ -69,17 +70,18 @@ two tier stages. If a new layer makes the graph deeper, both `discover` and
 ### Environments
 
 Per account: **one plan environment, plus one apply environment per layer.** For
-two accounts and seven layers that is sixteen environments.
+two accounts and eight layers that is eighteen environments.
 
 | Environment                          | Reviewers    | `CLOUDFLARE_API_TOKEN` scope                                                                                                                                    |
 | -------------------------------------| --------------| -----------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `account_a-plan`                     | none         | read-only: `Zone:Read`, `DNS:Read`, `Zone Settings:Read`, `Zone WAF:Read`, `Account Load Balancers:Read`, `Zone Load Balancers:Read`, `Workers R2 Storage:Read`, `Account Settings:Read` |
+| `account_a-plan`                     | none         | read-only: `Zone:Read`, `DNS:Read`, `Zone Settings:Read`, `Zone WAF:Read`, `Account Load Balancers:Read`, `Zone Load Balancers:Read`, `Workers R2 Storage:Read`, `Account Settings:Read`, `Zero Trust:Read` |
 | `account_a-zones-apply`              | **required** | `Zone:Edit`, `DNS:Edit`, `Zone Settings:Edit`                                                                                                                    |
 | `account_a-waf-apply`                | **required** | `Zone WAF:Edit`, `Zone:Read`, notably *not* `Zone:Edit`                                                                                                         |
 | `account_a-load_balancing-apply`     | **required** | `Account Load Balancers:Edit`, `Zone Load Balancers:Edit`, `Zone:Read`                                                                                          |
 | `account_a-r2-apply`                 | **required** | `Workers R2 Storage:Edit` at account scope; plus `Zone:Read` and `Zone DNS:Edit` only if a bucket has a custom domain                                            |
 | `account_a-account_governance-apply` | **required** | `Account Settings:Edit`, and nothing at zone scope                                                                                                              |
 | `account_a-zerotrust-apply`          | **required** | `Access: Organizations, Identity Providers, and Groups:Edit`, `Access: Apps and Policies:Edit`, `Access: Service Tokens:Edit`, all at account scope             |
+| `account_a-gateway-apply`            | **required** | `Zero Trust:Edit` at account scope, and nothing else. The API refers to the same grant as Zero Trust Write; it covers both the Gateway policy APIs and the category and application catalogues the layer resolves names against |
 | `account_a-wan-apply`                | **required** | `Magic Transit:Edit` at account scope, and nothing else. The permission group is named after the older product and covers the Cloudflare WAN tunnel and route APIs |
 
 …and the same for `account_b`. Each token is scoped to **one account and one
@@ -98,7 +100,15 @@ The `account_governance` token deserves separate thought. `Account Settings:Edit
 is what invites members and creates user groups, which makes it the only token in
 the set that can grant somebody else access to the Cloudflare account. It holds
 nothing at zone scope in exchange, so it cannot touch DNS or a firewall rule, but
-treat its reviewer list as the tightest of the five.
+treat its reviewer list as the tightest of the set.
+
+The `gateway` token is the third. `Zero Trust:Edit` can rewrite the egress filter
+in either direction: it can block what people reach, and - the one that matters -
+it can add a Do Not Inspect policy, which stops a channel being decrypted, logged
+in detail or matched by a DLP profile. That change looks like one more rule in a
+plan and is the difference between data exfiltration being visible and not, so
+read this layer's diffs for what they stop watching as much as for what they
+stop. The token holds nothing at zone scope and cannot reach Access.
 
 The `zerotrust` token is the other one to think about. `Access: Organizations,
 Identity Providers, and Groups:Edit` can change the team name, add a login method
