@@ -140,6 +140,14 @@ variable "gateway_policies" {
       payload_log_enabled                - store the matched content of a DLP hit.
                                            Governed by allow_dlp_payload_logging
       quarantine_file_types              - required by action = "quarantine"
+      add_headers                        - headers added to the request on its way to
+                                           the origin, as name => list of values. http
+                                           allow policies only. This is how a Microsoft
+                                           365 or Google Workspace tenant restriction
+                                           is enforced, and it needs the traffic to be
+                                           decrypted - an application exempted by an
+                                           "off" policy earlier in the HTTP order
+                                           gets no headers
       override_host / override_ips       - required by action = "override". dns
       insecure_disable_dnssec_validation - dns. Governed by
                                            allow_disabling_dnssec_validation
@@ -232,6 +240,7 @@ variable "gateway_policies" {
       untrusted_cert_action              = optional(string)
       payload_log_enabled                = optional(bool)
       quarantine_file_types              = optional(list(string))
+      add_headers                        = optional(map(list(string)))
       override_host                      = optional(string)
       override_ips                       = optional(list(string))
       insecure_disable_dnssec_validation = optional(bool)

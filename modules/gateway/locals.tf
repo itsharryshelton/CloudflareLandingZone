@@ -248,6 +248,8 @@ locals {
           file_types = policy.settings.quarantine_file_types
         }
 
+        add_headers = policy.settings.add_headers
+
         override_host                      = policy.settings.override_host
         override_ips                       = policy.settings.override_ips
         insecure_disable_dnssec_validation = policy.settings.insecure_disable_dnssec_validation
@@ -270,6 +272,7 @@ locals {
       policy.settings.untrusted_cert_action != null,
       policy.settings.payload_log_enabled != null,
       policy.settings.quarantine_file_types != null,
+      policy.settings.add_headers != null,
       policy.settings.override_host != null,
       policy.settings.override_ips != null,
       policy.settings.insecure_disable_dnssec_validation != null,
@@ -399,9 +402,18 @@ locals {
       policy.settings.untrusted_cert_action != null ? "${key}.settings.untrusted_cert_action" : "",
       policy.settings.block_page != null ? "${key}.settings.block_page" : "",
       policy.settings.redirect != null ? "${key}.settings.redirect" : "",
+      policy.settings.add_headers != null ? "${key}.settings.add_headers" : "",
     ])
     if policy.type != "http"
   ])))
+
+  # Cloudflare adds headers to a request it is letting through. On any other
+  # action there is no onward request to add them to, so the setting is dropped
+  # and the tenant restriction the headers were carrying is not enforced.
+  add_headers_with_incompatible_action = sort([
+    for key, policy in local.policies : "${key} (action = \"${policy.action}\")"
+    if policy.settings.add_headers != null && policy.action != "allow"
+  ])
 
   network_only_settings = sort(distinct(flatten([
     for key, policy in local.policies : compact([

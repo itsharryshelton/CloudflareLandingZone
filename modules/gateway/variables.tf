@@ -95,6 +95,7 @@ variable "policies" {
       untrusted_cert_action              = optional(string)
       payload_log_enabled                = optional(bool)
       quarantine_file_types              = optional(list(string))
+      add_headers                        = optional(map(list(string)))
       override_host                      = optional(string)
       override_ips                       = optional(list(string))
       insecure_disable_dnssec_validation = optional(bool)
@@ -223,10 +224,23 @@ variable "policies" {
       payload_log_enabled                - STORE THE MATCHED CONTENT of a DLP hit.
                                            See the warning below. http
       quarantine_file_types              - required by action = "quarantine"
+      add_headers                        - headers Cloudflare adds to the request on
+                                           its way to the origin, as name => list of
+                                           values. http, and only with
+                                           action = "allow", because there is no
+                                           request left to add a header to once the
+                                           policy has blocked it
       override_host / override_ips       - required by action = "override". dns
       insecure_disable_dnssec_validation - dns
       ip_categories                      - apply category filtering to IP literals. dns
       ignore_cname_category_matches      - dns
+
+    add_headers is how a SaaS tenant restriction is enforced: Microsoft and Google
+    both read a request header to decide which tenants a sign-in may use, so
+    Gateway injecting it is what stops a corporate device signing into a personal
+    account. It only works where the traffic is decrypted, so an application
+    exempted from TLS inspection by an "off" policy earlier in the HTTP order
+    cannot be given headers - the header would silently never be added.
 
     payload_log_enabled writes the fragment of the request that triggered the DLP
     match into Cloudflare's logs. That fragment is, by definition, the sensitive
@@ -237,8 +251,7 @@ variable "policies" {
     WHAT THIS MODULE DOES NOT MANAGE
 
     Gateway lists, DLP profiles, proxy endpoints, account-level Gateway settings,
-    browser isolation controls, header injection, egress policies and resolver
-    policies. DLP profiles are referenced by ID because Cloudflare exposes no data
+    browser isolation controls, egress policies and resolver policies. DLP profiles are referenced by ID because Cloudflare exposes no data
     source that resolves one by name.
   EOT
 
@@ -416,5 +429,25 @@ variable "policies" {
       ]
     ]))
     error_message = "Each policies[*].settings.quarantine_file_types entry must be one Cloudflare's file sandbox accepts: exe, pdf, doc, docm, docx, rtf, ppt, pptx, xls, xlsm, xlsx, zip, rar. This is a shorter list than the file types a policy can MATCH on - use match.download_file_types to select the traffic, and quarantine only what the sandbox can detonate."
+  }
+
+  # A header name Cloudflare rejects fails the whole rule at apply, and a header
+  # with no values is a header the origin never sees while the plan shows it set.
+  validation {
+    condition = alltrue(flatten([
+      for policy in var.policies : [
+        for name, values in coalesce(try(policy.settings.add_headers, null), {}) :
+        can(regex("^[A-Za-z0-9!#$%&'*+.^_`|~-]+$", name)) && length(values) > 0
+      ]
+    ]))
+    error_message = "Each policies[*].settings.add_headers key must be a valid HTTP header name and must map to at least one value. An empty value list is a header that is never added, which looks configured and enforces nothing."
+  }
+
+  # Cloudflare applies at most 20 header operations to a request.
+  validation {
+    condition = alltrue([
+      for policy in var.policies : length(coalesce(try(policy.settings.add_headers, null), {})) <= 20
+    ])
+    error_message = "policies[*].settings.add_headers may set at most 20 headers on one policy - Cloudflare's limit on header operations per rule."
   }
 }
