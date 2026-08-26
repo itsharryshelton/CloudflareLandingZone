@@ -4,6 +4,8 @@ Enterprise-grade Infrastructure-as-Code (IaC) for managing multi-account, multi-
 
 New here? Go to the Wiki for the Guides.
 
+Looking to quickly setup the code/repos in your Github? Check out my [Release Manager](https://github.com/itsharryshelton/CloudflareLandingZone-Release-Manager)
+
 ## Why a landing zone
 
 A Landing Zone is the agreed baseline an enterprise environment lands in before any workload arrives. Identity, network topologies, security posture, naming conventions, and guardrails are decided once and enforced universally. Without one, every environment becomes an ad-hoc build, creating configuration drift and audit blind spots.
