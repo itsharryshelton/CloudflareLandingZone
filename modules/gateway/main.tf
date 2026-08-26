@@ -81,6 +81,14 @@ resource "cloudflare_zero_trust_gateway_policy" "this" {
       error_message = "These policies set both a structured matcher and a raw expression for the same dimension - traffic: ${join(", ", local.conflicting_traffic_definitions)}; identity: ${join(", ", local.conflicting_identity_definitions)}; device posture: ${join(", ", local.conflicting_device_posture_definitions)}. The raw expression replaces the compiled one rather than being merged with it, so one of the two would be silently discarded. Express the whole condition one way or the other."
     }
 
+    # Cloudflare only adds headers to a request it is letting through, so the
+    # setting is dropped anywhere else - and a dropped tenant-restriction header
+    # is a sign-in to a personal tenant that nothing refuses.
+    precondition {
+      condition     = length(local.add_headers_with_incompatible_action) == 0
+      error_message = "These policies set settings.add_headers with an action that has no onward request to add them to: ${join("; ", local.add_headers_with_incompatible_action)}. Cloudflare accepts add_headers only on an HTTP policy whose action is \"allow\". Injected headers are how a Microsoft 365 or Google Workspace tenant restriction is enforced, so a dropped one is an unrestricted sign-in that the dashboard still shows as configured."
+    }
+
     precondition {
       condition     = length(local.actions_missing_settings) == 0
       error_message = "These policies use an action that needs a setting to go with it: ${join("; ", local.actions_missing_settings)}. Cloudflare has nowhere to redirect to, no file types to quarantine, no address to override to, and rejects the rule."

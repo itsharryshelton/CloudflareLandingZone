@@ -126,6 +126,7 @@ locals {
         untrusted_cert_action = null
         payload_log_enabled   = null
         quarantine_file_types = local.gateway_baseline_catalogue[key].quarantine_file_types
+        add_headers           = null
 
         override_host                      = null
         override_ips                       = null
@@ -228,6 +229,7 @@ locals {
 
         payload_log_enabled   = policy.settings.payload_log_enabled
         quarantine_file_types = policy.settings.quarantine_file_types
+        add_headers           = policy.settings.add_headers
 
         override_host                      = policy.settings.override_host
         override_ips                       = policy.settings.override_ips
