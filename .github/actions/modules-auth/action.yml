@@ -1,0 +1,98 @@
+# =============================================================================
+# Give the runner's `git` read access to the private modules repository.
+#
+# Every layer under deployment/layers/ sources its modules from
+# <org>/cloudflare-platform-modules, which is private.
+# GITHUB_TOKEN is scoped to this repository alone, so without this
+# `terraform init` falls through to interactive git auth and fails with
+# "could not read Username for 'https://github.com'".
+#
+# A GitHub App installation token is minted per run: ~1h lifetime, read-only,
+# scoped to that one repository, and revoked by the token action's post step.
+# No personal access token, so nothing is tied to a leaver and nothing expires
+# silently.
+#
+# Used by every job that runs `terraform init` - _terraform-run.yml and the
+# `validate` and `offline-plan` jobs in ci.yml.
+# =============================================================================
+name: Authenticate to the private modules repository
+description: Mint a short-lived App token for cloudflare-platform-modules and teach git to use it.
+
+inputs:
+  app-id:
+    description: 'GitHub App ID. Repository variable MODULES_APP_ID.'
+    required: true
+  private-key:
+    description: 'The App private key. Repository secret MODULES_APP_PRIVATE_KEY.'
+    required: true
+  repository:
+    description: 'Modules repository name, without the owner.'
+    required: false
+    default: cloudflare-platform-modules
+
+runs:
+  using: composite
+  steps:
+    # actions/create-github-app-token fails a malformed key deep inside Node's
+    # WebCrypto - "Invalid keyData ... asn1 encoding routines::not enough data" -
+    # with no hint that the secret is the problem. The two ways it gets malformed
+    # are pasting the PEM without its header and footer, and pasting it as one
+    # line with the newlines lost. Both are checked here so the run says which.
+    #
+    # Only the shape is reported, never any part of the key.
+    - name: Check the App credentials look usable
+      shell: bash
+      env:
+        APP_ID: ${{ inputs.app-id }}
+        PRIVATE_KEY: ${{ inputs.private-key }}
+      run: |
+        set -euo pipefail
+        problems=()
+
+        [[ -n "${APP_ID:-}" ]] \
+          || problems+=("variable MODULES_APP_ID is empty or not set")
+        [[ "${APP_ID:-}" =~ ^[0-9]+$ ]] \
+          || problems+=("variable MODULES_APP_ID is not numeric - it is the App ID, not the client ID or the App slug")
+
+        if [[ -z "${PRIVATE_KEY:-}" ]]; then
+          problems+=("secret MODULES_APP_PRIVATE_KEY is empty or not set")
+        else
+          lines="$(wc -l <<<"$PRIVATE_KEY")"
+          grep -q -- '-----BEGIN .*PRIVATE KEY-----' <<<"$PRIVATE_KEY" \
+            || problems+=("secret MODULES_APP_PRIVATE_KEY has no -----BEGIN ... PRIVATE KEY----- line - paste the whole .pem, header and footer included")
+          grep -q -- '-----END .*PRIVATE KEY-----' <<<"$PRIVATE_KEY" \
+            || problems+=("secret MODULES_APP_PRIVATE_KEY has no -----END ... PRIVATE KEY----- line - the paste was truncated")
+          # A 2048-bit RSA PEM is ~28 lines. Anything under 3 means the newlines
+          # were flattened, which is what produces "not enough data" from ASN.1.
+          [[ "$lines" -ge 3 ]] \
+            || problems+=("secret MODULES_APP_PRIVATE_KEY is $lines line(s) long - the PEM's newlines were lost, or a client secret was pasted instead of a private key. Pipe the .pem in - bash: cat key.pem | gh secret set MODULES_APP_PRIVATE_KEY --repo \"$GITHUB_REPOSITORY\" - PowerShell: Get-Content key.pem -Raw | gh secret set MODULES_APP_PRIVATE_KEY --repo \"$GITHUB_REPOSITORY\"")
+        fi
+
+        if [[ ${#problems[@]} -gt 0 ]]; then
+          printf '::error::%s\n' "${problems[@]}"
+          echo "See .github/workflows/README.md - 'Reading the private modules repository'." >&2
+          exit 1
+        fi
+
+    - name: Mint the installation token
+      id: token
+      uses: actions/create-github-app-token@v3
+      with:
+        app-id: ${{ inputs.app-id }}
+        private-key: ${{ inputs.private-key }}
+        owner: ${{ github.repository_owner }}
+        repositories: ${{ inputs.repository }}
+        permission-contents: read
+
+    - name: Point git at the modules repository with that token
+      shell: bash
+      env:
+        MODULES_TOKEN: ${{ steps.token.outputs.token }}
+      run: |
+        set -euo pipefail
+        # Terraform shells out to `git`, which takes no token argument, so the
+        # credential has to live in git config. The runner is ephemeral and the
+        # token expires with the job, so nothing outlives the run.
+        git config --global \
+          url."https://x-access-token:${MODULES_TOKEN}@github.com/".insteadOf \
+          "https://github.com/"

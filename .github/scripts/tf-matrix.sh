@@ -25,7 +25,7 @@
 # `by_layer` + `apply_order` drive apply.yml. Layer directories are NOT numbered,
 # so order is never taken from their names - alphabetically "zones" sorts last,
 # which is the opposite of what is required. It is derived from the Terraform
-# source instead: a layer that CREATES zones (calls modules/zone_base) must apply
+# source instead: a layer that CREATES zones (calls the zone_base module) must apply
 # before any layer that only LOOKS ONE UP (data "cloudflare_zone"), because that
 # data source fails at plan time until the zone exists.
 #
@@ -84,10 +84,12 @@ mapfile -t ACCOUNTS < <(select_from "$ONLY_ACCOUNT" "${ALL_ACCOUNTS[@]}")
 
 # Predicates read straight out of the Terraform source.
 
-# Does <layer> call <module>? Matches both the active relative source
-# (".../modules/waf") and the commented pinned git source ("//modules/waf?ref=").
+# Does <layer> call <module>? Modules live at the root of the modules repository,
+# so a source ends "//<name>" or "//<name>?ref=<tag>". The leading slash is part
+# of the pattern deliberately: without it, module "rules" would match a layer that
+# sources "zone_rules".
 layer_uses_module() {
-  grep -rhqE "modules/${2}[\"?]" "$LAYERS_DIR/$1"/*.tf 2>/dev/null
+  grep -rhqE "/${2}[\"?]" "$LAYERS_DIR/$1"/*.tf 2>/dev/null
 }
 
 layer_declares_var() {
@@ -97,7 +99,7 @@ layer_declares_var() {
 # Does <layer> create zones, i.e. call the zone_base module? Such a layer must
 # apply before any layer that resolves a zone by lookup.
 layer_creates_zones() {
-  grep -rhqE 'modules/zone_base["?]' "$LAYERS_DIR/$1"/*.tf 2>/dev/null
+  grep -rhqE '/zone_base["?]' "$LAYERS_DIR/$1"/*.tf 2>/dev/null
 }
 
 # Does <layer> resolve a zone with a data source rather than creating it? That
@@ -253,7 +255,7 @@ done
 
 if [[ ${#TIER1[@]} -gt 0 && ${#TIER0[@]} -eq 0 ]]; then
   echo "ERROR: layers resolve a zone by lookup (${TIER1[*]}) but no layer creates one." >&2
-  echo "       Expected exactly one layer to call modules/zone_base." >&2
+  echo "       Expected exactly one layer to call the zone_base module." >&2
   exit 1
 fi
 
