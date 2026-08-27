@@ -6,12 +6,15 @@ Three workflows, plus one reusable definition they all share.
 | ----------------------------------------------| ----------------------------------------| ---------------------| ----------------------|
 | [`ci.yml`](ci.yml)                           | every PR, every push to `main`         | no                  | no                   |
 | [`terraform-plan.yml`](terraform-plan.yml)   | PR touching the Terraform tree, manual | reads               | no                   |
-| [`terraform-apply.yml`](terraform-apply.yml) | push to `main`, manual                 | reads + writes      | yes, after approval  |
+| [`terraform-apply.yml`](terraform-apply.yml) | manual only                            | reads + writes      | yes, after approval  |
 | [`_terraform-run.yml`](_terraform-run.yml)   | called by the two above                | n/a                 | n/a                  |
 
 ## Apply never runs without a plan
 
-`terraform-apply.yml` plans first, uploads the plan file, waits for a human, then
+`terraform-apply.yml` is started by hand only - it has no `push` trigger, so merging
+to `main` never applies anything. When you are ready, run it from the Actions tab.
+
+It plans first, uploads the plan file, waits for a human, then
 runs `terraform apply <that plan file>`. There is no `-auto-approve` in this
 repository. The reviewer approves a specific plan, and Terraform refuses a saved
 plan whose state has moved since, so an apply cannot quietly diverge from what
@@ -178,13 +181,15 @@ Split it into two pull requests: the zone first, then whatever depends on it. By
 time the second is planned the zone exists and the lookup resolves.
 
 `terraform-apply.yml` does not have this problem. `plan-tier1` depends on
-`apply-tier0`, so tier 2 is planned only after the zone has been created, and if both
-changes do reach `main` together the run handles it unaided. It is the pull request
+`apply-tier0`, so tier 2 is planned only after the zone has been created, and a single
+apply run handles both changes together unaided. It is the pull request
 plan that cannot succeed early, and since `plan complete` is a required check that is
 what blocks the merge. A manual per layer apply run is not needed for this.
 
-**A manual run has no diff to filter against**, so it selects every pair allowed
-by the `account` / `layer` inputs. `all` / `all` means the whole fleet, so narrow it.
+**Every apply run is manual, and a manual run has no diff to filter against**, so it
+selects every pair allowed by the `account` / `layer` inputs. `all` / `all` means the
+whole fleet, so narrow it to the account and layer you actually reviewed a plan for.
+The same is true of a `workflow_dispatch` run of `terraform-plan.yml`.
 
 ## Adding an account or a layer
 
