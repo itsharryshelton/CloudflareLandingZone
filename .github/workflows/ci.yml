@@ -32,8 +32,8 @@ jobs:
     name: terraform fmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: hashicorp/setup-terraform@v3
+      - uses: actions/checkout@v7
+      - uses: hashicorp/setup-terraform@v4
         with:
           terraform_version: ${{ env.TF_VERSION }}
           terraform_wrapper: false
@@ -51,7 +51,7 @@ jobs:
       # the anonymous rate limit.
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install TFLint ${{ env.TFLINT_VERSION }}
         run: |
@@ -73,34 +73,29 @@ jobs:
     name: terraform validate
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: hashicorp/setup-terraform@v3
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/modules-auth
+        with:
+          app-id: ${{ vars.MODULES_APP_ID }}
+          private-key: ${{ secrets.MODULES_APP_PRIVATE_KEY }}
+      - uses: hashicorp/setup-terraform@v4
         with:
           terraform_version: ${{ env.TF_VERSION }}
           terraform_wrapper: false
 
-      - name: Validate every layer and every module
+      - name: Validate every layer
         run: |
           set -euo pipefail
           failed=()
 
-          # Layers first: they exercise the modules through the call graph.
+          # Layers exercise the modules through the call graph. Validating each
+          # module standalone is the modules repository's own CI job, not this
+          # one - they live in cloudflare-platform-modules, not here.
+          #
           # -backend=false is what the commented-out backend block in each
-          # terraform.tf exists to permit - no R2 bucket, no credentials.
+          # terraform.tf exists to permit - no R2 bucket, no credentials. It does
+          # not skip module download, which is why modules-auth runs above.
           for dir in deployment/layers/*/; do
-            echo "::group::validate $dir"
-            if ! (terraform -chdir="$dir" init -backend=false -input=false \
-                  && terraform -chdir="$dir" validate); then
-              failed+=("$dir")
-            fi
-            echo "::endgroup::"
-          done
-
-          # Then each module standalone, so a module cannot be merged broken even
-          # if no layer calls it yet. _TEMPLATE is scaffolding with placeholder
-          # content and is not expected to validate.
-          for dir in modules/*/; do
-            [[ "$(basename "$dir")" == "_TEMPLATE" ]] && continue
             echo "::group::validate $dir"
             if ! (terraform -chdir="$dir" init -backend=false -input=false \
                   && terraform -chdir="$dir" validate); then
@@ -132,8 +127,14 @@ jobs:
       # is never asked to call the Cloudflare API and this value is never used.
       CLOUDFLARE_API_TOKEN: 'offline-plan-no-api-calls'
     steps:
-      - uses: actions/checkout@v4
-      - uses: hashicorp/setup-terraform@v3
+      - uses: actions/checkout@v7
+      # "Offline" means no Cloudflare API call. Module download is still a
+      # network read against the private modules repository.
+      - uses: ./.github/actions/modules-auth
+        with:
+          app-id: ${{ vars.MODULES_APP_ID }}
+          private-key: ${{ secrets.MODULES_APP_PRIVATE_KEY }}
+      - uses: hashicorp/setup-terraform@v4
         with:
           terraform_version: ${{ env.TF_VERSION }}
           terraform_wrapper: false
@@ -197,7 +198,7 @@ jobs:
     name: config guards
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Every account var file is claimed by at least one layer
         run: |
@@ -216,6 +217,11 @@ jobs:
           orphans=()
           for f in deployment/accounts/*/*.tfvars; do
             case "$(basename "$f")" in *.local.tfvars) continue ;; esac
+            # A file that assigns nothing - a commented-out example kept as a
+            # template for the next operator - is claimed by nobody, because
+            # tf-varfiles.sh skips it for the same reason. It is documentation,
+            # not dead config, so it is not an orphan.
+            grep -qE '^[a-zA-Z_][a-zA-Z0-9_]*[[:space:]]*=' "$f" || continue
             claimed=false
             for key in "${!CLAIMED[@]}"; do
               [[ "$(basename "$key")" == "$(basename "$f")" ]] && claimed=true
@@ -309,53 +315,57 @@ jobs:
             echo "ok: $desc"
           }
 
+          # Account names are derived, not hardcoded: these assertions test the
+          # derivation in tf-matrix.sh, not the tenant list, so onboarding or
+          # renaming an account must not turn this step red.
+          mapfile -t ACCOUNTS < <(find deployment/accounts -mindepth 1 -maxdepth 1 \
+            -type d -printf '%f\n' | LC_ALL=C sort)
+          acct="${ACCOUNTS[0]}"
+
+          # tf-matrix.sh emits pairs sorted by "account|layer", so sorting
+          # "account:layer" here reproduces that order whatever the account set is.
+          expect() { # <account:layer>... -> the matrix JSON those pairs make
+            printf '%s\n' "$@" | LC_ALL=C sort \
+              | jq -R -c 'split(":") | {account: .[0], layer: .[1]}' | jq -s -c '.'
+          }
+          expect_layer_everywhere() { # <layer> -> that layer paired with every account
+            local layer="$1" a pairs=()
+            for a in "${ACCOUNTS[@]}"; do pairs+=("$a:$layer"); done
+            expect "${pairs[@]}"
+          }
+
           rc=0
-          assert_matrix "a waf policy change plans only the waf layer, only that account" \
-            "deployment/accounts/account_a/waf.tfvars" \
-            '[{"account":"account_a","layer":"waf"}]' || rc=1
+
+          # Each of these files owns variables that exactly one layer declares, so
+          # each must select exactly its own layer, for its own account and no
+          # other. load_balancing is deliberately not in the list: its tfvars is
+          # currently a commented-out example, and a file that assigns nothing
+          # selects every layer for that account by design.
+          for layer in account_governance bulk_redirects gateway r2 waf wan workers zerotrust; do
+            if [[ ! -f "deployment/accounts/$acct/$layer.tfvars" ]]; then
+              echo "::notice::$acct has no $layer.tfvars - assertion skipped"
+              continue
+            fi
+            assert_matrix "a $layer change plans only that layer, only that account" \
+              "deployment/accounts/$acct/$layer.tfvars" \
+              "$(expect "$acct:$layer")" || rc=1
+          done
 
           assert_matrix "a docs-only change plans nothing" \
             "deployment/README.md" \
             '[]' || rc=1
 
           assert_matrix "the zone inventory reaches only the layers that declare it" \
-            "deployment/accounts/account_b/zones.tfvars" \
-            '[{"account":"account_b","layer":"bulk_redirects"},{"account":"account_b","layer":"load_balancing"},{"account":"account_b","layer":"r2"},{"account":"account_b","layer":"waf"},{"account":"account_b","layer":"workers"},{"account":"account_b","layer":"zones"}]' || rc=1
-
-          assert_matrix "an account governance change plans only that layer, only that account" \
-            "deployment/accounts/account_a/account_governance.tfvars" \
-            '[{"account":"account_a","layer":"account_governance"}]' || rc=1
-
-          assert_matrix "a Zero Trust change plans only that layer, only that account" \
-            "deployment/accounts/account_a/zerotrust.tfvars" \
-            '[{"account":"account_a","layer":"zerotrust"}]' || rc=1
-
-          assert_matrix "an R2 change plans only that layer, only that account" \
-            "deployment/accounts/account_a/r2.tfvars" \
-            '[{"account":"account_a","layer":"r2"}]' || rc=1
-
-          assert_matrix "a Cloudflare WAN change plans only that layer, only that account" \
-            "deployment/accounts/account_a/wan.tfvars" \
-            '[{"account":"account_a","layer":"wan"}]' || rc=1
-
-          assert_matrix "a Gateway change plans only that layer, only that account" \
-            "deployment/accounts/account_a/gateway.tfvars" \
-            '[{"account":"account_a","layer":"gateway"}]' || rc=1
-
-          assert_matrix "a Workers change plans only that layer, only that account" \
-            "deployment/accounts/account_a/workers.tfvars" \
-            '[{"account":"account_a","layer":"workers"}]' || rc=1
+            "deployment/accounts/$acct/zones.tfvars" \
+            "$(expect "$acct:bulk_redirects" "$acct:load_balancing" "$acct:r2" \
+                      "$acct:waf" "$acct:workers" "$acct:zones")" || rc=1
 
           # Worker source and KV data live inside the layer, so a change to one is
           # a layer change and re-plans every account - which is what should
           # happen when the code every Worker runs is edited.
           assert_matrix "editing Worker source re-plans the workers layer for every account" \
             "deployment/layers/workers/scripts/redirects/redirect.js" \
-            '[{"account":"account_a","layer":"workers"},{"account":"account_b","layer":"workers"}]' || rc=1
-
-          assert_matrix "a Bulk Redirects change plans only that layer, only that account" \
-            "deployment/accounts/account_a/bulk_redirects.tfvars" \
-            '[{"account":"account_a","layer":"bulk_redirects"}]' || rc=1
+            "$(expect_layer_everywhere workers)" || rc=1
 
           # bulk_redirects resolves nothing through the API - Bulk Redirect rows
           # carry their own hostnames, so no zone ID is ever needed - which puts
@@ -416,7 +426,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 

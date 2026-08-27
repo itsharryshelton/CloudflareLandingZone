@@ -50,7 +50,7 @@ jobs:
       matrix: ${{ steps.select.outputs.matrix }}
       any: ${{ steps.select.outputs.any }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # Both sides of the diff must be present locally.
           fetch-depth: 0

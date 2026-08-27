@@ -111,9 +111,15 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Check inputs and required configuration
+        # Scoped to this step rather than the job: the App private key is only
+        # needed for a presence check here and by the token step below, so no
+        # other step gets it in its environment.
+        env:
+          MODULES_APP_ID: ${{ vars.MODULES_APP_ID }}
+          MODULES_APP_PRIVATE_KEY: ${{ secrets.MODULES_APP_PRIVATE_KEY }}
         run: |
           set -euo pipefail
           case "$MODE" in
@@ -127,6 +133,8 @@ jobs:
           [[ -n "${AWS_SECRET_ACCESS_KEY:-}" ]] || missing+=("secret R2_SECRET_ACCESS_KEY")
           [[ -n "${TF_BACKEND_BUCKET:-}"     ]] || missing+=("variable TF_BACKEND_BUCKET")
           [[ -n "${TF_BACKEND_ENDPOINT:-}"   ]] || missing+=("variable TF_BACKEND_ENDPOINT")
+          [[ -n "${MODULES_APP_ID:-}"        ]] || missing+=("variable MODULES_APP_ID")
+          [[ -n "${MODULES_APP_PRIVATE_KEY:-}" ]] || missing+=("secret MODULES_APP_PRIVATE_KEY")
           [[ -d "$LAYER_DIR"                 ]] || missing+=("layer directory $LAYER_DIR")
           [[ -d "$ACCOUNT_DIR"               ]] || missing+=("account directory $ACCOUNT_DIR")
           if [[ ${#missing[@]} -gt 0 ]]; then
@@ -135,15 +143,22 @@ jobs:
             exit 1
           fi
 
+      # Module sources point at the private modules repository, which
+      # GITHUB_TOKEN cannot read. Must run before `terraform init`.
+      - uses: ./.github/actions/modules-auth
+        with:
+          app-id: ${{ vars.MODULES_APP_ID }}
+          private-key: ${{ secrets.MODULES_APP_PRIVATE_KEY }}
+
       - name: Setup Terraform ${{ inputs.terraform_version }}
-        uses: hashicorp/setup-terraform@v3
+        uses: hashicorp/setup-terraform@v4
         with:
           terraform_version: ${{ inputs.terraform_version }}
           # The wrapper rewrites exit codes, which breaks `plan -detailed-exitcode`.
           terraform_wrapper: false
 
       - name: Cache provider plugins
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ${{ env.TF_PLUGIN_CACHE_DIR }}
           key: tf-plugins-${{ runner.os }}-${{ hashFiles('deployment/layers/*/.terraform.lock.hcl') }}
@@ -287,7 +302,7 @@ jobs:
 
       - name: Upload the plan
         if: inputs.mode == 'plan'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ inputs.plan_artifact }}
           path: ${{ env.LAYER_DIR }}/tfplan
@@ -318,7 +333,7 @@ jobs:
       # -----------------------------------------------------------------------
       - name: Download the approved plan
         if: inputs.mode == 'apply'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: ${{ inputs.plan_artifact }}
           path: ${{ env.LAYER_DIR }}

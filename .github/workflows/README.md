@@ -62,30 +62,64 @@ two tier stages. If a new layer makes the graph deeper, both `discover` and
 |---|---|---|
 | `TF_BACKEND_BUCKET` | `cf-lz-tfstate` | R2 bucket holding state. |
 | `TF_BACKEND_ENDPOINT` | `https://<state-account-id>.r2.cloudflarestorage.com` | S3-compatible R2 endpoint. |
+| `MODULES_APP_ID` | `1234567` | App ID of the modules-reader GitHub App below. Not a secret. |
 
 ### Repository secrets
 
-| Name | Notes |
-|---|---|
-| `R2_ACCESS_KEY_ID` | R2 API token, **Object Read & Write on this bucket only**. |
-| `R2_SECRET_ACCESS_KEY` | Its secret. |
+| Name                      | Notes                                                                            |
+| ---------------------------| ----------------------------------------------------------------------------------|
+| `R2_ACCESS_KEY_ID`        | R2 API token, **Object Read & Write on this bucket only**.                       |
+| `R2_SECRET_ACCESS_KEY`    | Its secret.                                                                      |
+| `MODULES_APP_PRIVATE_KEY` | The modules-reader App's private key, PEM including the header and footer lines. |
+
+### Reading the private modules repository
+
+Every layer sources its modules from
+`<org>/cloudflare-platform-modules`, which is private.
+`GITHUB_TOKEN` is scoped to this repository alone, so `terraform init` cannot
+clone it and fails with `could not read Username for 'https://github.com'`.
+
+[`../actions/modules-auth`](../actions/modules-auth/action.yml) fixes that: it
+mints a GitHub App installation token per run and rewrites `https://github.com/`
+in the runner's git config to carry it. It runs in every job that inits -
+`_terraform-run.yml`, and `validate` and `offline-plan` in `ci.yml`.
+
+To create the App, once, at organisation level:
+
+1. **Org settings → Developer settings → GitHub Apps → New GitHub App.** Name it
+   something like `cf-terraform-modules-reader`. Untick Webhook → Active.
+2. **Repository permissions: Contents → Read-only.** Nothing else. It needs no
+   account permissions and no write anywhere.
+3. Generate a private key, put the PEM in `MODULES_APP_PRIVATE_KEY`, and the App
+   ID in `MODULES_APP_ID`.
+4. **Install the App on the Module Repositories only** - "Only select
+   repositories". Installing it org-wide would give every workflow here read
+   access to every repository in the org.
+
+A token is minted fresh per job, expires within the hour, and is revoked by the
+action's post step. Nothing is tied to an individual, so nobody leaving breaks
+the pipeline, and there is no PAT expiry to diarise.
+
+An App token is preferred over a fine-grained PAT precisely because of step 4:
+the PAT equivalent would be long-lived, owned by a person, and only as narrow as
+whoever last edited it remembered to make it.
 
 ### Environments
 
 Per account: **one plan environment, plus one apply environment per layer.** For
 two accounts and eight layers that is eighteen environments.
 
-| Environment                          | Reviewers    | `CLOUDFLARE_API_TOKEN` scope                                                                                                                                    |
-| -------------------------------------| --------------| -----------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `account_a-plan`                     | none         | read-only: `Zone:Read`, `DNS:Read`, `Zone Settings:Read`, `Zone WAF:Read`, `Account Load Balancers:Read`, `Zone Load Balancers:Read`, `Workers R2 Storage:Read`, `Account Settings:Read`, `Zero Trust:Read` |
-| `account_a-zones-apply`              | **required** | `Zone:Edit`, `DNS:Edit`, `Zone Settings:Edit`                                                                                                                    |
-| `account_a-waf-apply`                | **required** | `Zone WAF:Edit`, `Zone:Read`, notably *not* `Zone:Edit`                                                                                                         |
-| `account_a-load_balancing-apply`     | **required** | `Account Load Balancers:Edit`, `Zone Load Balancers:Edit`, `Zone:Read`                                                                                          |
-| `account_a-r2-apply`                 | **required** | `Workers R2 Storage:Edit` at account scope; plus `Zone:Read` and `Zone DNS:Edit` only if a bucket has a custom domain                                            |
-| `account_a-account_governance-apply` | **required** | `Account Settings:Edit`, and nothing at zone scope                                                                                                              |
-| `account_a-zerotrust-apply`          | **required** | `Access: Organizations, Identity Providers, and Groups:Edit`, `Access: Apps and Policies:Edit`, `Access: Service Tokens:Edit`, all at account scope             |
+| Environment                          | Reviewers    | `CLOUDFLARE_API_TOKEN` scope                                                                                                                                                                                                    |
+| --------------------------------------| --------------| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `account_a-plan`                     | none         | read-only: `Zone:Read`, `DNS:Read`, `Zone Settings:Read`, `Zone WAF:Read`, `Account Load Balancers:Read`, `Zone Load Balancers:Read`, `Workers R2 Storage:Read`, `Account Settings:Read`, `Zero Trust:Read`                     |
+| `account_a-zones-apply`              | **required** | `Zone:Edit`, `DNS:Edit`, `Zone Settings:Edit`                                                                                                                                                                                   |
+| `account_a-waf-apply`                | **required** | `Zone WAF:Edit`, `Zone:Read`, notably *not* `Zone:Edit`                                                                                                                                                                         |
+| `account_a-load_balancing-apply`     | **required** | `Account Load Balancers:Edit`, `Zone Load Balancers:Edit`, `Zone:Read`                                                                                                                                                          |
+| `account_a-r2-apply`                 | **required** | `Workers R2 Storage:Edit` at account scope; plus `Zone:Read` and `Zone DNS:Edit` only if a bucket has a custom domain                                                                                                           |
+| `account_a-account_governance-apply` | **required** | `Account Settings:Edit`, and nothing at zone scope                                                                                                                                                                              |
+| `account_a-zerotrust-apply`          | **required** | `Access: Organizations, Identity Providers, and Groups:Edit`, `Access: Apps and Policies:Edit`, `Access: Service Tokens:Edit`, all at account scope                                                                             |
 | `account_a-gateway-apply`            | **required** | `Zero Trust:Edit` at account scope, and nothing else. The API refers to the same grant as Zero Trust Write; it covers both the Gateway policy APIs and the category and application catalogues the layer resolves names against |
-| `account_a-wan-apply`                | **required** | `Magic Transit:Edit` at account scope, and nothing else. The permission group is named after the older product and covers the Cloudflare WAN tunnel and route APIs |
+| `account_a-wan-apply`                | **required** | `Magic Transit:Edit` at account scope, and nothing else. The permission group is named after the older product and covers the Cloudflare WAN tunnel and route APIs                                                              |
 
 …and the same for `account_b`. Each token is scoped to **one account and one
 layer**: the scopes are the ones documented in each layer's `providers.tf`, and
@@ -190,6 +224,18 @@ what blocks the merge. A manual per layer apply run is not needed for this.
 selects every pair allowed by the `account` / `layer` inputs. `all` / `all` means the
 whole fleet, so narrow it to the account and layer you actually reviewed a plan for.
 The same is true of a `workflow_dispatch` run of `terraform-plan.yml`.
+
+**Lint rules live in [`.tflint.hcl`](../../.tflint.hcl) at the repository root**,
+and `ci.yml` passes it to `tflint` by absolute path so `--recursive` keeps using
+it as it descends into each layer instead of silently linting with defaults. It
+sets `call_module_type = "local"` because the `lint` job deliberately does not
+run `terraform init`, so no remote module is on disk to descend into.
+
+**An account tfvars that assigns nothing is legal.** For example if `load_balancing.tfvars` is
+commented-out, it is kept as a template. `tf-varfiles.sh` skips such
+a file - passing it to Terraform buys nothing - and the orphan guard in `ci.yml`
+skips it for the same reason. A file that assigns real variables that no layer
+declares is still an error.
 
 ## Adding an account or a layer
 
