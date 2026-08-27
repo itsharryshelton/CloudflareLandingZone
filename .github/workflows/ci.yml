@@ -320,7 +320,7 @@ jobs:
 
           assert_matrix "the zone inventory reaches only the layers that declare it" \
             "deployment/accounts/account_b/zones.tfvars" \
-            '[{"account":"account_b","layer":"load_balancing"},{"account":"account_b","layer":"r2"},{"account":"account_b","layer":"waf"},{"account":"account_b","layer":"zones"}]' || rc=1
+            '[{"account":"account_b","layer":"bulk_redirects"},{"account":"account_b","layer":"load_balancing"},{"account":"account_b","layer":"r2"},{"account":"account_b","layer":"waf"},{"account":"account_b","layer":"workers"},{"account":"account_b","layer":"zones"}]' || rc=1
 
           assert_matrix "an account governance change plans only that layer, only that account" \
             "deployment/accounts/account_a/account_governance.tfvars" \
@@ -342,9 +342,37 @@ jobs:
             "deployment/accounts/account_a/gateway.tfvars" \
             '[{"account":"account_a","layer":"gateway"}]' || rc=1
 
+          assert_matrix "a Workers change plans only that layer, only that account" \
+            "deployment/accounts/account_a/workers.tfvars" \
+            '[{"account":"account_a","layer":"workers"}]' || rc=1
+
+          # Worker source and KV data live inside the layer, so a change to one is
+          # a layer change and re-plans every account - which is what should
+          # happen when the code every Worker runs is edited.
+          assert_matrix "editing Worker source re-plans the workers layer for every account" \
+            "deployment/layers/workers/scripts/redirects/redirect.js" \
+            '[{"account":"account_a","layer":"workers"},{"account":"account_b","layer":"workers"}]' || rc=1
+
+          assert_matrix "a Bulk Redirects change plans only that layer, only that account" \
+            "deployment/accounts/account_a/bulk_redirects.tfvars" \
+            '[{"account":"account_a","layer":"bulk_redirects"}]' || rc=1
+
+          # bulk_redirects resolves nothing through the API - Bulk Redirect rows
+          # carry their own hostnames, so no zone ID is ever needed - which puts
+          # it in tier 1 alongside zones and wan, and makes it offline-plannable.
+          if jq -e '.[0] | index("bulk_redirects") != null' \
+               <<<"$(FORCE_ALL=true bash .github/scripts/tf-matrix.sh 2>/dev/null | sed -n 's/^apply_order=//p')" >/dev/null; then
+            echo "ok: bulk_redirects is in apply tier 1"
+          else
+            echo "::error::bulk_redirects should be in apply tier 1. A data \"cloudflare_\" block was probably added to it," \
+                 "which also drops it out of the offline plan in CI."
+            rc=1
+          fi
+
           # Apply order must put the zone-creating layer in the first tier and the
           # zone-consuming layers in a later one. If this regresses, waf,
-          # load_balancing and r2 plan against zones that do not exist yet and fail.
+          # load_balancing, r2 and workers plan against zones that do not exist
+          # yet and fail.
           #
           # Tier 1 is not asserted to be *only* zones: a layer that touches no
           # zone at all - account_governance, for one - has no upstream dependency
@@ -355,8 +383,8 @@ jobs:
           if ! jq -e '.[0] | index("zones") != null' <<<"$order" >/dev/null; then
             echo "::error::apply tier 1 must contain 'zones', got '$tier1' (full order: $order)"
             rc=1
-          elif [[ "$tier2" != "load_balancing,r2,waf" ]]; then
-            echo "::error::apply tier 2 should be 'load_balancing,r2,waf', got '$tier2' (full order: $order)"
+          elif [[ "$tier2" != "load_balancing,r2,waf,workers" ]]; then
+            echo "::error::apply tier 2 should be 'load_balancing,r2,waf,workers', got '$tier2' (full order: $order)"
             rc=1
           else
             echo "ok: zones applies in tier 1, ahead of the layers that look a zone up ($order)"

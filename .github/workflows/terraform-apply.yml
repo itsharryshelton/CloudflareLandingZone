@@ -7,15 +7,7 @@
 name: Terraform Apply
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'deployment/**'
-      - 'modules/**'
-      - '.github/workflows/terraform-apply.yml'
-      - '.github/workflows/_terraform-run.yml'
-      - '.github/scripts/**'
-  # A manual run has no diff to filter against, so it applies EVERY pair matching the narrowing below
+  # Manual only
   workflow_dispatch:
     inputs:
       account:
@@ -55,9 +47,9 @@ jobs:
       - name: Select
         id: select
         env:
-          BASE_SHA: ${{ github.event_name == 'push' && github.event.before || '' }}
+          # Every run here is a manual one, so there is no diff to narrow against.
           HEAD_SHA: ${{ github.sha }}
-          FORCE_ALL: ${{ github.event_name == 'workflow_dispatch' }}
+          FORCE_ALL: 'true'
           ONLY_ACCOUNT: ${{ inputs.account || 'all' }}
           ONLY_LAYER: ${{ inputs.layer || 'all' }}
         run: bash .github/scripts/tf-matrix.sh
