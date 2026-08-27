@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# bootstrap-account-tokens.sh - create Cloudflare Account-Owned API Tokens (cfat_)
+# bootstrap-account-tokens.sh - create Cloudflare Account-Owned API Tokens
 # for the Cloudflare Landing Zone pipelines, scoped per layer and exported to CSV.
 #
 # User API access required to run this script:

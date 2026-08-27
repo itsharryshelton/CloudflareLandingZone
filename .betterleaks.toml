@@ -1,0 +1,24 @@
+# Betterleaks Secret Scanning Configuration
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "cloudflare-api-token-cfat"
+description = "Cloudflare API or Account Token starting with cfat_ prefix"
+regex = '''(?i)\bcfat_[a-zA-Z0-9_\-]{16,}\b'''
+keywords = ["cfat_"]
+
+[[rules]]
+id = "cloudflare-api-token-prefix"
+description = "Strict match on any Cloudflare API token prefix"
+regex = '''(?i)\bcfat_[a-zA-Z0-9_\-]+\b'''
+keywords = ["cfat_"]
+
+[allowlist]
+description = "Global allowlist for public Terraform identifiers, Entra GUIDs, and account IDs"
+regexes = [
+  '''(?i)(?:cloudflare_)?account_id\s*=\s*["'][a-f0-9]{32}["']''',
+  '''(?i)zone_id\s*=\s*["'][a-f0-9]{32}["']''',
+  '''(?i)(?:client_id|directory_id|tenant_id|group_id)\s*=\s*["'][0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}["']''',
+]
