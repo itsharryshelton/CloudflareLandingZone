@@ -1,10 +1,11 @@
 # Pipelines
 
-Three workflows, plus one reusable definition they all share.
+Four workflows, plus one reusable definition they all share.
 
 | Workflow                                     | Trigger                                | Touches Cloudflare? | Can change anything? |
 | ----------------------------------------------| ----------------------------------------| ---------------------| ----------------------|
 | [`ci.yml`](ci.yml)                           | every PR, every push to `main`         | no                  | no                   |
+| [`secret-scanning.yml`](secret-scanning.yml) | every PR, every push to `main`, manual | no                  | no                   |
 | [`terraform-plan.yml`](terraform-plan.yml)   | PR touching the Terraform tree, manual | reads               | no                   |
 | [`terraform-apply.yml`](terraform-apply.yml) | manual only                            | reads + writes      | yes, after approval  |
 | [`_terraform-run.yml`](_terraform-run.yml)   | called by the two above                | n/a                 | n/a                  |
