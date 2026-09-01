@@ -1,14 +1,8 @@
-# =============================================================================
 # Reusable: run one layer, against one account, in one mode.
-#
-# This is the equivalent of the `extends: template:` indirection in the Azure
-# DevOps pipelines it replaces - all the Terraform mechanics live here once, and
-# ci.yml / terraform-plan.yml / terraform-apply.yml stay thin callers.
 #
 # One invocation == one Terraform state == one {account, layer} pair, because a
 # `provider "cloudflare"` block carries exactly one API token and Terraform
-# cannot hand a dynamic provider alias to a for_each'd module. See
-# deployment/layers/zones/providers.tf.
+# cannot hand a dynamic provider alias to a for_each'd module.
 #
 # MODES
 #   plan   init, plan to a file, upload the plan as an artifact, publish a
@@ -19,7 +13,7 @@
 # the same run, so what a reviewer approved is what executes. If state moved
 # underneath it, Terraform rejects the saved plan as stale rather than quietly
 # doing something else.
-# =============================================================================
+
 name: terraform-run
 
 on:
@@ -143,6 +137,56 @@ jobs:
             exit 1
           fi
 
+      # Fail pipeline if API Token is malformed, 6003/6111 will be thrown by the provider if malformed.
+      # Does not expose API Token in logs due to the echo command.
+      - name: Check the API token is a well-formed bearer credential
+        run: |
+          set -euo pipefail
+          tok="$CLOUDFLARE_API_TOKEN"
+
+          # Fatal: the provider sends the value verbatim after "Bearer ", so
+          # whitespace anywhere in it cannot produce a valid header.
+          case "$tok" in
+            *[[:space:]]*)
+              echo "::error title=Malformed API token::CLOUDFLARE_API_TOKEN for environment '${{ inputs.environment }}' contains whitespace (length ${#tok}). Cloudflare rejects every request with 6003/6111. Re-set the secret without a trailing newline or a line break from a wrapped token - pipe it in rather than typing it as an argument."
+              exit 1
+              ;;
+          esac
+
+          # Fatal: a global API key authenticates with X-Auth-Key and X-Auth-Email
+          # and is never a bearer credential, so this is unrecoverable rather than
+          # merely misconfigured.
+          case "$tok" in
+            cfk_*)
+              echo "::error title=Wrong credential type::CLOUDFLARE_API_TOKEN for environment '${{ inputs.environment }}' is a global API key (cfk_ prefix), not an API token. The provider sends it as 'Authorization: Bearer', which a global key does not support. Create an API token instead."
+              exit 1
+              ;;
+            cfat_*) echo "token: account-owned (cfat_), length ${#tok}" ;;
+            cfut_*) echo "token: user-owned (cfut_), length ${#tok}" ;;
+            *)      echo "token: legacy unprefixed format, length ${#tok}" ;;
+          esac
+
+          # Advisory only. Catches a revoked, expired or wrong-account token before
+          # a long plan, but a parse miss or a transient API blip must never block a
+          # run - so every failure path below is a warning.
+          #
+          # Account-scoped endpoint on purpose: /user/tokens/verify rejects an
+          # account-owned token with 1000 "Invalid API Token" even when the token is
+          # valid and correctly scoped.
+          account_id=$(grep -oE '[0-9a-f]{32}' "$ACCOUNT_DIR/account.tfvars" | head -n1 || true)
+          if [[ -z "$account_id" ]]; then
+            echo "::warning::no cloudflare_account_id found in $ACCOUNT_DIR/account.tfvars, skipping the live token check"
+            exit 0
+          fi
+          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 \
+            -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "https://api.cloudflare.com/client/v4/accounts/$account_id/tokens/verify" || echo 000)
+          case "$code" in
+            200) echo "token verified against account $account_id" ;;
+            000) echo "::warning::could not reach the Cloudflare API to verify the token; continuing" ;;
+            *)   echo "::warning title=Token did not verify::/accounts/$account_id/tokens/verify returned HTTP $code. The token may be revoked, expired, or not scoped to this account. Continuing - Terraform will give the authoritative error." ;;
+          esac
+
       # Module sources point at the private modules repository, which
       # GITHUB_TOKEN cannot read. Must run before `terraform init`.
       - uses: ./.github/actions/modules-auth
@@ -221,6 +265,8 @@ jobs:
       - name: Terraform plan
         id: plan
         if: inputs.mode == 'plan'
+        env:
+          TF_VAR_identity_provider_secrets: ${{ secrets.TF_VAR_IDENTITY_PROVIDER_SECRETS }}
         run: |
           set -euo pipefail
           # Which account var files this layer takes is derived from the config,

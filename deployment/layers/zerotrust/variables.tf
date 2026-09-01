@@ -135,7 +135,9 @@ variable "identity_provider_secrets" {
     Entra ID app registration's client secret goes here, and nowhere else.
 
     THIS VARIABLE IS NEVER SET FROM A FILE. It arrives from the pipeline as
-    TF_VAR_identity_provider_secrets, read from the apply environment's secrets:
+    TF_VAR_identity_provider_secrets, mapped in _terraform-run.yml from the
+    <account>-plan environment's secrets - the plan environment, not the apply
+    one, because apply runs a saved plan file and never re-reads TF_VAR_:
 
       TF_VAR_identity_provider_secrets={"entra_id":"<the secret>"}
 

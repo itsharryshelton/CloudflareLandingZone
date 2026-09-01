@@ -57,3 +57,18 @@ default_block_notification = {
   enabled = true
   msg     = "This request was blocked by your organisation's internet policy."
 }
+
+# An HTTP policy with TLS inspection off is consulted for plaintext HTTP only,
+# while the dashboard still lists it as active. Off: a control that reads as
+# working and enforces nothing is worse than no control.
+allow_uninspected_http_policies = false
+
+# Blocking every file that could not be scanned - including files past the
+# scanner's size limit - turns an antivirus fault into a download outage.
+allow_antivirus_fail_closed = false
+
+# Account-level Gateway configuration is a per-account object with a per-account
+# blast radius, and enabling inspection depends on the CA being trusted on that
+# account's devices. Set it in accounts/<account>/gateway.tfvars; null here
+# leaves the Zero Trust dashboard authoritative.
+gateway_settings = null

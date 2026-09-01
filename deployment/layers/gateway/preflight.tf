@@ -6,6 +6,8 @@ resource "terraform_data" "preflight" {
     content_categories  = length(var.gateway_blocked_content_categories)
     bypass_applications = length(var.gateway_bypass_applications)
     dlp_profiles        = length(var.gateway_dlp_profile_ids)
+    tls_decrypt         = var.gateway_settings == null ? "unmanaged" : tostring(try(var.gateway_settings.tls_decrypt.enabled, "unset"))
+    inspection_cert     = var.gateway_inspection_certificate == null ? "unmanaged" : "managed"
   }
 
   lifecycle {
@@ -22,7 +24,7 @@ resource "terraform_data" "preflight" {
     # rather than printed.
     precondition {
       condition     = length(local.unknown_application_names) == 0
-      error_message = "A Gateway application name matches nothing in this account's application catalogue: ${join("; ", local.unknown_application_names)}. Cloudflare publishes ${local.application_name_count} applications and app types for this account; the names are the ones shown by the Application selector in the Zero Trust dashboard, and the full list can be read with `terraform console` on this layer as data.cloudflare_zero_trust_gateway_app_types_list.this.result."
+      error_message = "A Gateway application name matches nothing in this account's application catalogue: ${join("; ", local.unknown_application_names)}. Cloudflare publishes ${local.application_name_count} applications and app types for this account; the names are the ones shown by the Application selector in the Zero Trust dashboard, and the full list can be read with `terraform console` on this layer as data.cloudflare_zero_trust_gateway_app_types_list.this.result. Catalogue entries sharing a word with what you wrote (up to 40): ${join(", ", local.application_name_suggestions)}. Note the Gateway application catalogue is not the SaaS application list in Access - the same product appears in both under different names."
     }
 
     precondition {
@@ -51,6 +53,13 @@ resource "terraform_data" "preflight" {
     precondition {
       condition     = var.allow_disabling_dnssec_validation || length(local.dnssec_validation_disabled) == 0
       error_message = "These policies disable DNSSEC validation: ${join(", ", local.dnssec_validation_disabled)}. DNSSEC is what stops a forged answer being accepted for a signed zone, and turning it off makes that policy's resolution spoofable. The usual cause is an internal zone that is signed badly, which is a problem to fix at the zone. Set allow_disabling_dnssec_validation = true if it is genuinely the answer."
+    }
+
+    # The quietest failure Gateway has: the rules exist, the dashboard shows
+    # them enforced, and an HTTPS request never reaches them.
+    precondition {
+      condition     = var.allow_uninspected_http_policies || length(local.uninspected_http_policies) == 0
+      error_message = "These HTTP policies are defined while TLS decryption is ${local.tls_decrypt_state == "unmanaged" ? "not managed by Terraform" : "off"}: ${join("; ", local.uninspected_http_policies)}. Gateway only applies an HTTP policy to a request it decrypted, so on an HTTPS estate these enforce nothing while the Zero Trust dashboard lists them as active - no block page, no log entry, no sign anything is wrong. Set gateway_settings.tls_decrypt.enabled = true in accounts/<account>/gateway.tfvars, having first confirmed the devices on WARP trust the CA Gateway presents. Set allow_uninspected_http_policies = true only if the rules are deliberately plaintext-only or inspection is being turned on in a later change."
     }
 
     precondition {

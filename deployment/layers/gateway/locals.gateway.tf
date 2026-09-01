@@ -4,6 +4,13 @@
 #
 # Every entry carries the same attribute set, including the ones it does not use,
 # because Terraform needs one type across the map.
+#
+# PRECEDENCE: unique across every entry here, DNS and HTTP alike. Cloudflare
+# keeps all three builders in one rule collection, so a number reused between a
+# DNS and an HTTP policy is rejected at apply with 409 "A rule with this
+# precedence already exists" - and because Terraform creates them concurrently,
+# whichever loses the race is arbitrary. Ordering within a type is what the
+# relative values express; the gaps between them are deliberate headroom.
 
 locals {
   gateway_baseline_catalogue = {
@@ -35,7 +42,7 @@ locals {
       name        = "Baseline - block security threats (HTTP)"
       type        = "http"
       action      = "block"
-      precedence  = 20
+      precedence  = 30
       description = "Baseline - block Cloudflare security categories at HTTP, for clients that do not use Gateway's resolver"
 
       security_categories = var.gateway_security_categories
@@ -53,7 +60,7 @@ locals {
       name        = "Baseline - block disallowed content categories"
       type        = "dns"
       action      = "block"
-      precedence  = 20
+      precedence  = 40
       description = "Baseline - block the content categories this account does not permit"
 
       security_categories = []
@@ -72,7 +79,7 @@ locals {
       name        = "Baseline - do not inspect trusted applications"
       type        = "http"
       action      = "off"
-      precedence  = 10
+      precedence  = 20
       description = "Baseline - bypass TLS inspection for applications that cannot tolerate it"
 
       security_categories = []
@@ -90,7 +97,7 @@ locals {
       name        = "Baseline - block DLP matches"
       type        = "http"
       action      = "block"
-      precedence  = 30
+      precedence  = 50
       description = "Baseline - block requests whose body matches a DLP profile"
 
       security_categories = []
@@ -108,7 +115,7 @@ locals {
       name        = "Baseline - quarantine risky downloads"
       type        = "http"
       action      = "quarantine"
-      precedence  = 40
+      precedence  = 60
       description = "Baseline - detonate executable downloads in Cloudflare's file sandbox before delivering them"
 
       security_categories = []

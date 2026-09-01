@@ -248,8 +248,6 @@ locals {
           file_types = policy.settings.quarantine_file_types
         }
 
-        add_headers = policy.settings.add_headers
-
         override_host                      = policy.settings.override_host
         override_ips                       = policy.settings.override_ips
         insecure_disable_dnssec_validation = policy.settings.insecure_disable_dnssec_validation
@@ -272,7 +270,6 @@ locals {
       policy.settings.untrusted_cert_action != null,
       policy.settings.payload_log_enabled != null,
       policy.settings.quarantine_file_types != null,
-      policy.settings.add_headers != null,
       policy.settings.override_host != null,
       policy.settings.override_ips != null,
       policy.settings.insecure_disable_dnssec_validation != null,
@@ -311,17 +308,20 @@ locals {
     ]
   ])))
 
-  # Precedence is per builder, so the same number in a DNS and an HTTP policy is
-  # fine and the same number twice in one builder is an ordering nobody chose.
-  duplicate_precedences = sort(distinct(flatten([
-    for type in keys(local.valid_actions) : [
-      for policy in var.policies : "${type} precedence ${policy.precedence}"
-      if policy.type == type && length([
-        for other in var.policies : other
-        if other.type == type && other.precedence == policy.precedence
-      ]) > 1
-    ]
-  ])))
+  # Gateway walks each builder separately, so it is tempting to scope precedence
+  # per type. Cloudflare does not: gateway/rules is one collection and the
+  # `filters` field is what separates DNS from network from HTTP, so precedence
+  # is allocated account-wide. Reusing a number across two types is rejected at
+  # apply with 409 "A rule with this precedence already exists", and because
+  # Terraform creates the policies concurrently, whichever one loses the race is
+  # arbitrary. Checked across all policies for that reason.
+  duplicate_precedences = sort(distinct([
+    for policy in var.policies : "precedence ${policy.precedence}"
+    if length([
+      for other in var.policies : other
+      if other.precedence == policy.precedence
+    ]) > 1
+  ]))
 
   policies_with_no_selector = sort([
     for key in local.policy_keys : key
@@ -402,18 +402,9 @@ locals {
       policy.settings.untrusted_cert_action != null ? "${key}.settings.untrusted_cert_action" : "",
       policy.settings.block_page != null ? "${key}.settings.block_page" : "",
       policy.settings.redirect != null ? "${key}.settings.redirect" : "",
-      policy.settings.add_headers != null ? "${key}.settings.add_headers" : "",
     ])
     if policy.type != "http"
   ])))
-
-  # Cloudflare adds headers to a request it is letting through. On any other
-  # action there is no onward request to add them to, so the setting is dropped
-  # and the tenant restriction the headers were carrying is not enforced.
-  add_headers_with_incompatible_action = sort([
-    for key, policy in local.policies : "${key} (action = \"${policy.action}\")"
-    if policy.settings.add_headers != null && policy.action != "allow"
-  ])
 
   network_only_settings = sort(distinct(flatten([
     for key, policy in local.policies : compact([

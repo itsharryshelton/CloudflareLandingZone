@@ -367,45 +367,59 @@ jobs:
             "deployment/layers/workers/scripts/redirects/redirect.js" \
             "$(expect_layer_everywhere workers)" || rc=1
 
+          order="$(FORCE_ALL=true bash .github/scripts/tf-matrix.sh 2>/dev/null | sed -n 's/^apply_order=//p')"
+          tier1="$(jq -r '.[0] // [] | join(",")' <<<"$order")"
+          tier2="$(jq -r '.[1] // [] | join(",")' <<<"$order")"
+          tier3="$(jq -r '.[2] // [] | join(",")' <<<"$order")"
+
           # bulk_redirects resolves nothing through the API - Bulk Redirect rows
           # carry their own hostnames, so no zone ID is ever needed - which puts
-          # it in tier 1 alongside zones and wan, and makes it offline-plannable.
-          if jq -e '.[0] | index("bulk_redirects") != null' \
-               <<<"$(FORCE_ALL=true bash .github/scripts/tf-matrix.sh 2>/dev/null | sed -n 's/^apply_order=//p')" >/dev/null; then
-            echo "ok: bulk_redirects is in apply tier 1"
+          # it in tier 2 alongside zones and wan, and makes it offline-plannable.
+          if jq -e '.[1] | index("bulk_redirects") != null' <<<"$order" >/dev/null; then
+            echo "ok: bulk_redirects is in apply tier 2"
           else
-            echo "::error::bulk_redirects should be in apply tier 1. A data \"cloudflare_\" block was probably added to it," \
+            echo "::error::bulk_redirects should be in apply tier 2. A data \"cloudflare_\" block was probably added to it," \
                  "which also drops it out of the offline plan in CI."
             rc=1
           fi
 
-          # Apply order must put the zone-creating layer in the first tier and the
-          # zone-consuming layers in a later one. If this regresses, waf,
-          # load_balancing, r2 and workers plan against zones that do not exist
-          # yet and fail.
-          #
-          # Tier 1 is not asserted to be *only* zones: a layer that touches no
-          # zone at all - account_governance, for one - has no upstream dependency
-          # and correctly belongs there too.
-          order="$(FORCE_ALL=true bash .github/scripts/tf-matrix.sh 2>/dev/null | sed -n 's/^apply_order=//p')"
-          tier1="$(jq -r '.[0] | join(",")' <<<"$order")"
-          tier2="$(jq -r '.[1] // [] | join(",")' <<<"$order")"
-          if ! jq -e '.[0] | index("zones") != null' <<<"$order" >/dev/null; then
-            echo "::error::apply tier 1 must contain 'zones', got '$tier1' (full order: $order)"
-            rc=1
-          elif [[ "$tier2" != "load_balancing,r2,waf,workers" ]]; then
-            echo "::error::apply tier 2 should be 'load_balancing,r2,waf,workers', got '$tier2' (full order: $order)"
+          # Tier 1 is the account-wide prerequisite tier: permissions and
+          # resource-group scope go out before anything is evaluated against them.
+          # Nothing in the Terraform graph enforces that, so it is asserted here.
+          if [[ "$tier1" != "account_governance" ]]; then
+            echo "::error::apply tier 1 should be exactly 'account_governance', got '$tier1' (full order: $order)"
             rc=1
           else
-            echo "ok: zones applies in tier 1, ahead of the layers that look a zone up ($order)"
+            echo "ok: account_governance applies alone in tier 1"
+          fi
+
+          # Apply order must put the zone-creating layer ahead of the
+          # zone-consuming ones. If this regresses, waf, load_balancing, r2 and
+          # workers plan against zones that do not exist yet and fail.
+          #
+          # Tier 2 is not asserted to be *only* zones: a layer that touches no
+          # zone at all - gateway, for one - has no upstream dependency and
+          # correctly belongs there too.
+          #
+          # zerotrust is in tier 3 by POST_ZONE_LAYERS rather than by a data
+          # source: Access applications are addressed by hostname, so they need
+          # the zone to exist even though the layer never reads one.
+          if ! jq -e '.[1] | index("zones") != null' <<<"$order" >/dev/null; then
+            echo "::error::apply tier 2 must contain 'zones', got '$tier2' (full order: $order)"
+            rc=1
+          elif [[ "$tier3" != "load_balancing,r2,waf,workers,zerotrust" ]]; then
+            echo "::error::apply tier 3 should be 'load_balancing,r2,waf,workers,zerotrust', got '$tier3' (full order: $order)"
+            rc=1
+          else
+            echo "ok: zones applies in tier 2, ahead of the layers that look a zone up ($order)"
           fi
 
           # terraform-apply.yml declares a fixed number of sequential stages,
           # because a GitHub Actions job graph cannot grow one at runtime.
           tiers="$(FORCE_ALL=true bash .github/scripts/tf-matrix.sh 2>/dev/null | sed -n 's/^tier_count=//p')"
-          if [[ "$tiers" -gt 2 ]]; then
+          if [[ "$tiers" -gt 3 ]]; then
             echo "::error::the dependency graph now has $tiers tiers, but" \
-                 "terraform-apply.yml only defines stages for 2. Add a tier stage there."
+                 "terraform-apply.yml only defines stages for 3. Add a tier stage there."
             rc=1
           fi
 

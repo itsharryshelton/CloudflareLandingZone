@@ -42,7 +42,7 @@ resource "cloudflare_zero_trust_gateway_policy" "this" {
 
     precondition {
       condition     = length(local.duplicate_precedences) == 0
-      error_message = "Two policies of the same type share a precedence: ${join("; ", local.duplicate_precedences)}. Precedence is the evaluation order within a builder and Gateway stops at the first allow or block that matches, so a tie means the enforced order is Cloudflare's choice rather than yours. Precedence is per type, so a DNS and an HTTP policy may share a number."
+      error_message = "Two policies share a precedence: ${join("; ", local.duplicate_precedences)}. Cloudflare allocates precedence across the whole account rather than per policy type - gateway/rules is a single collection - so a DNS and an HTTP policy may NOT share a number. The API rejects the second one with 409 \"A rule with this precedence already exists\", and since Terraform creates them concurrently, which one fails is arbitrary. Give every policy in this account, of every type, its own precedence."
     }
 
     # A policy with no traffic, identity or device posture expression matches
@@ -79,14 +79,6 @@ resource "cloudflare_zero_trust_gateway_policy" "this" {
         length(local.conflicting_device_posture_definitions) == 0
       )
       error_message = "These policies set both a structured matcher and a raw expression for the same dimension - traffic: ${join(", ", local.conflicting_traffic_definitions)}; identity: ${join(", ", local.conflicting_identity_definitions)}; device posture: ${join(", ", local.conflicting_device_posture_definitions)}. The raw expression replaces the compiled one rather than being merged with it, so one of the two would be silently discarded. Express the whole condition one way or the other."
-    }
-
-    # Cloudflare only adds headers to a request it is letting through, so the
-    # setting is dropped anywhere else - and a dropped tenant-restriction header
-    # is a sign-in to a personal tenant that nothing refuses.
-    precondition {
-      condition     = length(local.add_headers_with_incompatible_action) == 0
-      error_message = "These policies set settings.add_headers with an action that has no onward request to add them to: ${join("; ", local.add_headers_with_incompatible_action)}. Cloudflare accepts add_headers only on an HTTP policy whose action is \"allow\". Injected headers are how a Microsoft 365 or Google Workspace tenant restriction is enforced, so a dropped one is an unrestricted sign-in that the dashboard still shows as configured."
     }
 
     precondition {

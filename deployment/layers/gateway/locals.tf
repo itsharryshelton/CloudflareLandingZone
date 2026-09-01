@@ -5,14 +5,34 @@ locals {
   # Risks" and the subcategories under it - and a policy can name either, so both
   # levels are flattened into one lookup.
 
-  category_subcategories = flatten([
-    for category in data.cloudflare_zero_trust_gateway_categories_list.this.result :
-    try(category.subcategories, [])
-  ])
+  # A category with no children returns `subcategories` as null rather than as an
+  # empty list. `try` does not rescue that - null is a value, not an error - so
+  # the nulls survive the flatten and have to be dropped here, or every read of
+  # `subcategory.name` below fails on them.
+  category_subcategories = [
+    for subcategory in flatten([
+      for category in data.cloudflare_zero_trust_gateway_categories_list.this.result :
+      try(category.subcategories, [])
+    ]) : subcategory
+    if subcategory != null
+  ]
 
+  # Grouped before it is indexed: Cloudflare is free to ship the same name under
+  # two parents, and a bare `for` would fail the plan on the duplicate key. A
+  # subcategory still wins over a parent of the same name, as before.
   category_ids_by_name = merge(
-    { for category in data.cloudflare_zero_trust_gateway_categories_list.this.result : lower(trimspace(category.name)) => category.id },
-    { for subcategory in local.category_subcategories : lower(trimspace(subcategory.name)) => subcategory.id },
+    {
+      for name, ids in {
+        for category in data.cloudflare_zero_trust_gateway_categories_list.this.result :
+        lower(trimspace(category.name)) => category.id...
+      } : name => min(ids...)
+    },
+    {
+      for name, ids in {
+        for subcategory in local.category_subcategories :
+        lower(trimspace(subcategory.name)) => subcategory.id...
+      } : name => min(ids...)
+    },
   )
 
   category_names = sort(distinct(concat(
@@ -22,9 +42,17 @@ locals {
 
   # Applications and app types come back in one list. `id` is the value
   # `app.ids` matches on.
+  #
+  # That one list makes names non-unique - an app type and an application beneath
+  # it can share a name, and a rebrand can leave both the old and new entry - so
+  # the names are grouped and the lowest id taken. Lowest rather than first
+  # because the API does not promise an order, and an id that moved between plans
+  # would show as drift on a rule nobody touched.
   application_ids_by_name = {
-    for application in data.cloudflare_zero_trust_gateway_app_types_list.this.result :
-    lower(trimspace(application.name)) => application.id
+    for name, ids in {
+      for application in data.cloudflare_zero_trust_gateway_app_types_list.this.result :
+      lower(trimspace(application.name)) => application.id...
+    } : name => min(ids...)
   }
 
   application_name_count = length(local.application_ids_by_name)
@@ -126,7 +154,6 @@ locals {
         untrusted_cert_action = null
         payload_log_enabled   = null
         quarantine_file_types = local.gateway_baseline_catalogue[key].quarantine_file_types
-        add_headers           = null
 
         override_host                      = null
         override_ips                       = null
@@ -229,7 +256,6 @@ locals {
 
         payload_log_enabled   = policy.settings.payload_log_enabled
         quarantine_file_types = policy.settings.quarantine_file_types
-        add_headers           = policy.settings.add_headers
 
         override_host                      = policy.settings.override_host
         override_ips                       = policy.settings.override_ips
@@ -279,6 +305,46 @@ locals {
 
   unknown_application_names = sort(distinct(local.application_name_references))
 
+  # The same unresolved names, unformatted, so they can be matched against the
+  # catalogue below.
+  unresolved_application_names = distinct(flatten([
+    [
+      for key in local.selected_baseline_keys : [
+        for name in local.gateway_baseline_catalogue[key].applications : lower(trimspace(name))
+        if !contains(keys(local.application_ids_by_name), lower(trimspace(name)))
+      ]
+    ],
+    [
+      for key, policy in var.gateway_policies : [
+        for name in policy.match.applications : lower(trimspace(name))
+        if !contains(keys(local.application_ids_by_name), lower(trimspace(name)))
+      ]
+    ],
+  ]))
+
+  # Catalogue entries sharing a word with something that did not resolve. The
+  # catalogue runs past 1500 entries and is not printable, and the names are not
+  # the ones the SaaS application selector shows, so a bare "no match" leaves an
+  # operator guessing. Words of three characters or fewer are skipped because
+  # "365" and "ID" match most of the catalogue.
+  application_name_suggestions = slice(
+    sort(distinct([
+      for candidate in keys(local.application_ids_by_name) : candidate
+      if anytrue([
+        for name in local.unresolved_application_names :
+        anytrue([for word in split(" ", name) : strcontains(candidate, word) if length(word) > 3])
+      ])
+    ])),
+    0,
+    min(40, length(distinct([
+      for candidate in keys(local.application_ids_by_name) : candidate
+      if anytrue([
+        for name in local.unresolved_application_names :
+        anytrue([for word in split(" ", name) : strcontains(candidate, word) if length(word) > 3])
+      ])
+    ])))
+  )
+
   # The baseline occupies the low precedences on purpose. Gateway stops at the
   # first allow or block that matches, so an account tree rule in front of a
   # platform block is a platform block that never runs.
@@ -307,6 +373,19 @@ locals {
   dnssec_validation_disabled = sort([
     for key, policy in var.gateway_policies : "gateway_policies.${key}"
     if try(policy.settings.insecure_disable_dnssec_validation, false) == true
+  ])
+
+  # An HTTP policy is only consulted for a request Gateway decrypted. With
+  # inspection off - or with the account configuration unmanaged, where it may
+  # be off and nothing here would know - those policies apply to plaintext HTTP
+  # alone while the dashboard lists them as active. "off" (Do Not Inspect) is
+  # excluded: it is evaluated on the handshake, so it is merely redundant rather
+  # than broken.
+  tls_decrypt_state = var.gateway_settings == null ? "unmanaged" : tostring(try(var.gateway_settings.tls_decrypt.enabled, "unset"))
+
+  uninspected_http_policies = local.tls_decrypt_state == "true" ? [] : sort([
+    for key, policy in var.gateway_policies : "gateway_policies.${key} (action = \"${policy.action}\")"
+    if policy.type == "http" && policy.action != "off"
   ])
 
   untrusted_cert_pass_through_used = sort(concat(

@@ -1,8 +1,20 @@
-# Apply - plan, then apply that plan after human approval. Never one without the
-# other.
+# Apply - plan, then apply that plan after human approval.
 #
 # Every apply in this workflow consumes a plan file produced by an earlier job in
 # the same run. `terraform apply` is only ever handed a saved plan.
+#
+# Stages run strictly in sequence, because each tier's PLAN can depend on the
+# previous tier's APPLY having already happened:
+#
+#   tier 1  account_governance  - account-wide permissions and resource-group
+#                                 scope. Every later tier's token is evaluated
+#                                 against what this applies, so it goes first.
+#   tier 2  zones + layers that touch no zone - parallel.
+#   tier 3  layers that need a zone to already exist - parallel. Either they
+#           resolve one with data "cloudflare_zone", or they address resources
+#           by hostname (zerotrust). Cannot be planned until tier 2 has run.
+#
+# KEY: Which layer lands in which tier is derived in .github/scripts/tf-matrix.sh
 
 name: Terraform Apply
 
@@ -36,8 +48,10 @@ jobs:
     outputs:
       tier0: ${{ steps.select.outputs.tier0 }}
       tier1: ${{ steps.select.outputs.tier1 }}
+      tier2: ${{ steps.select.outputs.tier2 }}
       tier0_any: ${{ steps.select.outputs.tier0_any }}
       tier1_any: ${{ steps.select.outputs.tier1_any }}
+      tier2_any: ${{ steps.select.outputs.tier2_any }}
       any: ${{ steps.select.outputs.any }}
     steps:
       - uses: actions/checkout@v7
@@ -62,14 +76,14 @@ jobs:
           # A GitHub Actions job graph is static YAML - it cannot grow a stage at
           # runtime. Failing here is the safe outcome: the alternative is applying
           # tiers 1 and 2 and silently never applying tier 3.
-          if [[ "${TIER_COUNT:-0}" -gt 2 ]]; then
+          if [[ "${TIER_COUNT:-0}" -gt 3 ]]; then
             echo "::error::the layer dependency graph now has $TIER_COUNT tiers," \
-                 "but this workflow defines 2. Add a plan/apply stage pair for the" \
+                 "but this workflow defines 3. Add a plan/apply stage pair for the" \
                  "new tier, and update the guard in ci.yml."
             exit 1
           fi
 
-  # TIER 1 - layers with no upstream dependency
+  # TIER 1 - account-wide prerequisites (e.g. account_governance).
   plan-tier0:
     name: plan (tier 1)
     needs: discover
@@ -106,14 +120,13 @@ jobs:
       plan_artifact: tfplan-${{ matrix.account }}-${{ matrix.layer }}-${{ github.run_id }}-${{ github.run_attempt }}
     secrets: inherit
 
-  # TIER 2 - layers that resolve a zone by lookup.
-  # These cannot even be PLANNED before tier 1 has applied, which is why the plan job depends on apply-tier0 rather than running alongside tier 1.
+  # TIER 2 - zones, plus every layer that touches no zone.
+  # Planned only after tier 1 has applied: a permission or resource-group scope
+  # change in account_governance decides what this tier's token may even read, so
+  # planning alongside it would race the authz change.
   plan-tier1:
     name: plan (tier 2)
     needs: [discover, apply-tier0]
-    # apply-tier0 is legitimately skipped when nothing in tier 1 changed, so this
-    # cannot use the default "all needs succeeded". It must still stop if tier 1
-    # actually failed or the run was cancelled.
     if: >-
       !failure() && !cancelled() &&
       needs.discover.outputs.tier1_any == 'true'
@@ -147,11 +160,59 @@ jobs:
       plan_artifact: tfplan-${{ matrix.account }}-${{ matrix.layer }}-${{ github.run_id }}-${{ github.run_attempt }}
     secrets: inherit
 
+  # TIER 3 - layers that need a zone to already exist.
+  # These cannot even be PLANNED before tier 2 has applied, which is why the plan
+  # job depends on apply-tier1 rather than running alongside tier 2.
+  plan-tier2:
+    name: plan (tier 3)
+    needs: [discover, apply-tier1]
+    if: >-
+      !failure() && !cancelled() &&
+      needs.discover.outputs.tier2_any == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.discover.outputs.tier2) }}
+    uses: ./.github/workflows/_terraform-run.yml
+    with:
+      account: ${{ matrix.account }}
+      layer: ${{ matrix.layer }}
+      mode: plan
+      environment: ${{ matrix.account }}-plan
+      plan_artifact: tfplan-${{ matrix.account }}-${{ matrix.layer }}-${{ github.run_id }}-${{ github.run_attempt }}
+    secrets: inherit
+
+  apply-tier2:
+    name: apply (tier 3)
+    needs: [discover, plan-tier2]
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        include: ${{ fromJSON(needs.discover.outputs.tier2) }}
+    uses: ./.github/workflows/_terraform-run.yml
+    with:
+      account: ${{ matrix.account }}
+      layer: ${{ matrix.layer }}
+      mode: apply
+      environment: ${{ matrix.account }}-${{ matrix.layer }}-apply
+      plan_artifact: tfplan-${{ matrix.account }}-${{ matrix.layer }}-${{ github.run_id }}-${{ github.run_attempt }}
+    secrets: inherit
+
   # ---------------------------------------------------------------------------
   apply-complete:
     name: apply complete
     runs-on: ubuntu-latest
-    needs: [discover, plan-tier0, apply-tier0, plan-tier1, apply-tier1]
+    needs:
+      [
+        discover,
+        plan-tier0,
+        apply-tier0,
+        plan-tier1,
+        apply-tier1,
+        plan-tier2,
+        apply-tier2,
+      ]
     if: always()
     steps:
       - name: Report
@@ -165,14 +226,18 @@ jobs:
             [apply-tier0]='${{ needs['apply-tier0'].result }}'
             [plan-tier1]='${{ needs['plan-tier1'].result }}'
             [apply-tier1]='${{ needs['apply-tier1'].result }}'
+            [plan-tier2]='${{ needs['plan-tier2'].result }}'
+            [apply-tier2]='${{ needs['apply-tier2'].result }}'
           )
+
+          STAGES=(discover plan-tier0 apply-tier0 plan-tier1 apply-tier1 plan-tier2 apply-tier2)
 
           {
             echo "### Apply run summary"
             echo
             echo "| Stage | Result |"
             echo "|---|---|"
-            for stage in discover plan-tier0 apply-tier0 plan-tier1 apply-tier1; do
+            for stage in "${STAGES[@]}"; do
               echo "| $stage | ${R[$stage]} |"
             done
           } >>"$GITHUB_STEP_SUMMARY"
@@ -185,7 +250,7 @@ jobs:
           # `skipped` is a normal outcome: a stage is skipped when its tier had no
           # affected pairs, or when a reviewer declined the approval. Only an
           # outright failure or cancellation is an error here.
-          for stage in plan-tier0 apply-tier0 plan-tier1 apply-tier1; do
+          for stage in "${STAGES[@]:1}"; do
             case "${R[$stage]}" in
               success|skipped) ;;
               *) echo "::error::$stage: ${R[$stage]}"; exit 1 ;;

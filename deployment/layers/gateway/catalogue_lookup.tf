@@ -18,6 +18,12 @@ data "cloudflare_zero_trust_gateway_categories_list" "this" {
 # `id` is what `app.ids` matches on, which is the field this layer uses:
 # selecting "Microsoft 365" covers every hostname Cloudflare knows the product
 # uses, which is the difference between one bypass rule and forty.
+#
+# max_items is set because the data source defaults it to 1000 and Cloudflare
+# publishes several thousand applications. The default silently truncates, and a
+# truncated catalogue does not look like a fault: the name resolves to nothing
+# and preflight reports it as a name Cloudflare does not know.
 data "cloudflare_zero_trust_gateway_app_types_list" "this" {
   account_id = var.cloudflare_account_id
+  max_items  = 10000
 }
