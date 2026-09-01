@@ -38,13 +38,14 @@ locals {
   # Cloudflare expresses that as a resource group whose scope is the account
   # itself, which every account has, so it is found rather than invented.
   #
-  # `scope` is a list in the provider schema even though an account has one, so
-  # it is flattened to its keys rather than indexed.
+  # `scope` is a single object in the provider schema, and it is optional, so a
+  # group can come back with none. `try` covers both the null and the missing
+  # case; a bare `group.scope.key` would fail the whole plan on one such group.
   account_scope_key = "com.cloudflare.api.account.${var.cloudflare_account_id}"
 
   account_scope_resource_group_ids = [
     for group in try(data.cloudflare_resource_groups.this.result, []) : group.id
-    if contains([for scope in try(group.scope, []) : scope.key], local.account_scope_key)
+    if try(group.scope.key, null) == local.account_scope_key
   ]
 
   # Members

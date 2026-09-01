@@ -5,9 +5,9 @@
 # takes a plain list of rules and knows nothing about baselines or zone keys.
 #
 # Downstream deployments pin an immutable tag instead of the local path:
-#   source = "git::https://github.com/yourorg/CloudflareLandingZone//modules/waf?ref=v1.0.0"
+#   source = "git::https://github.com/Your-Org/cloudflare-platform-modules//waf?ref=v1.0.0"
 module "waf" {
-  source = "../../../modules/waf"
+  source = "git::https://github.com/Your-Org/cloudflare-platform-modules//waf?ref=v1.0.0"
 
   for_each = local.waf_policies
   zone_id  = data.cloudflare_zone.this[each.value.zone_key].id

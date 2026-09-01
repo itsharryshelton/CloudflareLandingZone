@@ -95,7 +95,6 @@ variable "policies" {
       untrusted_cert_action              = optional(string)
       payload_log_enabled                = optional(bool)
       quarantine_file_types              = optional(list(string))
-      add_headers                        = optional(map(list(string)))
       override_host                      = optional(string)
       override_ips                       = optional(list(string))
       insecure_disable_dnssec_validation = optional(bool)
@@ -130,7 +129,10 @@ variable "policies" {
                             matches. It is required rather than derived from list
                             order because reordering a firewall must be a visible
                             one-number diff, not a side effect of moving a block of
-                            HCL.
+                            HCL. Must be unique across EVERY policy in the account,
+                            not just within the type: Cloudflare stores all three
+                            builders in one rule collection and rejects a reused
+                            number with 409.
       - description       : (Optional) shown in the dashboard and the audit log.
                             Falls back to name.
       - enabled           : (Optional) deploy the policy but leave it inactive.
@@ -224,23 +226,10 @@ variable "policies" {
       payload_log_enabled                - STORE THE MATCHED CONTENT of a DLP hit.
                                            See the warning below. http
       quarantine_file_types              - required by action = "quarantine"
-      add_headers                        - headers Cloudflare adds to the request on
-                                           its way to the origin, as name => list of
-                                           values. http, and only with
-                                           action = "allow", because there is no
-                                           request left to add a header to once the
-                                           policy has blocked it
       override_host / override_ips       - required by action = "override". dns
       insecure_disable_dnssec_validation - dns
       ip_categories                      - apply category filtering to IP literals. dns
       ignore_cname_category_matches      - dns
-
-    add_headers is how a SaaS tenant restriction is enforced: Microsoft and Google
-    both read a request header to decide which tenants a sign-in may use, so
-    Gateway injecting it is what stops a corporate device signing into a personal
-    account. It only works where the traffic is decrypted, so an application
-    exempted from TLS inspection by an "off" policy earlier in the HTTP order
-    cannot be given headers - the header would silently never be added.
 
     payload_log_enabled writes the fragment of the request that triggered the DLP
     match into Cloudflare's logs. That fragment is, by definition, the sensitive
@@ -251,7 +240,8 @@ variable "policies" {
     WHAT THIS MODULE DOES NOT MANAGE
 
     Gateway lists, DLP profiles, proxy endpoints, account-level Gateway settings,
-    browser isolation controls, egress policies and resolver policies. DLP profiles are referenced by ID because Cloudflare exposes no data
+    browser isolation controls, header injection, egress policies and resolver
+    policies. DLP profiles are referenced by ID because Cloudflare exposes no data
     source that resolves one by name.
   EOT
 
@@ -287,7 +277,7 @@ variable "policies" {
 
   validation {
     condition     = alltrue([for policy in var.policies : policy.precedence > 0])
-    error_message = "Each policies[*].precedence must be greater than zero. It is the evaluation order within the policy's type, and Gateway stops at the first allow or block that matches."
+    error_message = "Each policies[*].precedence must be greater than zero. It is the evaluation order within the policy's type, and Gateway stops at the first allow or block that matches. It must also be unique across every policy in the account regardless of type - see the duplicate_precedences precondition in main.tf."
   }
 
   # Every string below is interpolated into a Cloudflare expression inside a
@@ -430,24 +420,214 @@ variable "policies" {
     ]))
     error_message = "Each policies[*].settings.quarantine_file_types entry must be one Cloudflare's file sandbox accepts: exe, pdf, doc, docm, docx, rtf, ppt, pptx, xls, xlsm, xlsx, zip, rar. This is a shorter list than the file types a policy can MATCH on - use match.download_file_types to select the traffic, and quarantine only what the sandbox can detonate."
   }
+}
 
-  # A header name Cloudflare rejects fails the whole rule at apply, and a header
-  # with no values is a header the origin never sees while the plan shows it set.
+# -----------------------------------------------------------------------------
+# Account-level configuration (settings.tf)
+# -----------------------------------------------------------------------------
+
+variable "settings" {
+  default     = null
+  description = <<-EOT
+    Account-level Gateway configuration - one object per Cloudflare account,
+    stored at /accounts/<id>/gateway/configuration. null leaves it unmanaged and
+    whatever the dashboard holds stands.
+
+    This object already exists on every Zero Trust account, so the caller must
+    import it before the first apply. Managing it without importing means
+    Terraform writes the object from this configuration alone.
+
+    - `tls_decrypt.enabled` - inspect HTTPS. Off, Gateway sees the TLS handshake
+      and the SNI and nothing else, so every HTTP policy applies to plaintext
+      HTTP only while still appearing enforced in the dashboard. This is the
+      switch that makes an HTTP policy set real. Turning it on requires the
+      Cloudflare root CA to be trusted by every device on WARP, or browsers get
+      certificate errors on every site.
+    - `inspection.mode` - "static" inspects the ports Cloudflare associates with
+      HTTP/HTTPS, "dynamic" detects the protocol from the first bytes and so
+      also catches HTTPS on a non-standard port. Requires tls_decrypt.
+    - `protocol_detection.enabled` - identify the protocol from the initial bytes
+      of a connection rather than trusting the port. What lets a network policy
+      match something hiding on 443.
+    - `certificate.id` - the CA Gateway presents when it decrypts. Unset means
+      Cloudflare's own managed certificate. A customer-supplied CA is the option
+      when the root is already distributed by MDM.
+    - `body_scanning.inspection_mode` - "deep" scans the whole request body for
+      DLP, "shallow" scans the first portion. Deep is the accurate one and the
+      expensive one. Only meaningful with tls_decrypt on.
+    - `antivirus` - scan uploads and downloads. `fail_closed` blocks anything
+      that could not be scanned, including files past the size limit, so it
+      turns a scanner fault into a download outage - gated behind
+      allow_antivirus_fail_closed.
+    - `sandbox` - detonate files before delivery. `fallback_action` is what
+      happens when the sandbox cannot reach a verdict.
+    - `block_page` - the page a blocked user is shown. Account-wide; a policy can
+      still override the text.
+    - `activity_log.enabled` - write Gateway activity logs. Off, there is no
+      record of what was allowed or blocked.
+    - `browser_isolation` - clientless isolation and isolation for non-identity
+      onramps.
+    - `extended_email_matching.enabled` - treat user+tag@ and dotted variants as
+      the same identity, so an email policy cannot be sidestepped by adding a
+      full stop.
+    - `fips.tls` - restrict to FIPS 140-2 approved ciphers. Breaks any endpoint
+      that offers nothing on that list.
+    - `host_selector.enabled` - allow egress policies to select on hostname.
+    - `max_ttl_secs` - cap on the TTL Gateway returns for a DNS answer.
+  EOT
+
+  type = object({
+    tls_decrypt        = optional(object({ enabled = bool }))
+    inspection         = optional(object({ mode = string }))
+    protocol_detection = optional(object({ enabled = bool }))
+    activity_log       = optional(object({ enabled = bool }))
+    host_selector      = optional(object({ enabled = bool }))
+    fips               = optional(object({ tls = bool }))
+    max_ttl_secs       = optional(number)
+
+    extended_email_matching = optional(object({ enabled = bool }))
+    certificate             = optional(object({ id = string }))
+    body_scanning           = optional(object({ inspection_mode = string }))
+
+    antivirus = optional(object({
+      enabled_download_phase = optional(bool)
+      enabled_upload_phase   = optional(bool)
+      fail_closed            = optional(bool)
+
+      notification_settings = optional(object({
+        enabled         = optional(bool)
+        include_context = optional(bool)
+        msg             = optional(string)
+        support_url     = optional(string)
+      }))
+    }))
+
+    sandbox = optional(object({
+      enabled         = optional(bool)
+      fallback_action = optional(string)
+    }))
+
+    browser_isolation = optional(object({
+      non_identity_enabled          = optional(bool)
+      url_browser_isolation_enabled = optional(bool)
+    }))
+
+    block_page = optional(object({
+      enabled          = optional(bool)
+      mode             = optional(string)
+      name             = optional(string)
+      header_text      = optional(string)
+      footer_text      = optional(string)
+      background_color = optional(string)
+      logo_path        = optional(string)
+      mailto_address   = optional(string)
+      mailto_subject   = optional(string)
+      include_context  = optional(bool)
+      suppress_footer  = optional(bool)
+      target_uri       = optional(string)
+    }))
+  })
+
   validation {
-    condition = alltrue(flatten([
-      for policy in var.policies : [
-        for name, values in coalesce(try(policy.settings.add_headers, null), {}) :
-        can(regex("^[A-Za-z0-9!#$%&'*+.^_`|~-]+$", name)) && length(values) > 0
-      ]
-    ]))
-    error_message = "Each policies[*].settings.add_headers key must be a valid HTTP header name and must map to at least one value. An empty value list is a header that is never added, which looks configured and enforces nothing."
+    condition     = contains(["static", "dynamic"], try(var.settings.inspection.mode, "static"))
+    error_message = "settings.inspection.mode must be \"static\" or \"dynamic\"."
   }
 
-  # Cloudflare applies at most 20 header operations to a request.
   validation {
-    condition = alltrue([
-      for policy in var.policies : length(coalesce(try(policy.settings.add_headers, null), {})) <= 20
-    ])
-    error_message = "policies[*].settings.add_headers may set at most 20 headers on one policy - Cloudflare's limit on header operations per rule."
+    condition     = contains(["deep", "shallow"], try(var.settings.body_scanning.inspection_mode, "deep"))
+    error_message = "settings.body_scanning.inspection_mode must be \"deep\" or \"shallow\"."
   }
+
+  validation {
+    condition     = contains(["allow", "block"], try(var.settings.sandbox.fallback_action, "allow"))
+    error_message = "settings.sandbox.fallback_action must be \"allow\" or \"block\"."
+  }
+
+  validation {
+    condition     = contains(["", "customized_block_page", "redirect_uri"], try(var.settings.block_page.mode, ""))
+    error_message = "settings.block_page.mode must be \"\", \"customized_block_page\" or \"redirect_uri\"."
+  }
+
+  validation {
+    condition     = try(var.settings.certificate.id, null) == null || can(regex("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$", try(var.settings.certificate.id, "")))
+    error_message = "settings.certificate.id must be the UUID of a certificate already available to this account."
+  }
+
+  # The certificate is what Gateway presents when it decrypts, so naming one
+  # while inspection is off configures nothing and reads as though it did.
+  validation {
+    condition     = try(var.settings.tls_decrypt.enabled, false) || try(var.settings.certificate.id, null) == null
+    error_message = "settings.certificate.id names an inspection CA while settings.tls_decrypt.enabled is false. The certificate is only used when Gateway decrypts, so it has no effect until inspection is on."
+  }
+}
+
+variable "inspection_certificate" {
+  default     = null
+  description = <<-EOT
+    Generate and activate the Cloudflare-managed root CA this account presents
+    when Gateway decrypts HTTPS.
+
+    null leaves certificates alone, which is correct where the CA is already
+    active on the account or a customer root was uploaded out of band - name
+    that one with settings.certificate.id instead.
+
+    Set it and the module creates the certificate, activates it at the edge and
+    points settings.certificate at the result, so the configuration write
+    follows the certificate rather than racing it. Without an active CA,
+    settings.tls_decrypt.enabled = true is rejected by the API with 400 code
+    2211 and the whole configuration write fails with it.
+
+    Activation is not the same as inspection. An activated CA that nothing
+    decrypts with is invisible to users, so generating it in one change and
+    turning tls_decrypt on in a later one is the order that leaves room to
+    distribute the root to devices in between. Every device on WARP has to trust
+    it before inspection goes on, or every HTTPS site returns a certificate
+    error.
+
+    - `validity_period_days` - certificate lifetime, 1 to 10,950 days, default
+      1,826 (five years). Cloudflare only accepts it at creation, so changing it
+      later replaces the certificate: a new root, to be distributed to every
+      device again before the old one goes.
+  EOT
+
+  type = object({
+    validity_period_days = optional(number, 1826)
+  })
+
+  validation {
+    condition     = var.inspection_certificate == null || try(var.inspection_certificate.validity_period_days >= 1 && var.inspection_certificate.validity_period_days <= 10950, false)
+    error_message = "inspection_certificate.validity_period_days must be between 1 and 10950 days."
+  }
+}
+
+variable "allow_antivirus_fail_closed" {
+  type        = bool
+  default     = false
+  description = <<-EOT
+    Permit settings.antivirus.fail_closed = true, which blocks any file
+    Cloudflare could not scan rather than delivering it.
+
+    "Could not scan" is not only "found something suspicious" - it covers files
+    over the scanner's size limit and scans that timed out, so an antivirus fault
+    presents to users as downloads failing across the estate with no obvious
+    cause. It is the right setting for some accounts, and it should be a decision
+    rather than something inherited from an example.
+  EOT
+}
+
+variable "allow_uninspected_http_policies" {
+  type        = bool
+  default     = false
+  description = <<-EOT
+    Permit HTTP policies to exist while settings.tls_decrypt.enabled is false.
+
+    Off by default because that combination is the quietest failure Gateway has:
+    the rules are created, the dashboard lists them as active, and they are only
+    ever consulted for plaintext HTTP - so on an HTTPS estate they enforce
+    nothing and nothing says so.
+
+    Set this true only where the HTTP rules are deliberately plaintext-only, or
+    during a staged rollout where inspection is turned on after the policy set is
+    in place.
+  EOT
 }

@@ -38,22 +38,71 @@ Terraform source, so adding an account, a layer or a module needs no edit here:
   top-level variable it assigns is declared by that layer. This works because
   `deployment/README.md` guarantees no two files in an account tree assign the
   same variable.
-- **Apply order**: a layer that *creates* zones must apply before a layer that
-  *looks one up* with `data "cloudflare_zone"`, since that read fails until the
-  zone exists. Today: `zones`, `account_governance`, `wan`, `zerotrust` and
-  `gateway` first, then `waf`, `load_balancing` and `r2` concurrently.
-  `account_governance`, `wan`, `zerotrust` and `gateway` are in the first tier
-  because they touch no zone at all, not because anything waits on them. `r2` is
-  in the second because a bucket can be served from a custom domain, even where
-  no bucket currently is.
+- **Apply order**, as three sequential tiers. Everything within a tier runs
+  concurrently; each tier is *planned* only after the previous one has *applied*.
+
+  | Tier | Layers | Why it is here |
+  |---|---|---|
+  | 1 | `account_governance` | Account-wide permissions and resource-group scope. Every later tier's token is evaluated against what this applies, so it goes out on its own and first. |
+  | 2 | `zones`, `bulk_redirects`, `gateway`, `wan`, `zerotrust` | `zones` *creates* zones. The rest touch no zone at all, so nothing waits on them - they ride along in this tier rather than being ordered against each other. |
+  | 3 | `waf`, `load_balancing`, `r2`, `workers` | Resolve a zone with `data "cloudflare_zone"`, which fails at plan time until tier 2 has created it. `r2` is here because a bucket can be served from a custom domain, even where no bucket currently is. |
+
+  Tier 2 and 3 membership is **derived from the Terraform source** - `zone_base`
+  call versus `data "cloudflare_zone"` block - so a new layer classifies itself.
+  Tier 1 is the exception: no Terraform reference expresses "authz must land
+  first", so it is the `PREREQ_LAYERS` list in
+  [`tf-matrix.sh`](../scripts/tf-matrix.sh). Keep that list short.
 
 `ci.yml` asserts all three, so a regression in the derivation fails a PR rather
 than silently causing a merged change never to be planned.
 
 The one place the graph is not fully dynamic: a GitHub Actions job graph is
 static YAML and cannot grow a stage at runtime, so `terraform-apply.yml` declares
-two tier stages. If a new layer makes the graph deeper, both `discover` and
+three tier stages. If a new layer makes the graph deeper, both `discover` and
 `ci.yml` fail with instructions instead of skipping the extra tier.
+
+## Remote state
+
+State lives in Cloudflare R2 through Terraform's S3-compatible backend, one state
+object per `{account, layer}` pair:
+
+```
+<TF_BACKEND_BUCKET>/
+  Your-Org/zones.tfstate
+  Your-Org/waf.tfstate
+  Your-Org/gateway.tfstate
+  ...one key per layer directory
+```
+
+The key is derived, not configured: `STATE_KEY` in
+[`_terraform-run.yml`](_terraform-run.yml) is `<account>/<layer>.tfstate`. That
+split is the reason a `waf` apply cannot propose destroying a zone - zones are not
+in its state.
+
+**Leave the `backend "s3"` block in each layer's `terraform.tf` commented out.**
+It is committed as documentation only. `ci.yml` runs `init -backend=false` so
+validation needs no R2 credentials, and `_terraform-run.yml` writes the real block
+to `backend.generated.tf` at run time, passing bucket, key and endpoint as
+`-backend-config` flags so no state location is ever committed. Uncommenting the
+block gives two backend blocks and fails the run - the generate step checks for
+this and errors with an explanation rather than letting Terraform emit its own
+unhelpful message.
+
+Nothing needs pre-creating beyond the bucket itself. The first apply for a pair
+writes its state object; there is no bootstrap step and no import.
+
+Locking is `use_lockfile = true`, which uses S3 conditional writes - supported by
+R2, and the reason every layer requires Terraform >= 1.11. R2 has no DynamoDB
+equivalent, so this plus the per-state-key `concurrency` group is the whole of the
+protection against two concurrent applies corrupting one key.
+
+R2 has no object versioning, so there is no rollback for a state object. Take
+periodic copies of the bucket if state loss would be expensive to reconstruct.
+
+Every layer's state holds resource attributes in plain text, including values
+Cloudflare returns for tunnel secrets, service tokens and WAF expressions. The
+bucket is a secret store: no public access, no public bucket URL, no custom
+domain, and the R2 token below scoped to it alone.
 
 ## Required configuration
 
@@ -61,7 +110,7 @@ two tier stages. If a new layer makes the graph deeper, both `discover` and
 
 | Name | Example | Notes |
 |---|---|---|
-| `TF_BACKEND_BUCKET` | `cf-lz-tfstate` | R2 bucket holding state. |
+| `TF_BACKEND_BUCKET` | `Your-Org-cloudflare-platform-tfstate` | R2 bucket holding state, see [Remote state](#remote-state). |
 | `TF_BACKEND_ENDPOINT` | `https://<state-account-id>.r2.cloudflarestorage.com` | S3-compatible R2 endpoint. |
 | `MODULES_APP_ID` | `1234567` | App ID of the modules-reader GitHub App below. Not a secret. |
 
@@ -126,6 +175,20 @@ two accounts and eight layers that is eighteen environments.
 layer**: the scopes are the ones documented in each layer's `providers.tf`, and
 splitting them is the reason the layers were split in the first place. A WAF
 token cannot delete a zone.
+
+Every run checks the token's shape before `terraform init` - see "Check the API
+token is a well-formed bearer credential" in
+[`_terraform-run.yml`](_terraform-run.yml). Whitespace in the value, or a global
+API key (`cfk_`) where a token belongs, fails the job immediately; anything else
+is a warning and the run continues. This exists because Cloudflare answers a
+malformed `Authorization` header with 6003/6111 "Invalid format for
+Authorization header" - a header parse error thrown before the token is looked
+up, so it looks nothing like a credential problem and no amount of scope fixes
+it. Terraform reports it per-resource as "failed to make http request", which on
+a large layer means waiting out most of a plan for an answer that had nothing to
+do with the layer. Set the secret by piping the value in, never by pasting it as
+an argument, and re-copy from the token's own reveal view rather than from
+anywhere it may have been line-wrapped.
 
 `Workers R2 Storage:Edit` is a control-plane permission: it creates, configures and deletes buckets, but it
 cannot read or write a single object. Object access goes through an R2 access
@@ -215,8 +278,8 @@ layers resolve the zone via `data "cloudflare_zone"`, and it does not exist yet.
 Split it into two pull requests: the zone first, then whatever depends on it. By the
 time the second is planned the zone exists and the lookup resolves.
 
-`terraform-apply.yml` does not have this problem. `plan-tier1` depends on
-`apply-tier0`, so tier 2 is planned only after the zone has been created, and a single
+`terraform-apply.yml` does not have this problem. `plan-tier2` depends on
+`apply-tier1`, so tier 3 is planned only after the zone has been created, and a single
 apply run handles both changes together unaided. It is the pull request
 plan that cannot succeed early, and since `plan complete` is a required check that is
 what blocks the merge. A manual per layer apply run is not needed for this.
@@ -246,6 +309,6 @@ scoped tokens. No workflow edit.
 
 Adding a **layer**: create `deployment/layers/<product>/`, add
 `accounts/*/<product>.tfvars`, and create a `<account>-<product>-apply`
-environment per account. No workflow edit, unless the layer introduces a third
+environment per account. No workflow edit, unless the layer introduces a fourth
 dependency tier, in which case `ci.yml` will tell you to add a stage pair to
 `terraform-apply.yml`.

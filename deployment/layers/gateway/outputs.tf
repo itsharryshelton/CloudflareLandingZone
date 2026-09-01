@@ -32,3 +32,23 @@ output "resolved_application_count" {
   description = "How many Gateway applications and app types this account's catalogue offers. Same reason as resolved_category_count: the catalogue is Cloudflare's, and it moves."
   value       = local.application_name_count
 }
+
+output "inspection_certificate_id" {
+  description = "ID of the inspection CA managed by this layer, or null where the account's certificate is not managed here. This is what the Gateway configuration's certificate field is set to."
+  value       = module.gateway.inspection_certificate_id
+}
+
+output "inspection_certificate_binding_status" {
+  description = "Deployment state of the inspection CA at Cloudflare's edge. Activation is asynchronous, so a run can end at pending_deployment; available is the state in which Gateway can decrypt with it, and it is worth reading before enabling tls_decrypt in the next change."
+  value       = module.gateway.inspection_certificate_binding_status
+}
+
+output "inspection_certificate_pem" {
+  description = "The inspection CA in PEM form - the public root every device on WARP has to trust before inspection is turned on. Hand it to whatever distributes certificates to the estate. No private key is involved: this is what Gateway presents to every client."
+  value       = module.gateway.inspection_certificate_pem
+}
+
+output "inspection_certificate_expires_on" {
+  description = "When the inspection CA expires. Expiry with inspection on is every HTTPS request failing across the estate, and the replacement root has to reach devices before that date rather than after it."
+  value       = module.gateway.inspection_certificate_expires_on
+}

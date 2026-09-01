@@ -11,10 +11,17 @@ locals {
         [for name in policy.baseline_custom_rules : local.waf_baseline_custom_rules[name]],
         policy.custom_block_rules,
       )
-      rate_limiting_rules = concat(
-        [for name in policy.baseline_rate_limits : local.waf_baseline_rate_limits[name]],
-        policy.rate_limiting_rules,
-      )
+      # Cloudflare counts zone-level rate limits per colo, so it rejects any
+      # characteristics set that omits cf.colo.id (API error 20155). Added here
+      # so neither the catalogue nor a tenant rule has to remember it.
+      rate_limiting_rules = [
+        for rule in concat(
+          [for name in policy.baseline_rate_limits : local.waf_baseline_rate_limits[name]],
+          policy.rate_limiting_rules,
+          ) : merge(rule, {
+            characteristics = distinct(concat(rule.characteristics, ["cf.colo.id"]))
+        })
+      ]
     })
   }
 

@@ -140,14 +140,6 @@ variable "gateway_policies" {
       payload_log_enabled                - store the matched content of a DLP hit.
                                            Governed by allow_dlp_payload_logging
       quarantine_file_types              - required by action = "quarantine"
-      add_headers                        - headers added to the request on its way to
-                                           the origin, as name => list of values. http
-                                           allow policies only. This is how a Microsoft
-                                           365 or Google Workspace tenant restriction
-                                           is enforced, and it needs the traffic to be
-                                           decrypted - an application exempted by an
-                                           "off" policy earlier in the HTTP order
-                                           gets no headers
       override_host / override_ips       - required by action = "override". dns
       insecure_disable_dnssec_validation - dns. Governed by
                                            allow_disabling_dnssec_validation
@@ -240,7 +232,6 @@ variable "gateway_policies" {
       untrusted_cert_action              = optional(string)
       payload_log_enabled                = optional(bool)
       quarantine_file_types              = optional(list(string))
-      add_headers                        = optional(map(list(string)))
       override_host                      = optional(string)
       override_ips                       = optional(list(string))
       insecure_disable_dnssec_validation = optional(bool)
@@ -559,5 +550,181 @@ variable "default_block_notification" {
     telling somebody why their request failed and where to ask about it is a
     ticket that says "the internet is broken", and a user who concludes the
     corporate network cannot be used for a legitimate task and finds another one.
+  EOT
+}
+
+variable "gateway_settings" {
+  default     = null
+  description = <<-EOT
+    Account-level Gateway configuration - the switches above the policy set,
+    rather than a rule. Cloudflare stores one of these per account, so this is a
+    singleton and the account already has one: see imports.tf.
+
+    null leaves the whole object unmanaged, and the Zero Trust dashboard stays
+    authoritative for every field in it.
+
+    The field that matters most is tls_decrypt.enabled. With it off, Gateway sees
+    the TLS handshake and the SNI for an HTTPS request and nothing further, so
+    every HTTP policy in gateway_policies is consulted for plaintext HTTP alone -
+    while the dashboard lists them all as active. That is the state Cloudflare
+    reports as "Your policies are active for HTTP traffic but not for HTTPS
+    traffic".
+
+    Turning it on has a prerequisite outside Terraform: every device on WARP has
+    to trust the CA Gateway presents, or the user gets a certificate error on
+    every site. Cloudflare's managed root is installed by the WARP client on a
+    managed deployment; a BYOD fleet, an unmanaged device, or anything doing its
+    own certificate pinning needs handling first. Roll it out to a pilot device
+    group before the estate.
+
+      - `tls_decrypt`             - inspect HTTPS. The switch above.
+      - `inspection`              - "static" inspects the ports Cloudflare
+                                    associates with HTTP/HTTPS, "dynamic" reads
+                                    the first bytes and so also catches HTTPS on
+                                    an unusual port.
+      - `protocol_detection`      - identify a protocol from the initial bytes
+                                    rather than from the port.
+      - `certificate`             - UUID of the CA Gateway presents when it
+                                    decrypts. Unset uses Cloudflare's managed
+                                    certificate.
+      - `body_scanning`           - "deep" or "shallow" DLP body inspection.
+      - `antivirus`               - upload and download scanning, and what to do
+                                    with a file that could not be scanned.
+      - `sandbox`                 - detonate files before delivery.
+      - `block_page`              - the account-wide block page.
+      - `activity_log`            - write Gateway activity logs.
+      - `browser_isolation`       - clientless isolation, non-identity onramps.
+      - `extended_email_matching` - treat user+tag@ and dotted variants as one
+                                    identity, so an email policy cannot be
+                                    sidestepped with a full stop.
+      - `fips`                    - FIPS 140-2 ciphers only.
+      - `host_selector`           - hostname selection in egress policies.
+      - `max_ttl_secs`            - cap on the TTL Gateway returns for a DNS
+                                    answer.
+
+    Anything omitted is left as it is in the dashboard rather than cleared, so
+    this does not have to describe the whole object at once. Read the first plan
+    after the import carefully all the same - it is the one that shows what
+    Terraform believes the account currently looks like.
+  EOT
+
+  type = object({
+    tls_decrypt        = optional(object({ enabled = bool }))
+    inspection         = optional(object({ mode = string }))
+    protocol_detection = optional(object({ enabled = bool }))
+    activity_log       = optional(object({ enabled = bool }))
+    host_selector      = optional(object({ enabled = bool }))
+    fips               = optional(object({ tls = bool }))
+    max_ttl_secs       = optional(number)
+
+    extended_email_matching = optional(object({ enabled = bool }))
+    certificate             = optional(object({ id = string }))
+    body_scanning           = optional(object({ inspection_mode = string }))
+
+    antivirus = optional(object({
+      enabled_download_phase = optional(bool)
+      enabled_upload_phase   = optional(bool)
+      fail_closed            = optional(bool)
+
+      notification_settings = optional(object({
+        enabled         = optional(bool)
+        include_context = optional(bool)
+        msg             = optional(string)
+        support_url     = optional(string)
+      }))
+    }))
+
+    sandbox = optional(object({
+      enabled         = optional(bool)
+      fallback_action = optional(string)
+    }))
+
+    browser_isolation = optional(object({
+      non_identity_enabled          = optional(bool)
+      url_browser_isolation_enabled = optional(bool)
+    }))
+
+    block_page = optional(object({
+      enabled          = optional(bool)
+      mode             = optional(string)
+      name             = optional(string)
+      header_text      = optional(string)
+      footer_text      = optional(string)
+      background_color = optional(string)
+      logo_path        = optional(string)
+      mailto_address   = optional(string)
+      mailto_subject   = optional(string)
+      include_context  = optional(bool)
+      suppress_footer  = optional(bool)
+      target_uri       = optional(string)
+    }))
+  })
+}
+
+variable "gateway_inspection_certificate" {
+  default     = null
+  description = <<-EOT
+    Generate and activate the root CA this account presents when Gateway
+    decrypts HTTPS.
+
+    A Zero Trust account starts with no certificate, and Cloudflare rejects
+    gateway_settings.tls_decrypt.enabled = true against an account without an
+    active one - 400 code 2211, taking the whole configuration write with it.
+    Set this and the certificate is generated, activated at the edge and named
+    in the configuration, in that order.
+
+    null where the certificate is not managed here: an account whose CA was
+    generated in the dashboard, or a customer root uploaded out of band. Point
+    gateway_settings.certificate.id at that one instead. Setting both is
+    rejected at plan.
+
+    Turning this on does nothing to users on its own - a CA is only presented
+    once inspection is on. That is what makes generating the certificate and
+    enabling tls_decrypt separate changes worth making separately: the root has
+    to reach every device on WARP in between, or inspection day is a certificate
+    error on every site.
+
+    - `validity_period_days` - lifetime, 1 to 10,950 days, default 1,826 (five
+      years). Only accepted at creation, so a change replaces the certificate -
+      a new root to distribute to every device before the old one goes.
+  EOT
+
+  type = object({
+    validity_period_days = optional(number, 1826)
+  })
+}
+
+variable "allow_antivirus_fail_closed" {
+  type        = bool
+  default     = false
+  description = <<-EOT
+    Permit gateway_settings.antivirus.fail_closed = true, which blocks any file
+    Cloudflare could not scan rather than delivering it.
+
+    "Could not scan" covers more than "found something": files over the scanner's
+    size limit and scans that timed out are both unscanned, so an antivirus fault
+    reaches users as downloads failing estate-wide with no obvious cause. It is
+    the correct posture for some accounts and it should be chosen rather than
+    inherited.
+  EOT
+}
+
+variable "allow_uninspected_http_policies" {
+  type        = bool
+  default     = false
+  description = <<-EOT
+    Permit HTTP policies while gateway_settings.tls_decrypt.enabled is false, or
+    while gateway_settings is unmanaged.
+
+    Off by default because that pairing is the quietest failure Gateway has: the
+    rules are created, the dashboard lists them as active, and they are only ever
+    consulted for plaintext HTTP - so on an HTTPS estate they enforce nothing and
+    nothing reports it. The block page never appears, the logs stay empty, and
+    the control reads as working.
+
+    Set true only where the HTTP rules are deliberately plaintext-only, or during
+    a staged rollout where the policy set is landed before inspection is turned
+    on. The second case is a temporary state, and the pull request that turns
+    inspection on is the one that puts this back to false.
   EOT
 }

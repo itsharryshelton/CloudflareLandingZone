@@ -12,26 +12,26 @@
 # Writes to $GITHUB_OUTPUT (and stdout):
 #   matrix       [{"account":"account_a","layer":"zones"}, ...]
 #   by_layer     {"zones":["account_a"],"waf":[],"load_balancing":[]}
-#   apply_order  [["zones"],["load_balancing","waf"]]
+#   apply_order  [["account_governance"],["zones"],["load_balancing","waf"]]
 #   tier_count   number of tiers in apply_order
 #   tier0        the subset of `matrix` whose layer is in tier 0
 #   tier1        the subset of `matrix` whose layer is in tier 1
+#   tier2        the subset of `matrix` whose layer is in tier 2
 #   tier0_any    "true" | "false" - whether tier0 is non-empty
 #   tier1_any    "true" | "false"
+#   tier2_any    "true" | "false"
 #   any          "true" | "false"
 #
 # `matrix` drives plan.yml (one job per pair, all in parallel).
 #
-# `by_layer` + `apply_order` drive apply.yml. Layer directories are NOT numbered,
-# so order is never taken from their names - alphabetically "zones" sorts last,
-# which is the opposite of what is required. It is derived from the Terraform
-# source instead: a layer that CREATES zones (calls the zone_base module) must apply
-# before any layer that only LOOKS ONE UP (data "cloudflare_zone"), because that
-# data source fails at plan time until the zone exists.
+# The one ordering that is NOT derivable from the source is the prerequisite tier
+# below. Account-level permissions and resource-group scoping are what every
+# later layer's token is evaluated against, so they go out first even though no
+# Terraform reference expresses that - the dependency is on the API's authz
+# decision, not on an attribute.
 #
 # apply_order is a list of tiers. Walk tiers in order; everything inside one tier
-# is independent and may run concurrently. That is strictly better than a linear
-# walk - waf and load_balancing depend on zones but not on each other.
+# is independent and may run concurrently, for example waf and load_balancing depend on zones but not on each other.
 #
 # The account and layer lists are discovered from the directory tree, and every
 # mapping below is derived from the Terraform source, so adding an account, a
@@ -42,6 +42,12 @@ set -euo pipefail
 
 LAYERS_DIR="deployment/layers"
 ACCOUNTS_DIR="deployment/accounts"
+
+# Layers that must apply before any other
+PREREQ_LAYERS=(account_governance)
+
+# Layers forced into the post-zone tier
+POST_ZONE_LAYERS=(zerotrust)
 
 BASE_SHA="${BASE_SHA:-}"
 HEAD_SHA="${HEAD_SHA:-HEAD}"
@@ -235,38 +241,73 @@ by_layer="$(jq -c -n --argjson m "$matrix" --argjson ls "$layers_json" \
 # ---------------------------------------------------------------------------
 # Apply order, derived from the source rather than from directory names.
 # ---------------------------------------------------------------------------
-# Tier 0: layers with no upstream dependency - they create zones, or touch no
+# Tier 0: PREREQ_LAYERS - account-wide permission and scoping changes that every
+#         later layer's token is evaluated against.
+# Tier 1: layers with no upstream dependency - they create zones, or touch no
 #         zone at all.
-# Tier 1: layers that resolve a zone through a data source, so they cannot plan
-#         until a tier-0 layer has created it.
+# Tier 2: layers that resolve a zone through a data source, so they cannot plan
+#         until a tier-1 layer has created it, plus POST_ZONE_LAYERS.
 #
-# A layer that both creates and looks up zones is tier 0: it satisfies its own
+# A layer that both creates and looks up zones is tier 1: it satisfies its own
 # dependency within one state.
-TIER0=(); TIER1=()
+TIER0=(); TIER1=(); TIER2=()
 for layer in "${ALL_LAYERS[@]}"; do
-  if layer_creates_zones "$layer"; then
+  if in_list "$layer" "${PREREQ_LAYERS[@]}"; then
     TIER0+=("$layer")
-  elif layer_looks_up_zones "$layer"; then
+  elif in_list "$layer" "${POST_ZONE_LAYERS[@]}"; then
+    TIER2+=("$layer")
+  elif layer_creates_zones "$layer"; then
     TIER1+=("$layer")
+  elif layer_looks_up_zones "$layer"; then
+    TIER2+=("$layer")
   else
-    TIER0+=("$layer")
+    TIER1+=("$layer")
   fi
 done
 
-if [[ ${#TIER1[@]} -gt 0 && ${#TIER0[@]} -eq 0 ]]; then
-  echo "ERROR: layers resolve a zone by lookup (${TIER1[*]}) but no layer creates one." >&2
+if [[ ${#TIER2[@]} -gt 0 && ${#TIER1[@]} -eq 0 ]]; then
+  echo "ERROR: layers resolve a zone by lookup (${TIER2[*]}) but no layer creates one." >&2
   echo "       Expected exactly one layer to call the zone_base module." >&2
   exit 1
 fi
+
+# A named prerequisite that is not a real layer directory is a typo, and a silent
+# one: the layer would quietly apply in tier 1 alongside everything else.
+for layer in "${PREREQ_LAYERS[@]}"; do
+  in_list "$layer" "${ALL_LAYERS[@]}" || {
+    echo "ERROR: PREREQ_LAYERS names '$layer', which is not a directory under $LAYERS_DIR." >&2
+    exit 1
+  }
+done
+
+# Same silent-typo problem for the post-zone list. Additionally, a layer that
+# creates zones cannot be demoted behind itself.
+for layer in "${POST_ZONE_LAYERS[@]}"; do
+  in_list "$layer" "${ALL_LAYERS[@]}" || {
+    echo "ERROR: POST_ZONE_LAYERS names '$layer', which is not a directory under $LAYERS_DIR." >&2
+    exit 1
+  }
+  in_list "$layer" "${PREREQ_LAYERS[@]}" && {
+    echo "ERROR: '$layer' is in both PREREQ_LAYERS and POST_ZONE_LAYERS." >&2
+    exit 1
+  }
+  layer_creates_zones "$layer" && {
+    echo "ERROR: POST_ZONE_LAYERS names '$layer', but that layer calls the zone_base" >&2
+    echo "       module - it creates the zones the tier is meant to wait for." >&2
+    exit 1
+  }
+done
 
 tier_json() { # <items...> -> JSON array, empty-safe
   [[ $# -eq 0 ]] && { echo '[]'; return; }
   printf '%s\n' "$@" | LC_ALL=C sort | jq -R -c '.' | jq -s -c '.'
 }
+# Empty tiers are kept in place rather than filtered out.
 apply_order="$(jq -c -n \
   --argjson t0 "$(tier_json "${TIER0[@]}")" \
   --argjson t1 "$(tier_json "${TIER1[@]}")" \
-  '[$t0, $t1] | map(select(length > 0))')"
+  --argjson t2 "$(tier_json "${TIER2[@]}")" \
+  '[$t0, $t1, $t2]')"
 
 any=true
 [[ "$matrix" == "[]" ]] && any=false
@@ -282,6 +323,7 @@ tier_matrix() { # <tier layers...> -> pairs from $matrix whose layer is in the t
 }
 tier0="$(tier_matrix "${TIER0[@]}")"
 tier1="$(tier_matrix "${TIER1[@]}")"
+tier2="$(tier_matrix "${TIER2[@]}")"
 tier_count="$(jq -r 'length' <<<"$apply_order")"
 
 emit_bool() { [[ "$1" == "[]" ]] && echo false || echo true; }
@@ -294,8 +336,10 @@ if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
     echo "tier_count=$tier_count"
     echo "tier0=$tier0"
     echo "tier1=$tier1"
+    echo "tier2=$tier2"
     echo "tier0_any=$(emit_bool "$tier0")"
     echo "tier1_any=$(emit_bool "$tier1")"
+    echo "tier2_any=$(emit_bool "$tier2")"
     echo "any=$any"
   } >>"$GITHUB_OUTPUT"
 fi
@@ -314,7 +358,7 @@ if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
     echo
     echo "Apply order (tiers run in sequence, layers within a tier in parallel):"
     echo
-    jq -r 'to_entries[] | "\(.key + 1). \(.value | join(", "))"' <<<"$apply_order"
+    jq -r 'to_entries[] | "\(.key + 1). \(if (.value | length) == 0 then "_(empty - stage skipped)_" else (.value | join(", ")) end)"' <<<"$apply_order"
     echo
     echo "<details><summary>How this was decided</summary>"
     echo
@@ -331,4 +375,5 @@ echo "apply_order=$apply_order"
 echo "tier_count=$tier_count"
 echo "tier0=$tier0"
 echo "tier1=$tier1"
+echo "tier2=$tier2"
 echo "any=$any"
