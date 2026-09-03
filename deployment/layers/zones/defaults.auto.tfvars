@@ -8,10 +8,8 @@ default_min_tls_version = "1.2"
 default_tls_1_3          = "on"
 default_always_use_https = "on"
 
-# Additions on top of the zone_base module's secure baseline
 default_zone_settings = {
   security_level = "medium"
-  websockets     = "on"
 }
 
 # Zone tier default, using free to avoid any billing costs if manage_zone_subscriptions is true

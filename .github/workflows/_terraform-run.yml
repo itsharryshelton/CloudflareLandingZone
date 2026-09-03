@@ -1,19 +1,15 @@
+# =============================================================================
 # Reusable: run one layer, against one account, in one mode.
 #
-# One invocation == one Terraform state == one {account, layer} pair, because a
-# `provider "cloudflare"` block carries exactly one API token and Terraform
-# cannot hand a dynamic provider alias to a for_each'd module.
+# One invocation == one Terraform state == one {account, layer} pair
 #
 # MODES
 #   plan   init, plan to a file, upload the plan as an artifact, publish a
 #          value-free summary of what would change.
 #   apply  init, download that same plan file, `terraform apply <plan>`.
 #
-# Apply NEVER generates its own plan. It applies a saved plan produced earlier in
-# the same run, so what a reviewer approved is what executes. If state moved
-# underneath it, Terraform rejects the saved plan as stale rather than quietly
-# doing something else.
-
+# Apply NEVER generates its own plan, by design so that a reviewer has approved what is being applied
+# =============================================================================
 name: terraform-run
 
 on:
@@ -45,6 +41,27 @@ on:
         required: false
         type: string
         default: '1.14.6'
+      parallelism:
+        description: >-
+          Terraform's -parallelism. Lower than the default 10, but this is the
+          secondary control, not the throttle: it caps how many resources are
+          worked on at once, not the request rate. The rate limiter below is
+          what keeps a run inside Cloudflare's budget. This exists so that a run
+          with the limiter disabled, or one where it dies, degrades gently
+          instead of burning the whole budget in a minute.
+        required: false
+        type: number
+        default: 4
+      api_rps:
+        description: >-
+          Sustained Cloudflare API requests per second, enforced by
+          .github/scripts/cf-api-throttle.py. Cloudflare allows 1200 per 5
+          minutes per credential, which is 4.0/s; 3.5 leaves headroom for
+          anything else using the same token. Set to 0 to bypass the limiter
+          entirely - only for debugging, and expect 429s on the zones layer.
+        required: false
+        type: number
+        default: 3.5
       comment_on_pr:
         description: 'Post the value-free plan summary as a pull request comment.'
         required: false
@@ -70,9 +87,6 @@ jobs:
     environment: ${{ inputs.environment }}
 
     # Serialise every operation against a single state key. `use_lockfile = true`
-    # below is the real protection - R2 has no DynamoDB equivalent, so state
-    # locking relies on S3 conditional writes - and this is the belt to its
-    # braces. It also stops two runs queueing on one approval gate.
     #
     # cancel-in-progress is false on purpose: cancelling mid-apply is how you get
     # resources that exist in Cloudflare but not in state.
@@ -91,14 +105,14 @@ jobs:
       LAYER_DIR: deployment/layers/${{ inputs.layer }}
       ACCOUNT_DIR: deployment/accounts/${{ inputs.account }}
       MODE: ${{ inputs.mode }}
-      # Config values reach the shell through the environment rather than by
-      # `${{ }}` interpolation into a script body, so a value containing shell
-      # metacharacters cannot become part of the command.
+      TF_PARALLELISM: ${{ inputs.parallelism }}
+      CF_THROTTLE_RPS: ${{ inputs.api_rps }}
+      CF_THROTTLE_PORT: '8787'
+      CF_THROTTLE_PID: ${{ github.workspace }}/.cf-throttle.pid
+      CF_THROTTLE_LOG: ${{ github.workspace }}/.cf-throttle.log
       STATE_KEY: ${{ inputs.account }}/${{ inputs.layer }}.tfstate
       TF_BACKEND_BUCKET: ${{ vars.TF_BACKEND_BUCKET }}
       TF_BACKEND_ENDPOINT: ${{ vars.TF_BACKEND_ENDPOINT }}
-      # Terraform reads the Cloudflare token and the R2 backend credentials from
-      # the environment only. Nothing is ever written to a .tf or .tfvars file.
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
@@ -137,8 +151,7 @@ jobs:
             exit 1
           fi
 
-      # Fail pipeline if API Token is malformed, 6003/6111 will be thrown by the provider if malformed.
-      # Does not expose API Token in logs due to the echo command.
+      # A malformed token is rejected by Cloudflare with 6003/6111 - this checks that first
       - name: Check the API token is a well-formed bearer credential
         run: |
           set -euo pipefail
@@ -260,6 +273,34 @@ jobs:
             -backend-config="endpoints={\"s3\":\"${TF_BACKEND_ENDPOINT}\"}"
 
       # -----------------------------------------------------------------------
+      # RATE LIMITING
+      # -----------------------------------------------------------------------
+      # Cloudflare allows 1200 API requests per 5 minutes per credential
+      - name: Start the Cloudflare API rate limiter
+        if: inputs.api_rps > 0
+        run: |
+          set -euo pipefail
+          nohup python3 .github/scripts/cf-api-throttle.py \
+            --rps "$CF_THROTTLE_RPS" --port "$CF_THROTTLE_PORT" --verbose \
+            >"$CF_THROTTLE_LOG" 2>&1 &
+          echo $! >"$CF_THROTTLE_PID"
+
+          # Readiness is polled rather than slept on: a limiter that failed to
+          # bind must fail this step, not hand Terraform a connection-refused
+          # error 20 minutes into a plan. The health endpoint costs no token.
+          for _ in $(seq 1 30); do
+            if curl -fsS -o /dev/null --max-time 2 \
+                 "http://127.0.0.1:${CF_THROTTLE_PORT}/__throttle/health"; then
+              echo "rate limiter ready on 127.0.0.1:${CF_THROTTLE_PORT} at ${CF_THROTTLE_RPS} req/s"
+              exit 0
+            fi
+            sleep 0.5
+          done
+          echo "::error::the API rate limiter did not come up on port ${CF_THROTTLE_PORT}"
+          cat "$CF_THROTTLE_LOG" >&2 || true
+          exit 1
+
+      # -----------------------------------------------------------------------
       # PLAN
       # -----------------------------------------------------------------------
       - name: Terraform plan
@@ -281,9 +322,19 @@ jobs:
           fi
           printf 'var file: %s\n' "${VARFILES[@]}"
 
+          # Point the provider at the rate limiter. Keyed on the pidfile rather
+          # than on the rps input so the two can never disagree: if the limiter
+          # is not running, the provider talks to Cloudflare directly and only
+          # -parallelism restrains it.
+          if [[ -f "$CF_THROTTLE_PID" ]]; then
+            export CLOUDFLARE_BASE_URL="http://127.0.0.1:${CF_THROTTLE_PORT}/client/v4"
+            echo "provider base URL: $CLOUDFLARE_BASE_URL (rate limited to ${CF_THROTTLE_RPS} req/s)"
+          fi
+
           cd "$LAYER_DIR"
           set +e
-          terraform plan -out=tfplan -detailed-exitcode -lock-timeout=5m "${VARFILES[@]}"
+          terraform plan -out=tfplan -detailed-exitcode -lock-timeout=5m \
+            -parallelism="$TF_PARALLELISM" "${VARFILES[@]}"
           ec=$?
           set -e
           # -detailed-exitcode: 0 = no changes, 1 = error, 2 = changes to make.
@@ -292,10 +343,6 @@ jobs:
           if [[ $ec -eq 1 ]]; then
             exit 1
           fi
-        # The waf and load_balancing layers resolve zone keys to zone IDs with
-        # data "cloudflare_zone" at plan time. If the zones layer has not created
-        # the zone yet, that data source fails and this step fails with it -
-        # expected, and why terraform-apply.yml applies zones first.
 
       - name: Summarise the plan
         id: summary
@@ -357,20 +404,39 @@ jobs:
 
       - name: Comment the summary on the pull request
         if: inputs.mode == 'plan' && inputs.comment_on_pr && github.event_name == 'pull_request'
+        # A comment that will not post is a reporting problem, not a plan
+        # failure. The same summary is in the job summary and the plan artifact.
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           COUNTS: ${{ steps.summary.outputs.counts }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          ACCOUNT: ${{ inputs.account }}
+          LAYER: ${{ inputs.layer }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RUN_NUMBER: ${{ github.run_number }}
         run: |
           set -euo pipefail
+
+          header=$(printf '#### Terraform plan — `%s` / `%s`\n\n`%s`\n\n' "$ACCOUNT" "$LAYER" "$COUNTS")
+          footer=$(printf '\nAttribute values are not posted here. Full plan: [run #%s](%s).\n' "$RUN_NUMBER" "$RUN_URL")
+          budget=$(( 63000 - ${#header} - ${#footer} ))
+          total=$(wc -l <"$LAYER_DIR/plan-summary.md")
+          awk -v budget="$budget" '
+            { len = length($0) + 1
+              if (used + len > budget) exit
+              used += len
+              print }
+          ' "$LAYER_DIR/plan-summary.md" >body.md
+          kept=$(wc -l <body.md)
+
           {
-            echo "#### Terraform plan — \`${{ inputs.account }}\` / \`${{ inputs.layer }}\`"
-            echo
-            echo "\`$COUNTS\`"
-            echo
-            cat "$LAYER_DIR/plan-summary.md"
-            echo
-            echo "Attribute values are not posted here. Full plan: [run #${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})."
+            printf '%s\n' "$header"
+            cat body.md
+            if [[ "$kept" -lt "$total" ]]; then
+              printf '\n_Truncated: %s of %s changed resources listed. Full list in the job summary._\n' "$kept" "$total"
+            fi
+            printf '%s\n' "$footer"
           } >comment.md
           gh pr comment "$PR_NUMBER" --body-file comment.md
 
@@ -388,6 +454,16 @@ jobs:
         if: inputs.mode == 'apply'
         run: |
           set -euo pipefail
+          # Unlike TF_VAR_, this is read at apply time: the provider block is
+          # empty and takes its whole configuration from the environment, which
+          # the provider re-reads when it is configured for the apply. Pointing
+          # it here does not change what was planned - the plan holds resource
+          # changes, not the endpoint they are sent to.
+          if [[ -f "$CF_THROTTLE_PID" ]]; then
+            export CLOUDFLARE_BASE_URL="http://127.0.0.1:${CF_THROTTLE_PORT}/client/v4"
+            echo "provider base URL: $CLOUDFLARE_BASE_URL (rate limited to ${CF_THROTTLE_RPS} req/s)"
+          fi
+
           cd "$LAYER_DIR"
           if [[ ! -f tfplan ]]; then
             echo "::error::no saved plan to apply - refusing to plan and apply in one step"
@@ -396,7 +472,26 @@ jobs:
           # No -var-file and no -auto-approve: applying a saved plan takes neither.
           # The plan file already holds the resolved variable values, which is
           # exactly why apply cannot diverge from what was reviewed.
-          terraform apply -lock-timeout=5m -input=false tfplan
+          terraform apply -lock-timeout=5m -input=false \
+            -parallelism="$TF_PARALLELISM" tfplan
+
+      # Bulk KV data is loaded after apply if used
+      - name: Setup Node for wrangler
+        if: inputs.mode == 'apply' && inputs.layer == 'workers'
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+
+      - name: Load KV datasets
+        if: inputs.mode == 'apply' && inputs.layer == 'workers'
+        run: |
+          set -euo pipefail
+          # Same derivation the token check above uses - the account ID is a fact
+          # of the account tree, not a secret, and wrangler reads it from the
+          # environment. CLOUDFLARE_API_TOKEN is already job-level env.
+          CLOUDFLARE_ACCOUNT_ID="$(grep -oE '[0-9a-f]{32}' "$ACCOUNT_DIR/account.tfvars" | head -n1)"
+          export CLOUDFLARE_ACCOUNT_ID
+          bash .github/scripts/kv-bulk-load.sh "$LAYER_DIR"
 
       - name: Record what was applied
         if: always() && inputs.mode == 'apply'
@@ -404,8 +499,44 @@ jobs:
           echo "### Applied \`${{ inputs.account }}\` / \`${{ inputs.layer }}\` — ${{ job.status }}" \
             >>"$GITHUB_STEP_SUMMARY"
 
+      # Runs after the KV load, which talks to Cloudflare through wrangler
+      - name: Stop the rate limiter and report what it absorbed
+        if: always()
+        run: |
+          set -euo pipefail
+          [[ -f "$CF_THROTTLE_PID" ]] || exit 0
+          pid="$(cat "$CF_THROTTLE_PID")"
+
+          # A limiter that died mid-run is worth saying out loud: Terraform would
+          # have carried on against Cloudflare directly, unpaced, so a 429 in the
+          # log above has a different cause than "rps too high".
+          if ! kill -0 "$pid" 2>/dev/null; then
+            echo "::warning title=Rate limiter exited early::cf-api-throttle.py (pid $pid) was no longer running at the end of this job. Any Cloudflare request after it exited was unthrottled."
+          else
+            # SIGTERM rather than SIGKILL: the handler prints the request count,
+            # how many 429s it absorbed and the worst queue wait, which is the
+            # only evidence of whether api_rps is set sensibly for this layer.
+            kill -TERM "$pid" 2>/dev/null || true
+            for _ in $(seq 1 20); do
+              kill -0 "$pid" 2>/dev/null || break
+              sleep 0.5
+            done
+            kill -KILL "$pid" 2>/dev/null || true
+          fi
+
+          if [[ -s "$CF_THROTTLE_LOG" ]]; then
+            echo "::group::Cloudflare API rate limiter"
+            cat "$CF_THROTTLE_LOG"
+            echo "::endgroup::"
+            # The summary line is the useful one for tuning api_rps, so it goes
+            # in the job summary next to the plan counts.
+            grep -h 'requests=' "$CF_THROTTLE_LOG" | tail -n1 \
+              | sed 's/^/- API rate limiter: /' >>"$GITHUB_STEP_SUMMARY" || true
+          fi
+
       - name: Remove generated files
         if: always()
         run: |
           rm -f "$LAYER_DIR/backend.generated.tf" "$LAYER_DIR/tfplan" \
-                "$LAYER_DIR/tfplan.json" varfiles.txt comment.md
+                "$LAYER_DIR/tfplan.json" varfiles.txt comment.md \
+                "$CF_THROTTLE_PID" "$CF_THROTTLE_LOG"

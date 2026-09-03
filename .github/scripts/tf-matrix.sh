@@ -24,6 +24,9 @@
 #
 # `matrix` drives plan.yml (one job per pair, all in parallel).
 #
+# `by_layer` + `apply_order` drive apply.yml. Layer directories are NOT numbered,
+# so order is never taken from their names
+#
 # The one ordering that is NOT derivable from the source is the prerequisite tier
 # below. Account-level permissions and resource-group scoping are what every
 # later layer's token is evaluated against, so they go out first even though no
@@ -31,7 +34,7 @@
 # decision, not on an attribute.
 #
 # apply_order is a list of tiers. Walk tiers in order; everything inside one tier
-# is independent and may run concurrently, for example waf and load_balancing depend on zones but not on each other.
+# is independent and may run concurrently.
 #
 # The account and layer lists are discovered from the directory tree, and every
 # mapping below is derived from the Terraform source, so adding an account, a
@@ -43,10 +46,10 @@ set -euo pipefail
 LAYERS_DIR="deployment/layers"
 ACCOUNTS_DIR="deployment/accounts"
 
-# Layers that must apply before any other
+# Layers that must apply before any other, in this order
 PREREQ_LAYERS=(account_governance)
 
-# Layers forced into the post-zone tier
+# Layers forced into the post-zone tier even though nothing in their source says so
 POST_ZONE_LAYERS=(zerotrust)
 
 BASE_SHA="${BASE_SHA:-}"
@@ -302,7 +305,6 @@ tier_json() { # <items...> -> JSON array, empty-safe
   [[ $# -eq 0 ]] && { echo '[]'; return; }
   printf '%s\n' "$@" | LC_ALL=C sort | jq -R -c '.' | jq -s -c '.'
 }
-# Empty tiers are kept in place rather than filtered out.
 apply_order="$(jq -c -n \
   --argjson t0 "$(tier_json "${TIER0[@]}")" \
   --argjson t1 "$(tier_json "${TIER1[@]}")" \

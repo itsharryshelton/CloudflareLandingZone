@@ -68,13 +68,7 @@ locals {
     )
   ])
 
-  # Bot traffic asked for on a zone whose plan does not expose the verified bot
-  # category field. Cloudflare rejects the whole ruleset in that case, taking the
-  # baseline and tenant rules down with it, so the zone ends up with no custom
-  # firewall rules at all rather than with the bot rules missing.
-  #
-  # Evaluated only for policies whose zone_key resolves, so a dangling key
-  # reports as a dangling key rather than as a tier problem.
+  # Bot traffic asked for on a zone whose plan does not expose the verified bot category field.
   underpowered_bot_traffic = [
     for key, policy in var.waf_policies :
     "${key} (zone \"${policy.zone_key}\", tier \"${local.zone_tiers[policy.zone_key]}\")"
@@ -83,8 +77,7 @@ locals {
     && local.tier_rank[local.zone_tiers[policy.zone_key]] < local.bot_traffic_min_rank
   ]
 
-  # Baseline rules selected while the variable they depend on is empty. See the
-  # reasoning in locals.waf.tf - these are unsafe, not merely useless.
+  # Baseline rules selected while the variable they depend on is empty.
   waf_unsatisfied_baseline_rules = flatten([
     for key, policy in var.waf_policies : [
       for name in policy.baseline_custom_rules :

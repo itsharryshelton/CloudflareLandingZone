@@ -6,13 +6,25 @@
 #
 # Committed: contains no account IDs, tokens or customer names.
 
-# Paths the block_admin_from_untrusted and log_trusted_admin_access baseline rules treat as administrative. Adjust if needed.
+# Paths the block_admin_from_untrusted and log_trusted_admin_access baseline rules
+# treat as administrative. Matched with `contains`, so "/admin" also covers
+# "/admin/config".
+
+# NOTE: Add your own admin paths here
 waf_admin_paths = [
+  # Generic
   "/admin",
-  "/wp-login.php",
-  "/wp-admin",
   "/administrator",
   "/phpmyadmin",
+
+  # WordPress
+  "/wp-login.php",
+  "/wp-admin",
+
+  # Typical Login Points - Recommend to adjust if needed / note this will autoblock login paths if not on trusted IPs (Not useful if being deployed to public website)
+  "/user/login",
+  "/user/password",
+  "/user/register",
 ]
 
 # Deliberately empty. Populate per account with the real corporate egress ranges; not here.

@@ -22,9 +22,9 @@ Azure Landing Zones (ALZ) established this standard for cloud adoption. CFLZ app
 
 ## Architectural Framework
 
-CFLZ mirrors the Microsoft Cloud Adoption Framework (CAF) hierarchy, adapting it to the Cloudflare edge ecosystem.
+CFLZ is designed to be similar to the Microsoft Cloud Adoption Framework (CAF), adapting it to the Cloudflare edge ecosystem, because it is a tried and tested method, but also allows Azure Architects to quickly understand and adopt a Cloudflare Landing Zone's Structure.
 
-### Platform Landing Zone (Account & Enterprise Governance)
+### Platform Landing Zone (Account Governance)
 
 The Platform Landing Zone establishes your organisation's primary Cloudflare edge foundation. It defines how you structure your Cloudflare Accounts, enforce global security governance, and deliver shared edge capabilities centrally. Most organisations maintain one primary Platform Landing Zone per main Enterprise Account or administrative scope.
 
@@ -56,31 +56,31 @@ CFLZ abstracts infrastructure logic away from customer data, allowing onboarding
 - deployment/layers/: Top-level orchestration layers that compose modules into complete environments.
 - deployment/accounts/: The only directory operators edit. Contains .tfvars per Cloudflare account.
 
-## Built-in Guardrails & Pre-flight Checks
+## Decoupled Layer Architecture & Blast Radius Containment
 
-CFLZ prioritises fail-safe operations. Instead of failing halfway through a live apply, invalid or dangerous configurations fail during the plan phase via native HCL validation and precondition blocks.
+Monolithic Terraform states create catastrophic blast radius vulnerabilities within enterprise edge environments. CFLZ resolves this by decomposing infrastructure into discrete, decoupled layers - each managing independent state files, dedicated pipeline tokens, and distinct operational lifecycles.
 
-### Safety Guardrails
-- Super Administrator Lockout Prevention: The account_governance layer refuses to assign the Super Administrator role (by name or ID) unless explicitly unlocked in code, protecting the root access model.
-- WAF Admin Lockout: Selecting block_admin_from_untrusted without providing a trusted IP list will immediately fail execution, preventing self-lockout.
-- Zero Trust Bypass Restrictions: Access policies configured with decision = "bypass" are rejected by default to prevent accidental exposure of protected endpoints.
-- Team Domain Protection: Renaming a Zero Trust Team domain requires explicit confirmation flags, preventing broken Access URLs and forced WARP client re-enrolments.
-- Billing Change Visibility: Terraform never alters a zone's rate plan unless subscription management is explicitly enabled, and any run that would do so prints a warning naming every zone and the plan it moves to. An accidental downgrade strips WAF, rate limiting and Bot Management entitlements from a live zone.
-- R2 Public Exposure Control: A bucket asking for its anonymous `r2.dev` URL, or a CORS rule allowing every origin, fails the plan naming the bucket. Both are one dashboard click away and both make object data readable from any visitor's browser.
-- R2 Irreversible Deletion Guard: A lifecycle rule that expires objects across an entire bucket needs an explicit unlock, because R2 has no versioning and nothing deleted comes back. A lifecycle deletion that collides with an object lock rule fails the plan too - Cloudflare accepts that pair and then refuses the deletion silently, forever.
-- Gateway Inspection Bypass Control: A Do Not Inspect policy that matches on something only visible after TLS decryption - a DLP profile, an HTTP method, a file type - fails the plan. Cloudflare does not report that combination as an error: the rule simply never matches, the traffic keeps being decrypted, and the dashboard shows the bypass as configured. A catch-all policy combined with `allow` or `off` fails too, because Gateway stops at the first match and an unscoped allow is every policy below it deleted.
-- Gateway Rule Ordering: Policy precedence is explicit and unique per policy type, and the band below 100 is reserved for the platform baseline so an account tree cannot put a rule in front of a platform block. Two policies of one type sharing a precedence fail the plan - the enforced order would be Cloudflare's choice rather than yours.
-- Gateway Tenant Restriction Headers: Injected request headers - the mechanism behind a Microsoft 365 or Google Workspace tenant restriction - are only accepted on an HTTP `allow` policy, and anything else fails the plan naming the policy and its action. Cloudflare drops a header it has nowhere to add, so the alternative is a sign-in to a personal tenant that nothing refuses while the dashboard shows the restriction as configured.
-- Gateway DLP Payload Logging: Storing the matched content of a DLP hit needs an explicit unlock. What gets stored is by definition the sensitive data the policy exists to protect, and it is then readable by everybody with Gateway log access.
-- Cloudflare WAN Blackhole Prevention: A static route's next hop is derived from the tunnel rather than typed. A tunnel is numbered from a /31 and the address you configure is Cloudflare's end, so a hand-written next hop one address out is accepted by the API, displayed as healthy, and silently discards the traffic. A prefix reachable over only one tunnel, a tunnel with health checks disabled, and a `0.0.0.0/0` route each fail the plan too - the first two remove the failover the second tunnel was bought for, and the third attracts every destination nobody thought about.
-- Cloudflare WAN Secret Handling: IPsec pre-shared keys are a `sensitive` variable supplied from the pipeline environment and are never declared in a committed `.tfvars`. A key naming a tunnel that does not exist fails the plan, so a rotation that misses cannot leave a tunnel quietly running on a key nobody holds.
+```text
+Platform Layer (Central Governance)
+├── account_governance   (RBAC, user groups, audit configuration)
+├── zerotrust            (Access applications, service tokens, IdPs)
+├── gateway              (SWG egress filtering: DNS, network, and HTTP)
+└── wan                  (Magic WAN tunnels, interconnects, static routes)
 
-### Configuration Correctness Checks
-- DNS Validation: Catches record collisions, proxied TXT records, or proxied records with explicit TTLs before submission.
-- Load Balancer Logic: Verifies pool health-check timeouts are shorter than intervals, and ensures minimum healthy origin counts do not exceed pool capacity.
-- Identity Integrity: Validates that user groups do not assign permissions to undeclared members.
-- Plan Tier Gating: Each zone declares its Cloudflare tier, and a bot management setting the tier cannot support fails the plan naming the field and the plan it needs, rather than failing part-way through an apply on a Cloudflare error that names neither.
-- Bot Rule Placement: Per-category bot rules are emitted into the single ruleset Cloudflare permits per phase per zone, ahead of the baseline and tenant rules, so an allow can take effect without a second ruleset silently fighting the first.
+Application Layer (Zone & Workload Scope)
+├── zones                (Zone lifecycle, DNS records, vanity nameservers)
+│   ├── waf              (Firewall rulesets, rate limiting, bot policies)
+│   ├── load_balancing   (Health monitors, origin pools, failover logic)
+│   └── r2               (Bucket policies, CORS, custom domains)
+```
+
+### Architectural Principles
+
+- **Independent State Segmentation:** An apply failure, configuration drift, or state corruption within a high-velocity layer (such as `waf` or `r2`) can never compromise foundational DNS zones or account-level routing. Zone deletion - the most destructive failure mode in Cloudflare - is architecturally isolated to the `zones` layer alone.
+- **Least-Privilege Scoped Credentials:** Each pipeline runner operates under an API token restricted strictly to its layer domain. The `waf` runner holds `Zone WAF:Edit` and `Zone:Read`, preventing it from altering DNS or modifying account RBAC. Only `account_governance` is granted identity management privileges, ensuring complete separation between edge traffic rules and administrative access.
+- **Dynamic Plan-Time Discovery:** Layers do not consume `terraform_remote_state` outputs. Instead, workload layers resolve parent zone metadata dynamically via native data source filters at plan time. This eliminates rigid pipeline locking, enabling concurrent execution and independent layer migrations without inter-state coupling.
+- **Targeted Blast Containment:** Security controls, routing configurations, and identity policies can be reviewed, tested, and promoted independently, aligning Cloudflare operations with enterprise Zero Trust and Microsoft Cloud Adoption Framework (CAF) governance principles.
+
 
 ## Deployment & Multi-Tenant Model
 While the repository supports standalone deployments out of the box, enterprise environments should follow two core architectural patterns:
@@ -103,7 +103,7 @@ This guarantees that changes on main do not automatically alter live infrastruct
 
 ## CI/CD Pipeline & State Management
 
-CFLZ uses GitHub Actions driven strictly by GitOps workflows. Terraform is executed only inside the pipeline—never on local developer workstations.
+CFLZ uses GitHub Actions driven strictly by GitOps workflows. Terraform is executed only inside the pipeline-never on local developer workstations.
 
 | Workflow | Trigger | Touches Cloudflare |
 |---|---|---|

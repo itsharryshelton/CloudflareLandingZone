@@ -11,23 +11,6 @@
 #   -var-file=../../accounts/account_a/waf.tfvars
 #   -var-file=../../accounts/account_a/zones.tfvars
 #
-# WHY THIS IS DERIVED RATHER THAN A HARDCODED TABLE
-# -------------------------------------------------
-# deployment/README.md guarantees that no two files in an account tree assign
-# the same variable - `zones.tfvars` owns the inventory, `waf.tfvars` owns the
-# policies, and so on. That makes the mapping computable: a var file belongs to
-# a layer if and only if every top-level variable it assigns is declared by that
-# layer. `account.tfvars` (cloudflare_account_id) therefore reaches all three
-# layers, `dns.tfvars` (zone_config) reaches only the zones layer.
-#
-# Consequence: adding a layer or an account tfvars file needs no pipeline edit.
-# Terraform rejects a -var-file containing an undeclared variable, so the
-# "every variable declared" test is exactly the condition for the file to be
-# passable at all.
-#
-# A file whose variables are split across layers is a configuration error, not
-# something to paper over - it is reported and exits non-zero. ci.yml also
-# checks that every committed account tfvars is claimed by at least one layer.
 
 set -euo pipefail
 
@@ -72,9 +55,7 @@ for varfile in "$ACCOUNT_DIR"/*.tfvars; do
   if [[ $undeclared -eq 0 ]]; then
     echo "-var-file=$(realpath --relative-to="$LAYER_DIR" "$varfile")"
   elif [[ $declared -gt 0 ]]; then
-    # Partially matching means one file assigns variables owned by two different
-    # layers. Terraform would reject it for whichever layer does not declare the
-    # extras, so the config is unusable - fail loudly rather than silently drop.
+    # Partially matching means one file assigns variables owned by two different layers.
     echo "ERROR: $varfile assigns variables from more than one layer." >&2
     echo "       $(basename "$LAYER_DIR") declares $declared of ${#assigned[@]}: ${assigned[*]}" >&2
     echo "       Split it so each file's variables belong to a single layer." >&2

@@ -40,6 +40,14 @@ locals {
       enabled     = true
     }
 
+    block_listed_ips = {
+      name        = "Baseline - block addresses on the account IP blocklist"
+      expression  = format("ip.src in $%s", coalesce(var.waf_ip_blocklist_name, "unset"))
+      action      = "block"
+      description = "Baseline - block addresses on the account IP blocklist"
+      enabled     = false # False by Default to avoid accidental broad blocking on first-time run.
+    }
+
     block_known_exploit_paths = {
       name = "Baseline - block probes for common exploit paths"
       expression = join(" or ", [
@@ -146,6 +154,10 @@ locals {
     geoblock_countries = {
       satisfied = length(var.waf_blocked_countries) > 0
       reason    = "waf_blocked_countries is empty, and `ip.geoip.country in {}` is not a valid Cloudflare expression."
+    }
+    block_listed_ips = {
+      satisfied = var.waf_ip_blocklist_name != null
+      reason    = "waf_ip_blocklist_name is unset, so this rule would reference a list called $unset. Cloudflare rejects a rule naming a list that does not exist, which fails the apply after some rules have already been written."
     }
   }
 }

@@ -1,6 +1,4 @@
 # CI - correctness checks that need no credentials and touch no Cloudflare account.
-# Runs on every pull request and every push to main. `terraform-plan.yml` handles
-# anything that needs to talk to Cloudflare.
 name: CI
 
 on:
@@ -111,14 +109,9 @@ jobs:
           fi
 
   # ---------------------------------------------------------------------------
-  # An offline plan is the strongest check available without credentials: it
-  # proves each committed account profile still produces a valid plan.
-  #
-  # Only layers that create their own zones can do this. `waf` and
-  # `load_balancing` resolve zone IDs through data "cloudflare_zone", which is a
-  # real API read at plan time - see deployment/README.md. Which layers qualify
-  # is derived here rather than listed, so a new layer is classified correctly
-  # without editing this workflow.
+  # An offline plan is the strongest check available without doing a live account check. see deployment/README.md.
+  # Which layers qualify is derived here rather than listed, so a new layer is classified correctly without editing this workflow.
+
   offline-plan:
     name: terraform plan (offline)
     runs-on: ubuntu-latest
@@ -128,8 +121,8 @@ jobs:
       CLOUDFLARE_API_TOKEN: 'offline-plan-no-api-calls'
     steps:
       - uses: actions/checkout@v7
-      # "Offline" means no Cloudflare API call. Module download is still a
-      # network read against the private modules repository.
+        with:
+          fetch-depth: 0
       - uses: ./.github/actions/modules-auth
         with:
           app-id: ${{ vars.MODULES_APP_ID }}
@@ -139,59 +132,110 @@ jobs:
           terraform_version: ${{ env.TF_VERSION }}
           terraform_wrapper: false
 
-      - name: Plan every offline-plannable layer against every account
-
+      - name: Plan the affected offline-plannable pairs
+        env:
+          # On a pull request, diff against the merge base rather than main's tip
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || (github.event_name == 'push' && github.event.before || '') }}
+          HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          FORCE_ALL: ${{ github.event_name == 'workflow_dispatch' }}
         run: |
           set -euo pipefail
-          planned=0
-          skipped=()
 
+          # Offline-plannable == makes no Cloudflare read at plan time. Derived,
+          # not listed, so a new layer classifies itself.
+          offline_layers=()
           for layer_dir in deployment/layers/*/; do
             layer="$(basename "$layer_dir")"
             if grep -rhqE '^[[:space:]]*data[[:space:]]+"cloudflare_' "$layer_dir"*.tf; then
-              skipped+=("$layer (reads the Cloudflare API at plan time)")
               continue
             fi
-
-            # A real init: the backend block is committed commented out, so this
-            # uses the local backend and needs no R2 access. `-backend=false`
-            # would be rejected by plan.
-            terraform -chdir="$layer_dir" init -input=false
-
-            for account_dir in deployment/accounts/*/; do
-              account="$(basename "$account_dir")"
-              echo "::group::plan $layer / $account"
-              bash .github/scripts/tf-varfiles.sh "${layer_dir%/}" "${account_dir%/}" >varfiles.txt
-              mapfile -t VARFILES <varfiles.txt
-              if [[ ${#VARFILES[@]} -eq 0 ]]; then
-                echo "::error::no var files map $account_dir to $layer_dir"
-                exit 1
-              fi
-              # -refresh=false and -lock=false: there is no state and no backend.
-              terraform -chdir="$layer_dir" plan \
-                -input=false -lock=false -refresh=false "${VARFILES[@]}"
-              echo "::endgroup::"
-              planned=$((planned + 1))
-            done
+            offline_layers+=("$layer")
           done
 
-          {
-            echo "### Offline plans: $planned"
-            if [[ ${#skipped[@]} -gt 0 ]]; then
-              echo
-              echo "Not offline-plannable, covered by terraform-plan.yml instead:"
-              printf -- '- %s\n' "${skipped[@]}"
-            fi
-          } >>"$GITHUB_STEP_SUMMARY"
-
-          if [[ $planned -eq 0 ]]; then
-            echo "::error::no layer could be planned offline - expected at least one"
+          # This is the assertion the old `planned -eq 0` check was really
+          # making, now that planning nothing is a legitimate outcome. If every
+          # layer has grown a Cloudflare data source, this job has silently
+          # stopped checking anything - and since no live plan runs pre-merge,
+          # nothing would be checking a config change before it merged.
+          if [[ ${#offline_layers[@]} -eq 0 ]]; then
+            echo "::error::no layer is offline-plannable any more - every one reads the" \
+                 "Cloudflare API at plan time, so this job proves nothing. See" \
+                 "deployment/README.md."
             exit 1
           fi
 
+          # GITHUB_STEP_SUMMARY is redirected because tf-matrix.sh publishes its
+          # own selection table, and this job wants its own summary rather than
+          # the plan pipeline's.
+          matrix="$(GITHUB_STEP_SUMMARY=/dev/null bash .github/scripts/tf-matrix.sh 2>/dev/null \
+            | sed -n 's/^matrix=//p')"
+
+          in_list() { local n="$1"; shift; local i; for i in "$@"; do [[ "$i" == "$n" ]] && return 0; done; return 1; }
+
+          planned=0
+          declare -A INITED=()
+          printf 'offline-plannable: %s\n' "${offline_layers[*]}"
+
+          while read -r account layer; do
+            [[ -n "$layer" ]] || continue
+            in_list "$layer" "${offline_layers[@]}" || continue
+
+            # Once per layer, not once per pair: init is the same work whatever
+            # account is planned against it.
+            if [[ -z "${INITED[$layer]:-}" ]]; then
+              # A real init: the backend block is committed commented out, so
+              # this uses the local backend and needs no R2 access.
+              # `-backend=false` would be rejected by plan.
+              echo "::group::init $layer"
+              terraform -chdir="deployment/layers/$layer" init -input=false
+              echo "::endgroup::"
+              INITED[$layer]=1
+            fi
+
+            bash .github/scripts/tf-varfiles.sh \
+              "deployment/layers/$layer" "deployment/accounts/$account" >varfiles.txt
+            mapfile -t VARFILES <varfiles.txt
+            if [[ ${#VARFILES[@]} -eq 0 ]]; then
+              echo "::error::no var files map deployment/accounts/$account to deployment/layers/$layer"
+              exit 1
+            fi
+
+            # The output is captured rather than streamed. A plan over a few
+            # hundred zones is thousands of lines that nobody reads on a green
+            # run, and streaming them is a measurable part of this job's
+            # runtime. On failure the whole thing is printed, which is when it
+            # is worth reading.
+            # -refresh=false and -lock=false: there is no state and no backend.
+            if terraform -chdir="deployment/layers/$layer" plan \
+                 -input=false -lock=false -refresh=false -compact-warnings \
+                 "${VARFILES[@]}" >plan.log 2>&1; then
+              printf 'ok   %-16s %-24s %s\n' "$layer" "$account" \
+                "$(grep -E '^Plan:|^No changes' plan.log | tail -n1)"
+            else
+              echo "::group::plan $layer / $account FAILED"
+              cat plan.log
+              echo "::endgroup::"
+              echo "::error::offline plan failed: $account / $layer"
+              exit 1
+            fi
+            planned=$((planned + 1))
+          done < <(jq -r '.[] | "\(.account) \(.layer)"' <<<"$matrix")
+
+          {
+            echo "### Offline plans: $planned"
+            echo
+            if [[ $planned -eq 0 ]]; then
+              echo "_No offline-plannable layer was affected by this change._"
+            fi
+            echo "Offline-plannable layers: \`${offline_layers[*]}\`."
+            echo "Everything else reads the Cloudflare API at plan time, so it is planned"
+            echo "against the live account by \`terraform-apply.yml\` before its approval gate,"
+            echo "or on demand via \`terraform-plan.yml\`."
+          } >>"$GITHUB_STEP_SUMMARY"
+
       - name: Remove plan leftovers
         if: always()
-        run: rm -f varfiles.txt
+        run: rm -f varfiles.txt plan.log
 
 
   config-guard:
@@ -341,7 +385,7 @@ jobs:
           # other. load_balancing is deliberately not in the list: its tfvars is
           # currently a commented-out example, and a file that assigns nothing
           # selects every layer for that account by design.
-          for layer in account_governance bulk_redirects gateway r2 waf wan workers zerotrust; do
+          for layer in account_governance bulk_redirects dns gateway lists r2 rules waf wan workers zerotrust; do
             if [[ ! -f "deployment/accounts/$acct/$layer.tfvars" ]]; then
               echo "::notice::$acct has no $layer.tfvars - assertion skipped"
               continue
@@ -355,10 +399,28 @@ jobs:
             "deployment/README.md" \
             '[]' || rc=1
 
+          # `lists` is deliberately absent: it is account-scoped and declares no
+          # `zones` variable, so the inventory must not reach it. An entry
+          # appearing here would mean that layer had grown a zone dependency.
           assert_matrix "the zone inventory reaches only the layers that declare it" \
             "deployment/accounts/$acct/zones.tfvars" \
-            "$(expect "$acct:bulk_redirects" "$acct:load_balancing" "$acct:r2" \
-                      "$acct:waf" "$acct:workers" "$acct:zones")" || rc=1
+            "$(expect "$acct:bulk_redirects" "$acct:dns" "$acct:load_balancing" "$acct:r2" \
+                      "$acct:rules" "$acct:waf" "$acct:workers" "$acct:zones")" || rc=1
+
+          # zone_config.tfvars was dns.tfvars until DNS moved to its own layer.
+          # It owns var.zone_config - zone settings and TLS posture - and must
+          # reach the zones layer and nothing else. If it starts selecting `dns`
+          # too, the two layers have both declared the same variable and the
+          # one-file-one-layer invariant that makes tf-varfiles.sh derivable is
+          # gone.
+          if [[ -f "deployment/accounts/$acct/zone_config.tfvars" ]] &&
+             grep -qE '^[a-zA-Z_][a-zA-Z0-9_]*[[:space:]]*=' "deployment/accounts/$acct/zone_config.tfvars"; then
+            assert_matrix "zone configuration reaches only the zones layer" \
+              "deployment/accounts/$acct/zone_config.tfvars" \
+              "$(expect "$acct:zones")" || rc=1
+          else
+            echo "::notice::$acct/zone_config.tfvars is absent or assigns nothing - assertion skipped"
+          fi
 
           # Worker source and KV data live inside the layer, so a change to one is
           # a layer change and re-plans every account - which is what should
@@ -407,11 +469,27 @@ jobs:
           if ! jq -e '.[1] | index("zones") != null' <<<"$order" >/dev/null; then
             echo "::error::apply tier 2 must contain 'zones', got '$tier2' (full order: $order)"
             rc=1
-          elif [[ "$tier3" != "load_balancing,r2,waf,workers,zerotrust" ]]; then
-            echo "::error::apply tier 3 should be 'load_balancing,r2,waf,workers,zerotrust', got '$tier3' (full order: $order)"
+          elif [[ "$tier3" != "dns,load_balancing,r2,rules,waf,workers,zerotrust" ]]; then
+            echo "::error::apply tier 3 should be 'dns,load_balancing,r2,rules,waf,workers,zerotrust', got '$tier3' (full order: $order)"
             rc=1
           else
             echo "ok: zones applies in tier 2, ahead of the layers that look a zone up ($order)"
+          fi
+
+          # A Cloudflare list is referenced from a rule expression by name -
+          # `ip.src in $global_ip_blocklist` in the block_listed_ips WAF
+          # baseline - and a name is not a Terraform dependency. Nothing but apply
+          # order stops the rule being written before the list it names exists,
+          # and Cloudflare rejects that rule outright.
+          layer_tier() { jq -r --arg l "$1" 'to_entries[] | select(.value | index($l)) | .key' <<<"$order"; }
+          lists_tier="$(layer_tier lists)"
+          waf_tier="$(layer_tier waf)"
+          if [[ -z "$lists_tier" || -z "$waf_tier" || "$lists_tier" -ge "$waf_tier" ]]; then
+            echo "::error::the lists layer must apply in an earlier tier than waf" \
+                 "(lists=${lists_tier:-absent}, waf=${waf_tier:-absent}, full order: $order)"
+            rc=1
+          else
+            echo "ok: lists applies ahead of waf, so a list exists before a rule names it"
           fi
 
           # terraform-apply.yml declares a fixed number of sequential stages,
@@ -425,18 +503,22 @@ jobs:
 
           exit $rc
 
-  # Carried over from the Azure DevOps pipeline: layers pin their module source to
-  # a tag for real deployments (see the commented `git::` source in each layer),
-  # so main needs to produce tags.
-  #
-  # Patch only. Minor and major bumps are deliberate decisions - a breaking change
-  # to a module interface is not something a pipeline should guess at - so create
-  # those tags by hand.
+  # The rate limiter sits in the credential path of every plan and apply
+  throttle:
+    name: API rate limiter
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: python3 .github/scripts/cf-api-throttle-test.py
+
   release-tag:
     name: publish patch tag
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [fmt, lint, validate, offline-plan, config-guard]
+    needs: [fmt, lint, validate, offline-plan, config-guard, throttle]
     permissions:
       contents: write
     steps:

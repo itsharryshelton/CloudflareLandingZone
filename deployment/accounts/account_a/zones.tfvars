@@ -15,4 +15,9 @@ zones = {
     domain_name = "example.org"
     # No zone_tier, so this zone falls back to default_zone_tier ("free").
   }
+
+  test_domain = {
+    domain_name = "example.net"
+    zone_tier   = "business"
+  }
 }
