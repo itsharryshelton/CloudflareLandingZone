@@ -24,12 +24,7 @@ module "zones" {
 
 # Zone tier and zone-level bot posture.
 #
-# Split from zone_base rather than folded into it because these are the two
-# things that can cost money or change plan entitlement, and keeping them in
-# their own module keeps that reviewable. Per-category bot rules
-# (Search / Agent / Training) are NOT here: Cloudflare allows one entry-point
-# ruleset per phase per zone, the waf layer owns http_request_firewall_custom,
-# so they are configured as `bot_traffic` on a waf policy.
+# Split from zone_base due to varying subscription plans.
 module "zone_rules" {
   source = "../../../modules/zone_rules"
 

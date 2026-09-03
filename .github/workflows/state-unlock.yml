@@ -1,0 +1,270 @@
+# Release a Terraform state lock left behind by a job that died holding it.
+name: Terraform State Unlock
+
+on:
+  workflow_dispatch:
+    inputs:
+      account:
+        description: 'Account directory name under deployment/accounts/.'
+        required: true
+        type: string
+      layer:
+        description: 'Layer directory name under deployment/layers/ whose state is locked.'
+        required: true
+        type: string
+      lock_id:
+        description: >-
+          The lock ID from the "Error acquiring the state lock" message, e.g.
+          0cad19f9-e895-589b-6622-33ddfc27a0ae. Must match the lock actually
+          held, so that a newer lock taken by somebody else is not released.
+        required: true
+        type: string
+      confirm:
+        description: >-
+          Type the layer name again to confirm. Guards against dispatching this
+          against the wrong state from a stale browser tab.
+        required: true
+        type: string
+      dry_run:
+        description: 'Report who holds the lock and release nothing.'
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tf-${{ inputs.account }}-${{ inputs.layer }}
+  cancel-in-progress: false
+
+jobs:
+  unlock:
+    name: unlock ${{ inputs.account }} / ${{ inputs.layer }}
+    runs-on: ubuntu-latest
+    # The layer's apply environment, so this inherits its reviewer gate. The
+    # operation is narrow, but its failure mode - unlocking a live run - is not.
+    environment: ${{ inputs.account }}-${{ inputs.layer }}-apply
+
+    defaults:
+      run:
+        shell: bash
+
+    env:
+      TF_IN_AUTOMATION: '1'
+      TF_INPUT: '0'
+      LAYER_DIR: deployment/layers/${{ inputs.layer }}
+      ACCOUNT_DIR: deployment/accounts/${{ inputs.account }}
+      STATE_KEY: ${{ inputs.account }}/${{ inputs.layer }}.tfstate
+      LOCK_KEY: ${{ inputs.account }}/${{ inputs.layer }}.tfstate.tflock
+      TF_BACKEND_BUCKET: ${{ vars.TF_BACKEND_BUCKET }}
+      TF_BACKEND_ENDPOINT: ${{ vars.TF_BACKEND_ENDPOINT }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: auto
+      AWS_EC2_METADATA_DISABLED: 'true'
+      LOCK_ID: ${{ inputs.lock_id }}
+      CONFIRM: ${{ inputs.confirm }}
+      DRY_RUN: ${{ inputs.dry_run }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Check inputs
+        run: |
+          set -euo pipefail
+          if [[ "$CONFIRM" != "${{ inputs.layer }}" ]]; then
+            echo "::error::confirm was '$CONFIRM' but the layer is '${{ inputs.layer }}'. Nothing was touched."
+            exit 1
+          fi
+
+          missing=()
+          [[ -n "${AWS_ACCESS_KEY_ID:-}"     ]] || missing+=("secret R2_ACCESS_KEY_ID")
+          [[ -n "${AWS_SECRET_ACCESS_KEY:-}" ]] || missing+=("secret R2_SECRET_ACCESS_KEY")
+          [[ -n "${TF_BACKEND_BUCKET:-}"     ]] || missing+=("variable TF_BACKEND_BUCKET")
+          [[ -n "${TF_BACKEND_ENDPOINT:-}"   ]] || missing+=("variable TF_BACKEND_ENDPOINT")
+          [[ -d "$LAYER_DIR"                 ]] || missing+=("layer directory $LAYER_DIR")
+          [[ -d "$ACCOUNT_DIR"               ]] || missing+=("account directory $ACCOUNT_DIR")
+          if [[ ${#missing[@]} -gt 0 ]]; then
+            printf '::error::missing %s\n' "${missing[@]}"
+            exit 1
+          fi
+
+          # Terraform lock IDs are UUIDs. Checked here so a truncated paste
+          # fails on the input rather than after an init, and because the value
+          # is about to be compared against the lock object as a plain string.
+          if [[ ! "$LOCK_ID" =~ ^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$ ]]; then
+            echo "::error::lock_id '$LOCK_ID' is not a UUID. Copy it from the 'ID:' line of the lock error."
+            exit 1
+          fi
+
+          echo "state key: $STATE_KEY"
+          echo "lock key:  $LOCK_KEY"
+          echo "lock id:   $LOCK_ID"
+
+      - name: Read the lock
+        id: read_lock
+        run: |
+          set -euo pipefail
+          # Read before init: if the lock is already gone, or belongs to
+          # somebody else, say so in seconds rather than after a provider
+          # download. The lock object is the small JSON the s3 backend wrote.
+          #
+          # Path-style addressing, to match the backend's `use_path_style`.
+          aws configure set default.s3.addressing_style path
+
+          if ! aws s3api get-object \
+                --endpoint-url "$TF_BACKEND_ENDPOINT" \
+                --bucket "$TF_BACKEND_BUCKET" \
+                --key "$LOCK_KEY" \
+                lock.json >get-object.log 2>&1; then
+            if grep -qiE 'NoSuchKey|Not Found|404' get-object.log; then
+              echo "::notice title=Already unlocked::No $LOCK_KEY in the bucket. Nothing holds the lock; re-run the plan."
+              echo "outcome=absent" >>"$GITHUB_OUTPUT"
+              exit 0
+            fi
+            # Anything else - keys that cannot read the object, a wrong
+            # endpoint, no AWS CLI - is not a reason to refuse the unlock: the
+            # s3 backend does its own lock-ID comparison, so force-unlock is
+            # still safe without this pre-check. Warn and carry on, because the
+            # operator dispatched this against a lock whose details they have
+            # already read out of a failing run.
+            echo "::warning title=Could not read the lock::$(tail -n 3 get-object.log). Proceeding; the s3 backend compares the lock ID itself."
+            echo "outcome=unreadable" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "::group::$LOCK_KEY"
+          jq . lock.json || cat lock.json
+          echo "::endgroup::"
+
+          held=$(jq -r '.ID // empty' lock.json)
+          {
+            echo "who=$(jq -r '.Who // "unknown"' lock.json)"
+            echo "created=$(jq -r '.Created // "unknown"' lock.json)"
+            echo "operation=$(jq -r '.Operation // "unknown"' lock.json)"
+          } >>"$GITHUB_OUTPUT"
+
+          if [[ "$held" != "$LOCK_ID" ]]; then
+            echo "::error::the lock on $STATE_KEY is '$held', not the '$LOCK_ID' that was given."
+            echo "The lock you saw has since been released and a different run has taken a new" >&2
+            echo "one. Do not unlock it. Find that run in the Actions tab first." >&2
+            exit 1
+          fi
+          echo "outcome=present" >>"$GITHUB_OUTPUT"
+
+      # Module sources point at the private modules repository, which
+      # GITHUB_TOKEN cannot read. `terraform init` needs it even here.
+      - uses: ./.github/actions/modules-auth
+        if: steps.read_lock.outputs.outcome != 'absent' && inputs.dry_run != true
+        with:
+          app-id: ${{ vars.MODULES_APP_ID }}
+          private-key: ${{ secrets.MODULES_APP_PRIVATE_KEY }}
+
+      - name: Setup Terraform
+        if: steps.read_lock.outputs.outcome != 'absent' && inputs.dry_run != true
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: '1.14.6'
+          terraform_wrapper: false
+
+      - name: Generate the R2 backend block
+        if: steps.read_lock.outputs.outcome != 'absent' && inputs.dry_run != true
+        run: |
+          set -euo pipefail
+          # Same generated block as _terraform-run.yml, for the same reason: the
+          # committed one is commented out so offline CI can init without R2.
+          if grep -rhqE '^[[:space:]]*backend[[:space:]]+"' "$LAYER_DIR"/*.tf; then
+            echo "::error::$LAYER_DIR has an uncommented backend block"
+            exit 1
+          fi
+          cat >"$LAYER_DIR/backend.generated.tf" <<'EOF'
+          # Generated by .github/workflows/state-unlock.yml. Never committed.
+          terraform {
+            backend "s3" {
+              region                      = "auto"
+              use_path_style              = true
+              use_lockfile                = true
+              skip_credentials_validation = true
+              skip_metadata_api_check     = true
+              skip_region_validation      = true
+              skip_requesting_account_id  = true
+              skip_s3_checksum            = true
+            }
+          }
+          EOF
+
+      - name: Terraform init
+        if: steps.read_lock.outputs.outcome != 'absent' && inputs.dry_run != true
+        run: |
+          set -euo pipefail
+          cd "$LAYER_DIR"
+          # -lock=false: init needs no state lock, and the whole premise of this
+          # run is that the lock cannot be acquired.
+          terraform init -reconfigure -input=false -lock=false \
+            -backend-config="bucket=${TF_BACKEND_BUCKET}" \
+            -backend-config="key=${STATE_KEY}" \
+            -backend-config="endpoints={\"s3\":\"${TF_BACKEND_ENDPOINT}\"}"
+
+      - name: Unlock
+        if: steps.read_lock.outputs.outcome != 'absent' && inputs.dry_run != true
+        run: |
+          set -euo pipefail
+          cd "$LAYER_DIR"
+          # -force skips the interactive confirmation, which TF_INPUT=0 would
+          # otherwise fail on. The backend still compares the given ID against
+          # the held lock, so this is not a blind delete.
+          terraform force-unlock -force "$LOCK_ID"
+
+      - name: Confirm the lock is gone
+        if: steps.read_lock.outputs.outcome != 'absent' && inputs.dry_run != true
+        run: |
+          set -euo pipefail
+          # force-unlock exiting 0 is the authority here; this is a second pair
+          # of eyes on the bucket, because a lock somehow still present means
+          # the next plan fails identically, and the operator should hear that
+          # from this run rather than from that one.
+          if aws s3api head-object \
+               --endpoint-url "$TF_BACKEND_ENDPOINT" \
+               --bucket "$TF_BACKEND_BUCKET" \
+               --key "$LOCK_KEY" >/dev/null 2>&1; then
+            echo "::error::$LOCK_KEY is still in the bucket after force-unlock."
+            exit 1
+          fi
+          echo "::notice title=Unlocked::$STATE_KEY is released. Re-run the plan."
+
+      - name: Dry run notice
+        if: inputs.dry_run == true && steps.read_lock.outputs.outcome != 'absent'
+        run: |
+          echo "::notice title=Dry run::Nothing was released. Re-run with dry_run unchecked to unlock."
+
+      - name: Report
+        if: always()
+        run: |
+          set -euo pipefail
+          {
+            echo "### State unlock — \`${{ inputs.account }}\` / \`${{ inputs.layer }}\`"
+            echo
+            echo "- State key: \`$STATE_KEY\`"
+            echo "- Lock ID given: \`$LOCK_ID\`"
+            echo "- Dry run: \`$DRY_RUN\`"
+            echo "- Lock: \`${{ steps.read_lock.outputs.outcome || 'not checked' }}\`"
+            if [[ -n "${{ steps.read_lock.outputs.who }}" ]]; then
+              echo "- Held by: \`${{ steps.read_lock.outputs.who }}\`"
+              echo "- Taken at: \`${{ steps.read_lock.outputs.created }}\`"
+              echo "- Operation: \`${{ steps.read_lock.outputs.operation }}\`"
+            fi
+            echo "- Result: ${{ job.status }}"
+            if [[ "$DRY_RUN" != "true" && "${{ job.status }}" == "success" ]]; then
+              echo
+              echo "State contents were not touched. Re-run the plan for this pair."
+              echo "If it was an apply that died rather than a plan, read that plan"
+              echo "carefully - it shows how far the interrupted apply actually got."
+            fi
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Remove generated files
+        if: always()
+        run: |
+          rm -f "$LAYER_DIR/backend.generated.tf" lock.json get-object.log

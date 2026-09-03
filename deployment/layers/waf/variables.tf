@@ -125,7 +125,14 @@ variable "waf_policies" {
                                   catalogue in locals.waf.tf.
     - `baseline_rate_limits`    - (Optional) Names of baseline rate limits from the same catalogue.
     - `custom_block_rules`      - (Optional) Tenant-specific firewall rules, appended after
-                                  the baseline rules so they evaluate later.
+                                  the baseline rules so they evaluate later. Actions are
+                                  block, challenge, managed_challenge, js_challenge, log and
+                                  skip. A skip rule needs a `skip` block naming what to stop
+                                  evaluating, and turns protection OFF for whatever it
+                                  matches - scope it to a path and a method, not to a
+                                  hostname. Note the ordering: these are appended after the
+                                  baseline, so a skip here cannot undo a baseline block that
+                                  has already fired.
     - `rate_limiting_rules`     - (Optional) Tenant-specific rate limits, appended after the
                                   baseline rate limits.
     - `custom_ruleset_name`     - (Optional) Dashboard display name for the custom ruleset.
@@ -154,6 +161,13 @@ variable "waf_policies" {
       action      = optional(string, "block")
       description = optional(string)
       enabled     = optional(bool, true)
+      logging     = optional(bool)
+      skip = optional(object({
+        ruleset  = optional(string)
+        rulesets = optional(list(string))
+        phases   = optional(list(string))
+        products = optional(list(string))
+      }))
     })), [])
     rate_limiting_rules = optional(list(object({
       name                = string
@@ -236,5 +250,32 @@ variable "waf_blocked_countries" {
   validation {
     condition     = alltrue([for code in var.waf_blocked_countries : can(regex("^[A-Z]{2}$", code))])
     error_message = "Each waf_blocked_countries entry must be an uppercase ISO 3166-1 alpha-2 code (e.g. \"CN\")."
+  }
+}
+
+variable "waf_ip_blocklist_name" {
+  type        = string
+  default     = null
+  description = <<-EOT
+    Name of an account-scoped Cloudflare IP list that the `block_listed_ips`
+    baseline rule blocks on. Selecting that rule while this is null fails the
+    plan.
+
+    THE LIST IS NOT CREATED HERE. It belongs to the `lists` layer, which applies
+    before this one, and this is the name it was given in
+    accounts/<account>/lists.tfvars. The two have to agree by hand: a rule
+    referring to a list that does not exist is rejected by Cloudflare at apply
+    time, and renaming the list without changing this leaves a rule that is
+    valid, enabled and matches nothing.
+
+    Why a list rather than a hardcoded set of addresses: the contents are
+    operational rather than architectural. An address added during an incident
+    takes effect the moment it is written to the list, with no Terraform run and
+    no pull request, and it survives every later apply of this layer.
+  EOT
+
+  validation {
+    condition     = var.waf_ip_blocklist_name == null || can(regex("^[a-z0-9_]{1,50}$", coalesce(var.waf_ip_blocklist_name, "x")))
+    error_message = "waf_ip_blocklist_name must be 1-50 characters of lowercase letters, numbers and underscores - the same constraint Cloudflare puts on the list's name, because the rule refers to it as $name."
   }
 }

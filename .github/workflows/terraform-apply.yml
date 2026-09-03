@@ -1,10 +1,6 @@
-# Apply - plan, then apply that plan after human approval.
+# Apply - plan, then apply that plan after human approval. Never one without the other.
 #
-# Every apply in this workflow consumes a plan file produced by an earlier job in
-# the same run. `terraform apply` is only ever handed a saved plan.
-#
-# Stages run strictly in sequence, because each tier's PLAN can depend on the
-# previous tier's APPLY having already happened:
+# Stages run strictly in sequence, because each tier's PLAN can depend on the previous tier's APPLY having already happened:
 #
 #   tier 1  account_governance  - account-wide permissions and resource-group
 #                                 scope. Every later tier's token is evaluated
@@ -14,7 +10,7 @@
 #           resolve one with data "cloudflare_zone", or they address resources
 #           by hostname (zerotrust). Cannot be planned until tier 2 has run.
 #
-# KEY: Which layer lands in which tier is derived in .github/scripts/tf-matrix.sh
+# Which layer lands in which tier is derived in .github/scripts/tf-matrix.sh, not listed here.
 
 name: Terraform Apply
 
@@ -83,7 +79,7 @@ jobs:
             exit 1
           fi
 
-  # TIER 1 - account-wide prerequisites (e.g. account_governance).
+  # TIER 1 - account-wide prerequisites (account_governance).
   plan-tier0:
     name: plan (tier 1)
     needs: discover
@@ -106,6 +102,9 @@ jobs:
   apply-tier0:
     name: apply (tier 1)
     needs: [discover, plan-tier0]
+    if: >-
+      !cancelled() &&
+      needs['plan-tier0'].result == 'success'
     strategy:
       fail-fast: false
       max-parallel: 4
@@ -146,6 +145,9 @@ jobs:
   apply-tier1:
     name: apply (tier 2)
     needs: [discover, plan-tier1]
+    if: >-
+      !cancelled() &&
+      needs['plan-tier1'].result == 'success'
     strategy:
       fail-fast: false
       max-parallel: 4
@@ -185,6 +187,9 @@ jobs:
   apply-tier2:
     name: apply (tier 3)
     needs: [discover, plan-tier2]
+    if: >-
+      !cancelled() &&
+      needs['plan-tier2'].result == 'success'
     strategy:
       fail-fast: false
       max-parallel: 4
@@ -247,14 +252,28 @@ jobs:
             exit 1
           fi
 
-          # `skipped` is a normal outcome: a stage is skipped when its tier had no
-          # affected pairs, or when a reviewer declined the approval. Only an
-          # outright failure or cancellation is an error here.
+          # `skipped` is a normal outcome for a stage whose tier had no affected
+          # pairs - narrowing to one layer skips the other two tiers entirely.
+          # Only an outright failure or cancellation is an error here; the
+          # skipped-but-shouldn't-have-been case is caught below.
           for stage in "${STAGES[@]:1}"; do
             case "${R[$stage]}" in
               success|skipped) ;;
               *) echo "::error::$stage: ${R[$stage]}"; exit 1 ;;
             esac
+          done
+
+          # A plan that succeeded with no apply behind it is the one shape of
+          # "everything skipped" that must not go green: the operator asked for
+          # an apply, a plan was produced and approved, and nothing executed it.
+          # Either the approval was declined - in which case a red run is the
+          # honest record that the apply did not happen - or a `needs`/`if`
+          # regression has reintroduced skip propagation down the tier chain.
+          for n in 0 1 2; do
+            if [[ "${R[plan-tier$n]}" == "success" && "${R[apply-tier$n]}" == "skipped" ]]; then
+              echo "::error title=Plan was not applied::plan-tier$n succeeded but apply-tier$n did not run. If the approval was declined, re-run once approved; otherwise apply-tier$n's \`if\` condition is skipping a plan that should have been applied."
+              exit 1
+            fi
           done
 
           if [[ "${{ needs.discover.outputs.any }}" == "false" ]]; then

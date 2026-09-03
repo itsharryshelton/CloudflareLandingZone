@@ -1,14 +1,29 @@
 # Pipelines
 
-Four workflows, plus one reusable definition they all share.
+Six workflows, plus one reusable definition the Terraform ones share.
 
 | Workflow                                     | Trigger                                | Touches Cloudflare? | Can change anything? |
 | ----------------------------------------------| ----------------------------------------| ---------------------| ----------------------|
 | [`ci.yml`](ci.yml)                           | every PR, every push to `main`         | no                  | no                   |
 | [`secret-scanning.yml`](secret-scanning.yml) | every PR, every push to `main`, manual | no                  | no                   |
-| [`terraform-plan.yml`](terraform-plan.yml)   | PR touching the Terraform tree, manual | reads               | no                   |
+| [`terraform-plan.yml`](terraform-plan.yml)   | manual only                            | reads               | no                   |
 | [`terraform-apply.yml`](terraform-apply.yml) | manual only                            | reads + writes      | yes, after approval  |
-| [`_terraform-run.yml`](_terraform-run.yml)   | called by the two above                | n/a                 | n/a                  |
+| [`state-forget.yml`](state-forget.yml)       | manual only                            | no                  | state only, after approval |
+| [`state-unlock.yml`](state-unlock.yml)       | manual only                            | no                  | the state lock only, after approval |
+| [`_terraform-run.yml`](_terraform-run.yml)   | called by plan and apply               | n/a                 | n/a                  |
+
+The two `state-*` workflows are maintenance tools with **no automated caller**.
+Neither holds a Cloudflare credential, so neither can change anything at
+Cloudflare - see their headers.
+
+`state-forget.yml` makes Terraform forget a resource without deleting it, which
+is what hands a resource from one layer's state to another's. Kept because the
+layer split that created the `dns` layer will not be the last one.
+
+`state-unlock.yml` releases a state lock left behind by a run that was cancelled
+while holding it - the `PreconditionFailed` on every subsequent plan for that
+account and layer. See ["A cancelled run left the state
+locked"](#a-cancelled-run-left-the-state-locked).
 
 ## Apply never runs without a plan
 
@@ -44,8 +59,8 @@ Terraform source, so adding an account, a layer or a module needs no edit here:
   | Tier | Layers | Why it is here |
   |---|---|---|
   | 1 | `account_governance` | Account-wide permissions and resource-group scope. Every later tier's token is evaluated against what this applies, so it goes out on its own and first. |
-  | 2 | `zones`, `bulk_redirects`, `gateway`, `wan`, `zerotrust` | `zones` *creates* zones. The rest touch no zone at all, so nothing waits on them - they ride along in this tier rather than being ordered against each other. |
-  | 3 | `waf`, `load_balancing`, `r2`, `workers` | Resolve a zone with `data "cloudflare_zone"`, which fails at plan time until tier 2 has created it. `r2` is here because a bucket can be served from a custom domain, even where no bucket currently is. |
+  | 2 | `zones`, `bulk_redirects`, `gateway`, `lists`, `wan` | `zones` *creates* zones. The rest touch no zone at all, so nothing waits on them - they ride along in this tier rather than being ordered against each other. `lists` must land before `waf`, which it does by being a tier earlier. |
+  | 3 | `dns`, `load_balancing`, `r2`, `rules`, `waf`, `workers`, `zerotrust` | Resolve a zone with `data "cloudflare_zone"`, which fails at plan time until tier 2 has created it. `r2` is here because a bucket can be served from a custom domain, even where no bucket currently is. `zerotrust` is here by `POST_ZONE_LAYERS` instead: Access applications are addressed by hostname, so they need the zone to exist even though the layer never reads one. |
 
   Tier 2 and 3 membership is **derived from the Terraform source** - `zone_base`
   call versus `data "cloudflare_zone"` block - so a new layer classifies itself.
@@ -56,10 +71,61 @@ Terraform source, so adding an account, a layer or a module needs no edit here:
 `ci.yml` asserts all three, so a regression in the derivation fails a PR rather
 than silently causing a merged change never to be planned.
 
-The one place the graph is not fully dynamic: a GitHub Actions job graph is
-static YAML and cannot grow a stage at runtime, so `terraform-apply.yml` declares
-three tier stages. If a new layer makes the graph deeper, both `discover` and
-`ci.yml` fail with instructions instead of skipping the extra tier.
+## API rate limiting
+
+Cloudflare allows **1200 API requests per five minutes per credential**. The
+`zones` layer holds one `cloudflare_zone`, one `cloudflare_zone_rules` and a
+handful of `cloudflare_zone_setting` resources per zone, and every one of them is
+a GET on every refresh — so at a few hundred zones a single plan is several
+thousand reads. Terraform issues those as fast as its scheduler allows.
+
+The Cloudflare provider used to pace itself: `rps`, `retries`, `min_backoff` and
+`max_backoff` were provider arguments in 4.x. The 5.x rewrite dropped all four
+and never replaced them, so a 5.x provider has **no rate limiting and no 429
+retry at all** ([cloudflare/terraform-provider-cloudflare#5505](https://github.com/cloudflare/terraform-provider-cloudflare/issues/5505)).
+Without something in front of it, a large layer fails partway through with
+
+```
+429 {"code":971,"message":"Please wait and consider throttling your request speed"}
+```
+
+reported as `failed to make http request` against whichever resource was in
+flight.
+
+`_terraform-run.yml` therefore starts
+[`cf-api-throttle.py`](../scripts/cf-api-throttle.py) after `init` and points the
+provider at it with `CLOUDFLARE_BASE_URL`. It is a loopback HTTP listener that
+paces every request through a shared token bucket and retries any 429 that still
+gets through, honouring the API's own `Retry-After`. 
+Terraform sees a slow API rather than a rate-limited one.
+
+Two inputs tune it, both with defaults that suit this account's zone count:
+
+| Input | Default | What it does |
+|---|---|---|
+| `api_rps` | `3.5` | Sustained requests per second. 1200/5min is 4.0/s; 3.5 leaves headroom for anything else using the same token. `0` bypasses the limiter entirely — debugging only. |
+| `parallelism` | `4` | Terraform's `-parallelism`. Secondary: it caps concurrent resources, not request rate. It exists so a run whose limiter died degrades gently instead of burning the budget in a minute. |
+
+The consequence is that plans and applies on `zones` are **slow by design**. The
+rate limit sets a floor: a refresh of *n* resources cannot finish faster than
+`n / api_rps` seconds, whatever the runner does. Raising `api_rps` above 4.0 does
+not make it faster, it makes it fail.
+
+Each job's `Stop the rate limiter` step publishes what the limiter absorbed —
+request count, 429s retried, worst queue wait — to the job summary. **A non-zero
+`429s_absorbed` means `api_rps` is too high for that credential**; a warning
+about the limiter exiting early means Terraform went unpaced and any 429 in that
+log has a different cause.
+
+Two things do *not* go through it, both deliberately: `init` (which fetches
+providers and modules from the registry and GitHub, not from Cloudflare) and the
+post-apply `kv-bulk-load.sh` (which uses `wrangler`, and moves 15,000 keys in a
+handful of bulk calls).
+
+### Credential handling
+
+Every proxied request carries the Cloudflare bearer token, so the limiter handles
+a live credential. It binds `127.0.0.1` only — nothing off the runner can reach it.
 
 ## Remote state
 
@@ -96,6 +162,11 @@ R2, and the reason every layer requires Terraform >= 1.11. R2 has no DynamoDB
 equivalent, so this plus the per-state-key `concurrency` group is the whole of the
 protection against two concurrent applies corrupting one key.
 
+The lock is therefore an object, `<account>/<layer>.tfstate.tflock`, sitting next
+to the state. A run cancelled before it can delete that object leaves it behind
+and blocks the pair - see ["A cancelled run left the state
+locked"](#a-cancelled-run-left-the-state-locked).
+
 R2 has no object versioning, so there is no rollback for a state object. Take
 periodic copies of the bucket if state loss would be expensive to reconstruct.
 
@@ -108,11 +179,11 @@ domain, and the R2 token below scoped to it alone.
 
 ### Repository variables
 
-| Name | Example | Notes |
-|---|---|---|
-| `TF_BACKEND_BUCKET` | `Your-Org-cloudflare-platform-tfstate` | R2 bucket holding state, see [Remote state](#remote-state). |
-| `TF_BACKEND_ENDPOINT` | `https://<state-account-id>.r2.cloudflarestorage.com` | S3-compatible R2 endpoint. |
-| `MODULES_APP_ID` | `1234567` | App ID of the modules-reader GitHub App below. Not a secret. |
+| Name                  | Example                                               | Notes                                                        |
+| -----------------------| -------------------------------------------------------| --------------------------------------------------------------|
+| `TF_BACKEND_BUCKET`   | `yourorg-cloudflare-platform-tfstate`                 | R2 bucket holding state, see [Remote state](#remote-state).  |
+| `TF_BACKEND_ENDPOINT` | `https://<state-account-id>.r2.cloudflarestorage.com` | S3-compatible R2 endpoint.                                   |
+| `MODULES_APP_ID`      | `1234567`                                             | App ID of the modules-reader GitHub App below. Not a secret. |
 
 ### Repository secrets
 
@@ -175,6 +246,11 @@ two accounts and eight layers that is eighteen environments.
 layer**: the scopes are the ones documented in each layer's `providers.tf`, and
 splitting them is the reason the layers were split in the first place. A WAF
 token cannot delete a zone.
+
+`state-forget.yml` and `state-unlock.yml` run in the same
+`<account>-<layer>-apply` environment, purely to borrow its reviewer gate. They
+do not read `CLOUDFLARE_API_TOKEN` - it is absent from their `env` blocks - so
+adding a layer needs no new environment for them.
 
 Every run checks the token's shape before `terraform init` - see "Check the API
 token is a well-formed bearer credential" in
@@ -263,31 +339,32 @@ of that workflow, conditionally on the secret being set.
 On the apply environments, also set **Deployment branches** to `main` only, so a
 branch cannot reach a write token.
 
-## Branch protection
+## No live plan on a pull request
 
-Mark **`plan complete`** as the required status check, not `plan`. The `plan` job
-is legitimately skipped when a change affects no account, and a skipped job can
-never satisfy a required check.
+`terraform-plan.yml` is **manual only**. It does not run on pull requests.
 
-## Operating notes
+I removed this on purpose; when your zone file grows massively, it will take a long time for any PR to complete, testing against 250 domains, one PR check took 25 minutes to complete; when the PR didn't touch zones; this is because of the rate limiting we are needing to do. Plans & Apply are already gated at the Apply pipeline, so I deemed this low risk - you can always run plans against your branch before PR.
 
-**A PR that adds a new zone *and* its WAF, load balancer or R2 custom domain
-config in one change will fail the `waf` / `load_balancing` / `r2` plans.** Those
-layers resolve the zone via `data "cloudflare_zone"`, and it does not exist yet.
+## Notes
 
-Split it into two pull requests: the zone first, then whatever depends on it. By the
-time the second is planned the zone exists and the lookup resolves.
+**A manual plan of a new zone *and* its WAF, load balancer or R2 custom domain
+config will fail the `waf` / `load_balancing` / `r2` plans.** Those layers resolve
+the zone via `data "cloudflare_zone"`, and it does not exist yet. Preview the
+`zones` layer only, or wait until the zone has been applied.
 
-`terraform-apply.yml` does not have this problem. `plan-tier2` depends on
-`apply-tier1`, so tier 3 is planned only after the zone has been created, and a single
-apply run handles both changes together unaided. It is the pull request
-plan that cannot succeed early, and since `plan complete` is a required check that is
-what blocks the merge. A manual per layer apply run is not needed for this.
+This never blocks a merge - it is a manual preview, and `ci.yml`'s offline plan
+does not resolve zones. `terraform-apply.yml` does not have the problem either:
+`plan-tier2` depends on `apply-tier1`, so tier 3 is planned only after the zone
+has been created, and a single apply run handles both changes together unaided.
 
-**Every apply run is manual, and a manual run has no diff to filter against**, so it
-selects every pair allowed by the `account` / `layer` inputs. `all` / `all` means the
-whole fleet, so narrow it to the account and layer you actually reviewed a plan for.
-The same is true of a `workflow_dispatch` run of `terraform-plan.yml`.
+**A plan that removes a zone setting shows destroys, and they are safe.**
+`cloudflare_zone_setting` has no delete operation — the provider's `Delete` is an
+empty function — so a destroy drops the resource from Terraform state and leaves
+the value exactly as it is at Cloudflare. Dropping one setting from the baseline
+therefore plans one destroy per zone, which trips the `Warn on planned destroys`
+step and its warning about zones taking their DNS records with them. Read the
+resource addresses: `module.zones[...].cloudflare_zone_setting.this["..."]` is
+this case, `module.zones[...].cloudflare_zone.this` is the dangerous one.
 
 **Lint rules live in [`.tflint.hcl`](../../.tflint.hcl) at the repository root**,
 and `ci.yml` passes it to `tflint` by absolute path so `--recursive` keeps using
@@ -301,6 +378,40 @@ a file - passing it to Terraform buys nothing - and the orphan guard in `ci.yml`
 skips it for the same reason. A file that assigns real variables that no layer
 declares is still an error.
 
+### A cancelled run left the state locked
+
+Cancelling a plan or apply usually releases the lock on the way out. If the
+runner is killed before it can, the lock object stays behind and every later run for that account and layer fails immediately:
+
+```
+Error: Error acquiring the state lock
+Error message: operation error S3: PutObject, https response error StatusCode: 412
+api error PreconditionFailed: At least one of the pre-conditions you specified did not hold.
+Lock Info:
+  ID:        0cad19f9-e895-589b-6622-33ddfc27a0ae
+  Path:      <bucket>/Your-Org/dns.tfstate
+  Operation: OperationTypePlan
+```
+
+The 412 is the backend's conditional write refusing to overwrite a lock that is
+already there. Nothing is wrong with the state itself - a cancelled plan never writes state - so only the lock needs clearing:
+
+1. Check the Actions tab for a still-running plan or apply for that pair. If
+   there is one, the lock is real. Cancel that run and wait; it releases the
+   lock itself. Compare the `Created` timestamp above against the clock -
+   seconds old means live, not stale.
+2. Run [`state-unlock.yml`](state-unlock.yml) with the account, the layer,
+   the `ID` copied out of the error, and the layer name again as `confirm`.
+   Leave `dry_run` ticked for the first run: it reports who took the lock and
+   when, and releases nothing.
+3. Re-run with `dry_run` unticked. It approves through the layer's
+   `<account>-<layer>-apply` environment, like any state edit here.
+4. Re-run the plan.
+
+If it was an **apply** rather than a plan that died, read the next plan
+carefully before approving it. The lock says nothing about how far the
+interrupted apply got; the plan does.
+
 ## Adding an account or a layer
 
 Adding an **account**: create `deployment/accounts/<name>/`, then create the
@@ -309,6 +420,22 @@ scoped tokens. No workflow edit.
 
 Adding a **layer**: create `deployment/layers/<product>/`, add
 `accounts/*/<product>.tfvars`, and create a `<account>-<product>-apply`
-environment per account. No workflow edit, unless the layer introduces a fourth
-dependency tier, in which case `ci.yml` will tell you to add a stage pair to
-`terraform-apply.yml`.
+environment per account.
+
+No edit to `terraform-plan.yml` or `terraform-apply.yml` - both derive the work
+from `tf-matrix.sh` - unless the layer introduces a fourth dependency tier, in
+which case `ci.yml` will tell you to add a stage pair to `terraform-apply.yml`.
+
+The **`ci.yml` self-test does need updating**, and this is easy to miss because
+the plan and apply pipelines will already be doing the right thing. The step
+asserts the derivation against expectations that name layers explicitly, so a new
+layer turns it red until it is added to:
+
+- the per-layer loop that checks a `<layer>.tfvars` change selects only that layer;
+- the `zones.tfvars` expectation, if the layer declares the `zones` variable;
+- the tier 3 expectation, if the layer resolves a zone through a data source.
+
+That is deliberate. The self-test exists so a mistake in the derivation cannot
+merge silently, and a new layer landing in the wrong tier is exactly the mistake
+it is there to catch - so it asks to be told what the answer should be rather
+than reading it back from the thing under test.

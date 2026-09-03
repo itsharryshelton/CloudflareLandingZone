@@ -1,0 +1,266 @@
+# Make Terraform forget a resource without deleting it.
+#
+# `terraform state rm` drops an entry from state and leaves the real object alone. 
+name: Terraform State Forget
+
+on:
+  workflow_dispatch:
+    inputs:
+      account:
+        description: 'Account directory name under deployment/accounts/.'
+        required: true
+        type: string
+      layer:
+        description: 'Layer directory name under deployment/layers/ whose state should forget these addresses.'
+        required: true
+        type: string
+      addresses:
+        description: 'Resource addresses to forget, one per line.'
+        required: true
+        type: string
+      confirm:
+        description: >-
+          Type the layer name again to confirm. Guards against dispatching this
+          against the wrong state from a stale browser tab.
+        required: true
+        type: string
+      dry_run:
+        description: 'Report what would be forgotten and change nothing.'
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  # Shares the group name with _terraform-run.yml on purpose: forgetting an
+  # entry while an apply is mid-flight against the same state is exactly the
+  # race `use_lockfile` exists to stop, and this is cheaper than finding out.
+  group: tf-${{ inputs.account }}-${{ inputs.layer }}
+  cancel-in-progress: false
+
+jobs:
+  forget:
+    name: forget ${{ inputs.account }} / ${{ inputs.layer }}
+    runs-on: ubuntu-latest
+    # The layer's apply environment, so this inherits its reviewer gate. A state
+    # edit is at least as consequential as an apply.
+    environment: ${{ inputs.account }}-${{ inputs.layer }}-apply
+
+    defaults:
+      run:
+        shell: bash
+
+    env:
+      TF_IN_AUTOMATION: '1'
+      TF_INPUT: '0'
+      LAYER_DIR: deployment/layers/${{ inputs.layer }}
+      ACCOUNT_DIR: deployment/accounts/${{ inputs.account }}
+      STATE_KEY: ${{ inputs.account }}/${{ inputs.layer }}.tfstate
+      TF_BACKEND_BUCKET: ${{ vars.TF_BACKEND_BUCKET }}
+      TF_BACKEND_ENDPOINT: ${{ vars.TF_BACKEND_ENDPOINT }}
+      # R2 credentials only. CLOUDFLARE_API_TOKEN is deliberately absent: this
+      # workflow has no business talking to Cloudflare, and not holding the
+      # credential is a stronger guarantee than not using it.
+      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      ADDRESSES: ${{ inputs.addresses }}
+      CONFIRM: ${{ inputs.confirm }}
+      DRY_RUN: ${{ inputs.dry_run }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Check inputs
+        run: |
+          set -euo pipefail
+          if [[ "$CONFIRM" != "${{ inputs.layer }}" ]]; then
+            echo "::error::confirm was '$CONFIRM' but the layer is '${{ inputs.layer }}'. Nothing was touched."
+            exit 1
+          fi
+
+          missing=()
+          [[ -n "${AWS_ACCESS_KEY_ID:-}"     ]] || missing+=("secret R2_ACCESS_KEY_ID")
+          [[ -n "${AWS_SECRET_ACCESS_KEY:-}" ]] || missing+=("secret R2_SECRET_ACCESS_KEY")
+          [[ -n "${TF_BACKEND_BUCKET:-}"     ]] || missing+=("variable TF_BACKEND_BUCKET")
+          [[ -n "${TF_BACKEND_ENDPOINT:-}"   ]] || missing+=("variable TF_BACKEND_ENDPOINT")
+          [[ -d "$LAYER_DIR"                 ]] || missing+=("layer directory $LAYER_DIR")
+          [[ -d "$ACCOUNT_DIR"               ]] || missing+=("account directory $ACCOUNT_DIR")
+          if [[ ${#missing[@]} -gt 0 ]]; then
+            printf '::error::missing %s\n' "${missing[@]}"
+            exit 1
+          fi
+
+          # Addresses are read from a file into an array and passed as single
+          # arguments, so a value never becomes part of the command and nothing
+          # here needs to defend against quoting.
+          printf '%s\n' "$ADDRESSES" | tr -d '\r' | sed '/^[[:space:]]*$/d' >addresses.txt
+          mapfile -t ADDRS <addresses.txt
+          if [[ ${#ADDRS[@]} -eq 0 ]]; then
+            echo "::error::no addresses given"
+            exit 1
+          fi
+
+          # A shape check, to catch a paste that is not an address at all.
+          #
+          # Deliberately a blacklist and not a character allowlist: a state
+          # index key can contain the resource's own data, and DNS record
+          # content is close to arbitrary text. The SPF record in this account's
+          # test zone is a working example -
+          # cloudflare_dns_record.this["TXT/plintdc.com/v=spf1 include:... -all"]
+          # - so an allowlist that forbids spaces, or `=`, or `:`, rejects real
+          # addresses. What is checked instead is that the address starts like
+          # one and carries nothing that suggests a mangled copy-paste.
+          # Optional module path segments, each optionally indexed, then the
+          # type.name pair every address has, then an optional index whose
+          # contents are not constrained.
+          ADDR_RE='^(module\.[A-Za-z_][A-Za-z0-9_-]*(\[[^]]*\])?\.)*[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_-]*(\[[^]]*\])?$'
+
+          bad=()
+          for a in "${ADDRS[@]}"; do
+            if [[ ! "$a" =~ $ADDR_RE ]]; then
+              bad+=("$a (does not parse as a resource address)")
+            elif [[ "$a" == *'$'* || "$a" == *'`'* || "$a" == *';'* || "$a" == *'|'* \
+                    || "$a" == *'&'* || "$a" == *'<'* || "$a" == *'>'* ]]; then
+              bad+=("$a (contains a shell metacharacter)")
+            fi
+          done
+          if [[ ${#bad[@]} -gt 0 ]]; then
+            printf '::error::not a Terraform resource address: %s\n' "${bad[@]}"
+            exit 1
+          fi
+
+          echo "${#ADDRS[@]} address(es) to forget from $STATE_KEY:"
+          printf '  %s\n' "${ADDRS[@]}"
+
+          # A fat-fingered paste is the realistic accident here, so a large
+          # batch is called out rather than silently accepted.
+          if [[ ${#ADDRS[@]} -gt 100 ]]; then
+            echo "::warning title=Large batch::${#ADDRS[@]} addresses. Every one of them becomes unmanaged. Check the list before approving."
+          fi
+
+      # Module sources point at the private modules repository, which
+      # GITHUB_TOKEN cannot read. `terraform init` needs it even here.
+      - uses: ./.github/actions/modules-auth
+        with:
+          app-id: ${{ vars.MODULES_APP_ID }}
+          private-key: ${{ secrets.MODULES_APP_PRIVATE_KEY }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: '1.14.6'
+          terraform_wrapper: false
+
+      - name: Generate the R2 backend block
+        run: |
+          set -euo pipefail
+          # Same generated block as _terraform-run.yml, for the same reason: the
+          # committed one is commented out so offline CI can init without R2.
+          if grep -rhqE '^[[:space:]]*backend[[:space:]]+"' "$LAYER_DIR"/*.tf; then
+            echo "::error::$LAYER_DIR has an uncommented backend block"
+            exit 1
+          fi
+          cat >"$LAYER_DIR/backend.generated.tf" <<'EOF'
+          # Generated by .github/workflows/state-forget.yml. Never committed.
+          terraform {
+            backend "s3" {
+              region                      = "auto"
+              use_path_style              = true
+              use_lockfile                = true
+              skip_credentials_validation = true
+              skip_metadata_api_check     = true
+              skip_region_validation      = true
+              skip_requesting_account_id  = true
+              skip_s3_checksum            = true
+            }
+          }
+          EOF
+
+      - name: Terraform init
+        run: |
+          set -euo pipefail
+          cd "$LAYER_DIR"
+          terraform init -reconfigure -input=false \
+            -backend-config="bucket=${TF_BACKEND_BUCKET}" \
+            -backend-config="key=${STATE_KEY}" \
+            -backend-config="endpoints={\"s3\":\"${TF_BACKEND_ENDPOINT}\"}"
+
+      - name: Confirm every address is actually in state
+        run: |
+          set -euo pipefail
+          cd "$LAYER_DIR"
+          terraform state list >"$GITHUB_WORKSPACE/state-before.txt"
+          echo "state holds $(wc -l <"$GITHUB_WORKSPACE/state-before.txt") resource instance(s)"
+
+          # Checked up front rather than discovered halfway through: `state rm`
+          # errors on an address it cannot find, and a partial batch is a worse
+          # place to be than a refused one.
+          mapfile -t ADDRS <"$GITHUB_WORKSPACE/addresses.txt"
+          absent=()
+          for a in "${ADDRS[@]}"; do
+            grep -Fxq "$a" "$GITHUB_WORKSPACE/state-before.txt" || absent+=("$a")
+          done
+          if [[ ${#absent[@]} -gt 0 ]]; then
+            printf '::error::not in %s: %s\n' "$STATE_KEY" "${absent[@]}"
+            echo "Nothing was removed. Check the layer and the exact addresses with the state listing above." >&2
+            exit 1
+          fi
+          echo "all ${#ADDRS[@]} address(es) present"
+
+      - name: Forget
+        run: |
+          set -euo pipefail
+          cd "$LAYER_DIR"
+          mapfile -t ADDRS <"$GITHUB_WORKSPACE/addresses.txt"
+
+          if [[ "$DRY_RUN" == "true" ]]; then
+            # Terraform's own dry run, so what is reported is what it would do
+            # rather than what this workflow believes it would do.
+            terraform state rm -dry-run "${ADDRS[@]}"
+            echo "::notice title=Dry run::Nothing was changed. Re-run with dry_run unchecked to apply."
+            exit 0
+          fi
+
+          # One call with every address: `state rm` is atomic over its
+          # arguments, so a failure part-way leaves state as it was rather than
+          # half-forgotten.
+          terraform state rm "${ADDRS[@]}"
+
+          terraform state list >"$GITHUB_WORKSPACE/state-after.txt"
+          before=$(wc -l <"$GITHUB_WORKSPACE/state-before.txt")
+          after=$(wc -l <"$GITHUB_WORKSPACE/state-after.txt")
+          echo "state went from $before to $after resource instance(s)"
+
+      - name: Report
+        if: always()
+        run: |
+          set -euo pipefail
+          {
+            echo "### State forget — \`${{ inputs.account }}\` / \`${{ inputs.layer }}\`"
+            echo
+            echo "- State key: \`$STATE_KEY\`"
+            echo "- Dry run: \`$DRY_RUN\`"
+            echo "- Result: ${{ job.status }}"
+            echo
+            if [[ -f addresses.txt ]]; then
+              echo "<details><summary>Addresses</summary>"
+              echo
+              sed 's/^/- `/; s/$/`/' addresses.txt
+              echo
+              echo "</details>"
+            fi
+            if [[ "$DRY_RUN" != "true" && "${{ job.status }}" == "success" ]]; then
+              echo
+              echo "These resources are now unmanaged. They still exist at Cloudflare."
+              echo "Whatever is meant to adopt them must be applied next."
+            fi
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Remove generated files
+        if: always()
+        run: |
+          rm -f "$LAYER_DIR/backend.generated.tf" \
+                addresses.txt state-before.txt state-after.txt

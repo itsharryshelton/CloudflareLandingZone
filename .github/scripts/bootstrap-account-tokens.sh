@@ -371,6 +371,28 @@ TOKEN_SPECS["terraform-r2-apply"]="$(cat <<JSON
 JSON
 )"
 
+# 5b. terraform-dns-apply
+DNS_ZONE_PERMS="$(build_perm_array "zone" \
+  "DNS:Edit|DNS Write" \
+  "Zone:Read|Zone Read")"
+TOKEN_SPECS["terraform-dns-apply"]="$(cat <<JSON
+{
+  "name": "terraform-dns-apply",
+  "policies": [
+    {
+      "effect": "allow",
+      "permission_groups": $DNS_ZONE_PERMS,
+      "resources": {
+        "$ACCOUNT_RESOURCE": {
+          "$ZONE_RESOURCE": "*"
+        }
+      }
+    }
+  ]
+}
+JSON
+)"
+
 # 6. terraform-waf-apply
 WAF_ZONE_PERMS="$(build_perm_array "zone" "Zone WAF Rules:Edit|Zone WAF Rules Write|Zone WAF:Edit|Zone WAF Write|WAF:Edit|WAF Write")"
 TOKEN_SPECS["terraform-waf-apply"]="$(cat <<JSON
@@ -498,6 +520,7 @@ JSON
 TOKEN_NAMES=(
   "terraform-plan"
   "terraform-accountgovernance-apply"
+  "terraform-dns-apply"
   "terraform-gateway-apply"
   "terraform-loadbalancing-apply"
   "terraform-r2-apply"
@@ -596,6 +619,7 @@ SECURITY WARNING & NEXT STEPS:
 
    gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-plan
    gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-account_governance-apply
+   gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-dns-apply
    gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-gateway-apply
    gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-load_balancing-apply
    gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-r2-apply
