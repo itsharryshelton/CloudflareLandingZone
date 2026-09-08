@@ -4,8 +4,14 @@ output "waf_policies" {
     for key, policy in module.waf : key => {
       custom_ruleset_id        = policy.custom_ruleset_id
       rate_limiting_ruleset_id = policy.rate_limiting_ruleset_id
+      managed_ruleset_id       = policy.managed_ruleset_id
     }
   }
+}
+
+output "managed_rulesets" {
+  description = "Per-policy managed rulesets as deployed, rule description => Cloudflare ruleset ID. Empty for a policy with none. Check this to confirm a zone is executing the Cloudflare-authored rulesets you expect before relying on them."
+  value       = { for key, policy in module.waf : key => policy.managed_rulesets_deployed }
 }
 
 output "bot_traffic_rules" {

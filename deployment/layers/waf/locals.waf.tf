@@ -45,7 +45,7 @@ locals {
       expression  = format("ip.src in $%s", coalesce(var.waf_ip_blocklist_name, "unset"))
       action      = "block"
       description = "Baseline - block addresses on the account IP blocklist"
-      enabled     = false # False by Default to avoid accidental broad blocking on first-time run.
+      enabled     = true
     }
 
     block_known_exploit_paths = {
@@ -134,6 +134,62 @@ locals {
       counting_expression = null
       requests_to_origin  = false
       enabled             = true
+    }
+  }
+
+  # Cloudflare Managed Rulesets (http_request_firewall_managed)
+  waf_owasp_disabled_paranoia_levels = [
+    for level in [2, 3, 4] : "paranoia-level-${level}"
+    if level > var.waf_owasp_paranoia_level
+  ]
+  waf_managed_override_shape = {
+    action            = null
+    enabled           = null
+    sensitivity_level = null
+    categories        = []
+    rules             = []
+  }
+
+  waf_baseline_managed_rulesets = {
+    cloudflare_managed = {
+      id          = "efb7b8c949ac4650a09736fc376e9aee"
+      version     = null
+      expression  = "true"
+      description = "Baseline - Cloudflare Managed Ruleset"
+      enabled     = true
+      overrides = merge(local.waf_managed_override_shape, {
+        # Null leaves every rule on the action Cloudflare ships it with.
+        action = var.waf_managed_rules_action
+      })
+    }
+
+    owasp_core = {
+      id          = "4814384a9e5d4991b9815dcfc25d2f1f"
+      version     = null
+      expression  = "true"
+      description = "Baseline - Cloudflare OWASP Core Ruleset"
+      enabled     = true
+      overrides = merge(local.waf_managed_override_shape, {
+        categories = [
+          for tag in local.waf_owasp_disabled_paranoia_levels : {
+            category          = tag
+            action            = null
+            enabled           = false
+            sensitivity_level = null
+          }
+        ]
+
+        # OWASP is scored rather than per-rule
+        rules = [
+          {
+            id                = "6179ae15870a4bb7b2d480d4843b323c"
+            action            = var.waf_owasp_action
+            enabled           = null
+            score_threshold   = var.waf_owasp_score_threshold
+            sensitivity_level = null
+          }
+        ]
+      })
     }
   }
 

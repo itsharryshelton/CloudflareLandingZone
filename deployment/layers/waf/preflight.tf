@@ -12,7 +12,12 @@ resource "terraform_data" "preflight" {
 
     precondition {
       condition     = length(local.waf_unknown_baseline_rules) == 0
-      error_message = "Unknown baseline rule name in ${join("; ", local.waf_unknown_baseline_rules)}. Available custom rules: ${join(", ", keys(local.waf_baseline_custom_rules))}. Available rate limits: ${join(", ", keys(local.waf_baseline_rate_limits))}."
+      error_message = "Unknown baseline rule name in ${join("; ", local.waf_unknown_baseline_rules)}. Available custom rules: ${join(", ", keys(local.waf_baseline_custom_rules))}. Available rate limits: ${join(", ", keys(local.waf_baseline_rate_limits))}. Available managed rulesets: ${join(", ", keys(local.waf_baseline_managed_rulesets))}."
+    }
+
+    precondition {
+      condition     = length(local.underpowered_managed_rules) == 0
+      error_message = "Managed rulesets are configured on a zone below managed_rules_min_tier (\"${var.managed_rules_min_tier}\"): ${join("; ", local.underpowered_managed_rules)}. The Cloudflare Managed Ruleset and the OWASP Core Ruleset both require Pro or above, and Cloudflare rejects the whole entry-point ruleset when the zone is not entitled to one it names - so the zone would end up with no managed rules rather than with the unentitled one missing. Either set the zone's real zone_tier in zones.tfvars, drop the managed rulesets for that policy, or lower managed_rules_min_tier if your account's entitlement genuinely differs."
     }
 
     precondition {

@@ -14,6 +14,8 @@ waf_trusted_ip_ranges = [
   "198.51.100.7",
 ]
 
+waf_blocked_countries = ["BY", "CU", "IR", "KP", "RU", "SY"]
+
 waf_policies = {
   primary = {
     zone_key = "primary"
@@ -32,6 +34,12 @@ waf_policies = {
     baseline_rate_limits = [
       "auth_brute_force",
       "api_general",
+    ]
+
+    # Cloudflare Managed Rulesets
+    baseline_managed_rulesets = [
+      "cloudflare_managed",
+      "owasp_core",
     ]
 
     # Appended after the baseline rules, so it evaluates later.

@@ -1,4 +1,4 @@
-# Custom firewall rules and rate limiting, per zone.
+# Custom firewall rules, rate limiting and Cloudflare's managed rulesets, per zone.
 #
 # Rule content comes from local.waf_policies, which concatenates the platform
 # baseline catalogue (locals.waf.tf) with any tenant-specific rules. The module
@@ -20,6 +20,9 @@ module "waf" {
   custom_block_rules  = each.value.custom_block_rules
   rate_limiting_rules = each.value.rate_limiting_rules
 
+  # Cloudflare's own rulesets, in http_request_firewall_managed
+  managed_rulesets = each.value.managed_rulesets
+
   custom_ruleset_name = coalesce(
     each.value.custom_ruleset_name,
     "Custom rules - ${var.zones[each.value.zone_key].domain_name}",
@@ -27,5 +30,9 @@ module "waf" {
   rate_limit_ruleset_name = coalesce(
     each.value.rate_limit_ruleset_name,
     "Rate limiting - ${var.zones[each.value.zone_key].domain_name}",
+  )
+  managed_ruleset_name = coalesce(
+    each.value.managed_ruleset_name,
+    "Managed rules - ${var.zones[each.value.zone_key].domain_name}",
   )
 }

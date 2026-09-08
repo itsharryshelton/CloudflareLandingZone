@@ -39,3 +39,10 @@ default_zone_tier = "free"
 
 # Lowest plan allowed to carry bot_traffic rules
 bot_traffic_min_tier = "pro"
+
+# Lowest plan allowed to carry managed rulesets
+managed_rules_min_tier = "enterprise"
+
+# OWASP tuning for Managed Ruleset
+waf_owasp_paranoia_level  = 1
+waf_owasp_score_threshold = 40

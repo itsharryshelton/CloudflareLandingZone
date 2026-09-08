@@ -1,21 +1,14 @@
 locals {
+  skip_parameter_shape = {
+    ruleset  = null
+    rulesets = null
+    phases   = null
+    products = null
+  }
+
   # -------------------------------------------------------------------------
   # Bot traffic (http_request_firewall_custom, evaluated before everything else)
   # -------------------------------------------------------------------------
-
-  # Cloudflare's AI bot taxonomy names three behaviours - Search, Agent and
-  # Training - but the ruleset field exposes verified bot *categories*, which is
-  # a longer and older list. This is the mapping between the two.
-  #
-  # "AI Search" is retained by Cloudflare only for backward compatibility: new
-  # search crawlers, AI or otherwise, are classified as Search Engine Crawler.
-  # Both are matched so a rule written today keeps covering bots classified
-  # before the taxonomy changed.
-  #
-  # Search Engine Optimization is deliberately NOT part of search: an SEO
-  # auditor analyses a site to rank it, it does not index content to answer
-  # questions about it later, and lumping the two together means an allow rule
-  # for Google also admits every SEO scraper.
   bot_traffic_default_categories = {
     search   = ["Search Engine Crawler", "AI Search"]
     agent    = ["AI Assistant"]
@@ -55,9 +48,11 @@ locals {
 
       action_parameters = (
         local.bot_traffic_selected[behaviour] == "allow"
-        ? { ruleset = "current" }
+        ? merge(local.skip_parameter_shape, { ruleset = "current" })
         : null
       )
+
+      logging = null
 
       expression = format(
         "(cf.verified_bot_category in {%s})",
@@ -86,9 +81,20 @@ locals {
       description = coalesce(rule.description, rule.name)
       enabled     = rule.enabled
 
-      # Present but null so every element of the ruleset's `rules` list has the
-      # same attributes; the bot traffic rules above need it for skip.
-      action_parameters = null
+      # Null on every action but skip
+      action_parameters = (
+        rule.action == "skip"
+        ? merge(local.skip_parameter_shape, {
+          ruleset  = try(rule.skip.ruleset, null)
+          rulesets = try(rule.skip.rulesets, null)
+          phases   = try(rule.skip.phases, null)
+          products = try(rule.skip.products, null)
+        })
+        : null
+      )
+
+      # Cloudflare does not log a skip by default, so an exception is invisible
+      logging = rule.logging == null ? null : { enabled = rule.logging }
     }
   ]
 
@@ -122,6 +128,61 @@ locals {
     }
   ]
 
+  # -------------------------------------------------------------------------
+  # http_request_firewall_managed
+  # -------------------------------------------------------------------------
+  # Cloudflare's own rulesets are executed rather than declared
+  managed_ruleset_overrides = [
+    for ruleset in var.managed_rulesets :
+    anytrue([
+      try(ruleset.overrides.action, null) != null,
+      try(ruleset.overrides.enabled, null) != null,
+      try(ruleset.overrides.sensitivity_level, null) != null,
+      length(try(ruleset.overrides.categories, [])) > 0,
+      length(try(ruleset.overrides.rules, [])) > 0,
+    ]) ? ruleset.overrides : null
+  ]
+
+  managed_ruleset_rules = [
+    for index, ruleset in var.managed_rulesets : {
+      action      = "execute"
+      expression  = ruleset.expression
+      description = coalesce(ruleset.description, "Execute managed ruleset ${ruleset.id}")
+      enabled     = ruleset.enabled
+
+      action_parameters = {
+        id      = ruleset.id
+        version = ruleset.version
+
+        overrides = local.managed_ruleset_overrides[index] == null ? null : {
+          action            = local.managed_ruleset_overrides[index].action
+          enabled           = local.managed_ruleset_overrides[index].enabled
+          sensitivity_level = local.managed_ruleset_overrides[index].sensitivity_level
+
+          categories = length(local.managed_ruleset_overrides[index].categories) == 0 ? null : [
+            for category in local.managed_ruleset_overrides[index].categories : {
+              category          = category.category
+              action            = category.action
+              enabled           = category.enabled
+              sensitivity_level = category.sensitivity_level
+            }
+          ]
+
+          rules = length(local.managed_ruleset_overrides[index].rules) == 0 ? null : [
+            for rule in local.managed_ruleset_overrides[index].rules : {
+              id                = rule.id
+              action            = rule.action
+              enabled           = rule.enabled
+              score_threshold   = rule.score_threshold
+              sensitivity_level = rule.sensitivity_level
+            }
+          ]
+        }
+      }
+    }
+  ]
+
   custom_rule_labels     = [for rule in local.all_custom_rules : rule.description]
   rate_limit_rule_labels = [for rule in var.rate_limiting_rules : rule.name]
+  managed_ruleset_labels = [for rule in local.managed_ruleset_rules : rule.description]
 }
