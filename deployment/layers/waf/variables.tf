@@ -1,8 +1,5 @@
 # Layer: waf - inputs.
 #
-# Custom firewall rules and rate limiting. Runs after zones and holds its own
-# state, so an apply here can never propose destroying a zone.
-#
 # Config files:
 #   accounts/<account>/zones.tfvars - the zone inventory, shared with every layer
 #   accounts/<account>/waf.tfvars   - WAF policies, consumed only here
@@ -124,6 +121,24 @@ variable "waf_policies" {
     - `baseline_custom_rules`   - (Optional) Names of baseline rules from the platform
                                   catalogue in locals.waf.tf.
     - `baseline_rate_limits`    - (Optional) Names of baseline rate limits from the same catalogue.
+    - `baseline_managed_rulesets` - (Optional) Names of Cloudflare-authored managed
+                                  rulesets from the catalogue in locals.waf.tf -
+                                  currently `cloudflare_managed` and `owasp_core`.
+                                  These land under "Managed rules" in the dashboard,
+                                  not under custom rules, and are evaluated in a
+                                  later phase than everything else in this policy.
+                                  Both need a zone tier of at least
+                                  var.managed_rules_min_tier; Cloudflare rejects
+                                  the whole entry-point ruleset when the zone is
+                                  not entitled to one it names. Tuned by
+                                  waf_owasp_paranoia_level, waf_owasp_score_threshold,
+                                  waf_owasp_action and waf_managed_rules_action.
+    - `managed_rulesets`        - (Optional) Managed rulesets named by raw Cloudflare
+                                  ruleset ID, appended after the baseline ones. Use
+                                  this for a ruleset the catalogue does not carry
+                                  (an application-specific one such as Drupal or
+                                  WordPress); anything the whole estate should run
+                                  belongs in the catalogue instead.
     - `custom_block_rules`      - (Optional) Tenant-specific firewall rules, appended after
                                   the baseline rules so they evaluate later. Actions are
                                   block, challenge, managed_challenge, js_challenge, log and
@@ -137,17 +152,20 @@ variable "waf_policies" {
                                   baseline rate limits.
     - `custom_ruleset_name`     - (Optional) Dashboard display name for the custom ruleset.
     - `rate_limit_ruleset_name` - (Optional) Dashboard display name for the rate limit ruleset.
+    - `managed_ruleset_name`    - (Optional) Dashboard display name for the managed rules ruleset.
 
     Baseline rules are parameterised by `waf_trusted_ip_ranges`, `waf_admin_paths`
     and `waf_blocked_countries` rather than hardcoded, so the catalogue serves
     every customer.
   EOT
   type = map(object({
-    zone_key                = string
-    baseline_custom_rules   = optional(list(string), [])
-    baseline_rate_limits    = optional(list(string), [])
-    custom_ruleset_name     = optional(string)
-    rate_limit_ruleset_name = optional(string)
+    zone_key                  = string
+    baseline_custom_rules     = optional(list(string), [])
+    baseline_rate_limits      = optional(list(string), [])
+    baseline_managed_rulesets = optional(list(string), [])
+    custom_ruleset_name       = optional(string)
+    rate_limit_ruleset_name   = optional(string)
+    managed_ruleset_name      = optional(string)
     bot_traffic = optional(object({
       search             = optional(string)
       agent              = optional(string)
@@ -180,6 +198,31 @@ variable "waf_policies" {
       counting_expression = optional(string)
       requests_to_origin  = optional(bool, false)
       enabled             = optional(bool, true)
+    })), [])
+    managed_rulesets = optional(list(object({
+      id          = string
+      version     = optional(string)
+      expression  = optional(string, "true")
+      description = optional(string)
+      enabled     = optional(bool, true)
+      overrides = optional(object({
+        action            = optional(string)
+        enabled           = optional(bool)
+        sensitivity_level = optional(string)
+        categories = optional(list(object({
+          category          = string
+          action            = optional(string)
+          enabled           = optional(bool)
+          sensitivity_level = optional(string)
+        })), [])
+        rules = optional(list(object({
+          id                = string
+          action            = optional(string)
+          enabled           = optional(bool)
+          score_threshold   = optional(number)
+          sensitivity_level = optional(string)
+        })), [])
+      }))
     })), [])
   }))
   default = {}
@@ -277,5 +320,119 @@ variable "waf_ip_blocklist_name" {
   validation {
     condition     = var.waf_ip_blocklist_name == null || can(regex("^[a-z0-9_]{1,50}$", coalesce(var.waf_ip_blocklist_name, "x")))
     error_message = "waf_ip_blocklist_name must be 1-50 characters of lowercase letters, numbers and underscores - the same constraint Cloudflare puts on the list's name, because the rule refers to it as $name."
+  }
+}
+
+# Managed ruleset parameters. These tune the baseline managed rulesets in
+# locals.waf.tf for the whole account - a single zone that needs something
+# different should name the ruleset directly in waf_policies[*].managed_rulesets.
+variable "managed_rules_min_tier" {
+  type        = string
+  default     = "pro"
+  description = <<-EOT
+    Lowest rate plan allowed to carry `baseline_managed_rulesets` or
+    `managed_rulesets`. A policy that asks for managed rules on a zone below this
+    fails the plan.
+
+    Pro, because that is Cloudflare's published floor for both the Cloudflare
+    Managed Ruleset and the OWASP Core Ruleset. Free zones get the Cloudflare
+    Free Managed Ruleset instead, which is not in the catalogue - a free zone
+    already has it applied by Cloudflare.
+  EOT
+
+  validation {
+    condition = contains([
+      "free", "lite", "pro", "pro_plus", "business", "enterprise",
+      "partners_free", "partners_pro", "partners_business",
+      "partners_enterprise", "partners_ent",
+    ], var.managed_rules_min_tier)
+    error_message = "managed_rules_min_tier must be a valid Cloudflare rate plan ID."
+  }
+}
+
+variable "waf_managed_rules_action" {
+  type        = string
+  default     = null
+  description = <<-EOT
+    Action forced on every rule in the `cloudflare_managed` baseline ruleset.
+    Null - the default - leaves each rule on the action Cloudflare ships it with,
+    which is the intended way to run the ruleset.
+
+    Set it to "log" to roll the ruleset out in monitoring mode: the rules are
+    evaluated and every match is recorded in Security Events, but nothing is
+    blocked. That is the safe first deployment on a zone with real traffic,
+    because a managed ruleset turned straight on will block some legitimate
+    requests, and the log tells you which before customers do.
+  EOT
+
+  validation {
+    condition = var.waf_managed_rules_action == null || contains(
+      ["block", "challenge", "managed_challenge", "js_challenge", "log"],
+      coalesce(var.waf_managed_rules_action, "log"),
+    )
+    error_message = "waf_managed_rules_action must be one of: block, challenge, managed_challenge, js_challenge, log - or null to leave Cloudflare's per-rule defaults alone."
+  }
+}
+
+variable "waf_owasp_paranoia_level" {
+  type        = number
+  default     = 1
+  description = <<-EOT
+    Highest OWASP paranoia level left enabled on the `owasp_core` baseline
+    ruleset. Levels above this are switched off by category tag, which also
+    covers rules Cloudflare adds to those tags later.
+
+    PL1 is Cloudflare's default and is the only level that can be considered
+    safe for general traffic. Each level above it trades false negatives for
+    false positives, steeply: PL3 and PL4 exist for applications with a narrow,
+    well-understood request shape, and will block ordinary requests on anything
+    else. Raise this only alongside waf_owasp_score_threshold, and only after
+    running the result in log mode.
+  EOT
+
+  validation {
+    condition     = contains([1, 2, 3, 4], var.waf_owasp_paranoia_level)
+    error_message = "waf_owasp_paranoia_level must be 1, 2, 3 or 4."
+  }
+}
+
+variable "waf_owasp_score_threshold" {
+  type        = number
+  default     = 40
+  description = <<-EOT
+    Anomaly score at which the OWASP Core Ruleset acts. Each matching OWASP rule
+    adds its score to a running total, and the last rule in the ruleset fires
+    once the total reaches this number.
+
+    Cloudflare's published sensitivities: 60 = low, 40 = medium (their default),
+    25 = high. A LOWER threshold acts on more traffic, so 25 is the aggressive
+    setting and 60 the permissive one - which is the opposite of how the number
+    reads.
+  EOT
+
+  validation {
+    condition     = var.waf_owasp_score_threshold >= 1 && var.waf_owasp_score_threshold <= 100
+    error_message = "waf_owasp_score_threshold must be between 1 and 100. Cloudflare's own sensitivities are 60 (low), 40 (medium) and 25 (high)."
+  }
+}
+
+variable "waf_owasp_action" {
+  type        = string
+  default     = null
+  description = <<-EOT
+    Action taken when the OWASP anomaly score crosses waf_owasp_score_threshold.
+    Null leaves Cloudflare's default for that rule.
+
+    Worth setting to "log" for a first deployment. OWASP scoring is cumulative
+    across unrelated rules, so the traffic that trips the threshold is harder to
+    predict from the configuration than a single managed rule is.
+  EOT
+
+  validation {
+    condition = var.waf_owasp_action == null || contains(
+      ["block", "challenge", "managed_challenge", "js_challenge", "log"],
+      coalesce(var.waf_owasp_action, "log"),
+    )
+    error_message = "waf_owasp_action must be one of: block, challenge, managed_challenge, js_challenge, log - or null to leave Cloudflare's default alone."
   }
 }

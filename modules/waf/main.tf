@@ -47,3 +47,25 @@ resource "cloudflare_ruleset" "rate_limiting" {
     }
   }
 }
+
+# Zone-level entry-point ruleset for Cloudflare's own managed rulesets.
+#
+# Evaluated after http_request_firewall_custom
+resource "cloudflare_ruleset" "managed" {
+  count = length(local.managed_ruleset_rules) > 0 ? 1 : 0
+
+  zone_id     = var.zone_id
+  name        = var.managed_ruleset_name
+  kind        = "zone"
+  phase       = "http_request_firewall_managed"
+  description = "Managed by Terraform (cloudflarelandingzone/modules/waf)."
+
+  rules = local.managed_ruleset_rules
+
+  lifecycle {
+    precondition {
+      condition     = length(distinct(local.managed_ruleset_labels)) == length(local.managed_ruleset_labels)
+      error_message = "Managed ruleset execute rules must be uniquely described: two entries in managed_rulesets resolve to the same description, which makes them indistinguishable in the Cloudflare dashboard and in audit logs. An entry with no description is labelled \"Execute managed ruleset <id>\"."
+    }
+  }
+}
