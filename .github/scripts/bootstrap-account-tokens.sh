@@ -492,6 +492,37 @@ TOKEN_SPECS["terraform-zerotrust-apply"]="$(cat <<JSON
 JSON
 )"
 
+# 9b. terraform-tunnels-apply
+TUNNELS_ACCT_PERMS="$(build_perm_array "account" \
+  "Cloudflare Tunnel:Edit|Cloudflare Tunnel Write|Cloudflare One Connectors Write")"
+TUNNELS_ZONE_PERMS="$(build_perm_array "zone" \
+  "DNS:Edit|DNS Write" \
+  "Zone:Read|Zone Read")"
+TOKEN_SPECS["terraform-tunnels-apply"]="$(cat <<JSON
+{
+  "name": "terraform-tunnels-apply",
+  "policies": [
+    {
+      "effect": "allow",
+      "permission_groups": $TUNNELS_ACCT_PERMS,
+      "resources": {
+        "$ACCOUNT_RESOURCE": "*"
+      }
+    },
+    {
+      "effect": "allow",
+      "permission_groups": $TUNNELS_ZONE_PERMS,
+      "resources": {
+        "$ACCOUNT_RESOURCE": {
+          "$ZONE_RESOURCE": "*"
+        }
+      }
+    }
+  ]
+}
+JSON
+)"
+
 # 10. terraform-zone-apply
 ZONE_PERMS="$(build_perm_array "zone" \
   "DNS:Edit|DNS Write" \
@@ -524,6 +555,7 @@ TOKEN_NAMES=(
   "terraform-gateway-apply"
   "terraform-loadbalancing-apply"
   "terraform-r2-apply"
+  "terraform-tunnels-apply"
   "terraform-waf-apply"
   "terraform-wan-apply"
   "terraform-workers-apply"
@@ -623,6 +655,7 @@ SECURITY WARNING & NEXT STEPS:
    gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-gateway-apply
    gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-load_balancing-apply
    gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-r2-apply
+   gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-tunnels-apply
    gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-waf-apply
    gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-wan-apply
    gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-workers-apply

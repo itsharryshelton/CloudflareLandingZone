@@ -64,6 +64,7 @@ Monolithic Terraform states create catastrophic blast radius vulnerabilities wit
 Platform Layer (Central Governance)
 ├── account_governance   (RBAC, user groups, audit configuration)
 ├── zerotrust            (Access applications, service tokens, IdPs)
+├── tunnels              (Cloudflare Tunnels, public hostnames, private network routes)
 ├── gateway              (SWG egress filtering: DNS, network, and HTTP)
 └── wan                  (Magic WAN tunnels, interconnects, static routes)
 

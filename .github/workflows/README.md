@@ -60,7 +60,7 @@ Terraform source, so adding an account, a layer or a module needs no edit here:
   |---|---|---|
   | 1 | `account_governance` | Account-wide permissions and resource-group scope. Every later tier's token is evaluated against what this applies, so it goes out on its own and first. |
   | 2 | `zones`, `bulk_redirects`, `gateway`, `lists`, `wan` | `zones` *creates* zones. The rest touch no zone at all, so nothing waits on them - they ride along in this tier rather than being ordered against each other. `lists` must land before `waf`, which it does by being a tier earlier. |
-  | 3 | `dns`, `load_balancing`, `r2`, `rules`, `waf`, `workers`, `zerotrust` | Resolve a zone with `data "cloudflare_zone"`, which fails at plan time until tier 2 has created it. `r2` is here because a bucket can be served from a custom domain, even where no bucket currently is. `zerotrust` is here by `POST_ZONE_LAYERS` instead: Access applications are addressed by hostname, so they need the zone to exist even though the layer never reads one. |
+  | 3 | `dns`, `load_balancing`, `r2`, `rules`, `tunnels`, `waf`, `workers`, `zerotrust` | Resolve a zone with `data "cloudflare_zone"`, which fails at plan time until tier 2 has created it. `r2` is here because a bucket can be served from a custom domain, even where no bucket currently is; `tunnels` for the same reason, since a tunnel's public hostname needs a CNAME in its zone. `zerotrust` is here by `POST_ZONE_LAYERS` instead: Access applications are addressed by hostname, so they need the zone to exist even though the layer never reads one. |
 
   Tier 2 and 3 membership is **derived from the Terraform source** - `zone_base`
   call versus `data "cloudflare_zone"` block - so a new layer classifies itself.
@@ -239,6 +239,7 @@ two accounts and eight layers that is eighteen environments.
 | `account_a-r2-apply`                 | **required** | `Workers R2 Storage:Edit` at account scope; plus `Zone:Read` and `Zone DNS:Edit` only if a bucket has a custom domain                                                                                                           |
 | `account_a-account_governance-apply` | **required** | `Account Settings:Edit`, and nothing at zone scope                                                                                                                                                                              |
 | `account_a-zerotrust-apply`          | **required** | `Access: Organizations, Identity Providers, and Groups:Edit`, `Access: Apps and Policies:Edit`, `Access: Service Tokens:Edit`, all at account scope                                                                             |
+| `account_a-tunnels-apply`            | **required** | `Cloudflare Tunnel:Edit` at account scope; plus `Zone:Read` and `DNS:Edit` only if an ingress rule publishes a hostname, for its proxied CNAME                                                                   |
 | `account_a-gateway-apply`            | **required** | `Zero Trust:Edit` at account scope, and nothing else. The API refers to the same grant as Zero Trust Write; it covers both the Gateway policy APIs and the category and application catalogues the layer resolves names against |
 | `account_a-wan-apply`                | **required** | `Magic Transit:Edit` at account scope, and nothing else. The permission group is named after the older product and covers the Cloudflare WAN tunnel and route APIs                                                              |
 
@@ -292,6 +293,17 @@ Identity Providers, and Groups:Edit` can change the team name, add a login metho
 and rewrite every Access group, which is enough to reach everything sitting
 behind Access - the internal systems rather than the Cloudflare dashboard. Give
 it the same reviewer list as `account_governance`.
+
+The `tunnels` token is its counterpart, and deliberately a separate one.
+`Cloudflare Tunnel:Edit` decides what is reachable at all: it can publish any
+internal service on a public hostname, route any private range to any connector,
+and - because the connector token endpoint accepts the same permission - fetch
+the token that runs any tunnel on the account. It holds nothing from the Access
+permission groups, so it cannot decide who gets in, and the `zerotrust` token in
+turn cannot touch a tunnel. Between them they are the whole of what sits behind
+Cloudflare One, so give both the same reviewer list. The layer never sends a
+tunnel secret or reads a connector token, so its environment carries no
+`TF_VAR_` secret and its state holds no credential that can run a connector.
 
 The `zerotrust` apply environment also carries one secret no other environment
 does: **`TF_VAR_IDENTITY_PROVIDER_SECRETS`**, a JSON object of OAuth client
