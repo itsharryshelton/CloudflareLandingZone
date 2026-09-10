@@ -12,6 +12,7 @@ Everything you edit lives here. The modules under [../modules/](../modules/) sta
 │   ├── gateway/                       # own state: SWG egress filtering, TLS inspection, root CA
 │   ├── lists/                         # own state: account-level IP, ASN and hostname lists
 │   ├── load_balancing/                # own state: monitors, pools, zone load balancers
+│   ├── logpush/                       # own state: Logpush jobs, account and zone log streams
 │   ├── r2/                            # own state: buckets, CORS, lifecycle, retention, domains
 │   ├── rules/                         # own state: cache rules, transform rules, origin rules
 │   ├── tunnels/                       # own state: Cloudflare Tunnels, public hostnames, private network routes
@@ -29,6 +30,7 @@ Everything you edit lives here. The modules under [../modules/](../modules/) sta
     │   ├── gateway.tfvars             # egress filtering -> gateway
     │   ├── lists.tfvars               # shared lists     -> lists
     │   ├── load_balancing.tfvars      # load balancers   -> load_balancing
+    │   ├── logpush.tfvars             # log streams      -> logpush
     │   ├── r2.tfvars                  # object storage   -> r2
     │   ├── rules.tfvars               # traffic rules    -> rules
     │   ├── tunnels.tfvars             # Cloudflare Tunnel -> tunnels
@@ -37,7 +39,7 @@ Everything you edit lives here. The modules under [../modules/](../modules/) sta
     │   ├── workers.tfvars             # edge compute     -> workers
     │   ├── zerotrust.tfvars           # Access posture   -> zerotrust
     │   ├── zone_config.tfvars         # zone settings    -> zones
-    │   └── zones.tfvars               # zone inventory   -> zones, dns, waf, lb, r2, rules, tunnels, workers
+    │   └── zones.tfvars               # zone inventory   -> zones, dns, waf, lb, logpush, r2, rules, tunnels, workers
     └── account_b/
         └── ...
 ```
@@ -64,6 +66,7 @@ Tier 2: Foundational Zones & Account Services
 Tier 3: Zone-Dependent & Consumer Layers
 ├── dns                                (resolves zone IDs via data source; creates DNS records)
 ├── load_balancing                     (resolves zone IDs; provisions origin pools and health monitors)
+├── logpush                            (resolves zone IDs for zone-scoped jobs; pushes logs to a SIEM or storage)
 ├── r2                                 (provisions buckets; binds custom domains to existing zones)
 ├── rules                              (resolves zone IDs; manages cache, transform, and origin rules)
 ├── tunnels                            (resolves zone IDs; publishes tunnel hostnames as proxied CNAMEs)
@@ -75,7 +78,7 @@ Tier 3: Zone-Dependent & Consumer Layers
 Tier membership is derived directly from the Terraform source code:
 - **Tier 1 (`account_governance`):** Account-wide permissions and resource-group scopes. Every downstream token is evaluated against what this layer applies, so it runs on its own first.
 - **Tier 2 (`zones`, `bulk_redirects`, `gateway`, `lists`, `wan`):** `zones` creates the zone containers at Cloudflare. The remaining layers touch no zones, so nothing waits on them. `lists` is deliberately placed in Tier 2 so that named lists exist before `waf` references them.
-- **Tier 3 (`dns`, `load_balancing`, `r2`, `rules`, `tunnels`, `waf`, `workers`, `zerotrust`):** These layers resolve zones dynamically via `data "cloudflare_zone"`, which fails at plan time until Tier 2 has created the zone. `tunnels` resolves one for the proxied CNAME behind each public hostname. `zerotrust` is included here because Access applications are addressed by hostname and require the corresponding zone and DNS record to exist.
+- **Tier 3 (`dns`, `load_balancing`, `logpush`, `r2`, `rules`, `tunnels`, `waf`, `workers`, `zerotrust`):** These layers resolve zones dynamically via `data "cloudflare_zone"`, which fails at plan time until Tier 2 has created the zone. `tunnels` resolves one for the proxied CNAME behind each public hostname, and `logpush` one for each zone-scoped job. `zerotrust` is included here because Access applications are addressed by hostname and require the corresponding zone and DNS record to exist.
 
 ## Why split this way
 
@@ -89,9 +92,9 @@ Tier membership is derived directly from the Terraform source code:
 
 ## Layers do not read each other's state
 
-The `dns`, `waf`, `load_balancing`, `r2`, `rules`, `tunnels`, and `workers` layers resolve a zone key to a zone ID using `data "cloudflare_zone"` filtered by name and account ID, rather than reading `terraform_remote_state`. State files remain completely decoupled: any layer can be applied, re-initialised, or migrated without affecting the others.
+The `dns`, `waf`, `load_balancing`, `logpush`, `r2`, `rules`, `tunnels`, and `workers` layers resolve a zone key to a zone ID using `data "cloudflare_zone"` filtered by name and account ID, rather than reading `terraform_remote_state`. State files remain completely decoupled: any layer can be applied, re-initialised, or migrated without affecting the others.
 
-This design requires the Cloudflare API to be accessible at plan time for consumer layers, and plans will fail if the zone does not yet exist. Apply `zones` first; `dns`, `waf`, `load_balancing`, `r2`, `rules`, `tunnels`, and `workers` can then plan and apply concurrently.
+This design requires the Cloudflare API to be accessible at plan time for consumer layers, and plans will fail if the zone does not yet exist. Apply `zones` first; `dns`, `waf`, `load_balancing`, `logpush`, `r2`, `rules`, `tunnels`, and `workers` can then plan and apply concurrently.
 
 `account_governance` queries the API to resolve role, permission group, and resource group names to IDs. `zerotrust` queries the account's existing Zero Trust organisation to adopt the configured team name. `gateway` dynamically resolves Cloudflare's content categories, security categories, and application catalogues so that configuration files reference human-readable names like `"Microsoft 365"` rather than arbitrary IDs like `606`.
 
@@ -119,6 +122,7 @@ export AWS_ACCESS_KEY_ID="<R2 access key for state backend>"
 export AWS_SECRET_ACCESS_KEY="<R2 secret key for state backend>"
 export TF_VAR_identity_provider_secrets='{"entra_id":"<oauth_client_secret>"}'
 export TF_VAR_wan_ipsec_tunnel_psks='{"london_primary":"<pre_shared_key>"}'
+export TF_VAR_logpush_destination_secrets='{"audit_archive":"r2://<bucket>/audit/{DATE}?account-id=<id>&access-key-id=<key_id>&secret-access-key=<secret>"}'
 ```
 
 `.gitignore` enforces default-deny rules for `*.tfvars`, with explicit whitelisting for `layers/*/defaults.auto.tfvars` and `accounts/*/*.tfvars`. It explicitly re-denies `**/terraform.tfvars`, `**/local.auto.tfvars`, and `**/*.local.tfvars`.
@@ -146,6 +150,7 @@ The pipeline maps variable files to layers dynamically. The table below lists th
 | `gateway` | `account.tfvars`, `gateway.tfvars` | None |
 | `lists` | `account.tfvars`, `lists.tfvars` | None |
 | `load_balancing` | `account.tfvars`, `zones.tfvars`, `load_balancing.tfvars` | None |
+| `logpush` | `account.tfvars`, `zones.tfvars`, `logpush.tfvars` | `TF_VAR_logpush_destination_secrets`, `TF_VAR_logpush_ownership_challenges` (from the `<account>-plan` environment) |
 | `r2` | `account.tfvars`, `zones.tfvars`, `r2.tfvars` | None |
 | `rules` | `account.tfvars`, `zones.tfvars`, `rules.tfvars` | None |
 | `tunnels` | `account.tfvars`, `zones.tfvars`, `tunnels.tfvars` | None (no tunnel secret is sent and no connector token is read) |
@@ -188,6 +193,7 @@ Keys are scoped locally to each account tree: `primary` in `account_a` is comple
 - An R2 bucket configured for public anonymous `.r2.dev` access fails the plan.
 - A Cloudflare WAN static route pointing to an unmanaged tunnel fails the plan.
 - A Cloudflare Tunnel hostname outside its referenced zone, or a tunnel route naming an undeclared tunnel, fails the plan.
+- A zone-scoped Logpush job on a zone below Enterprise, a dataset pushed from the wrong scope, or a credential committed in a Logpush destination fails the plan.
 - A user group assigning an undeclared member fails the plan.
 - An unmanaged root CA certificate or uninspected HTTP rule in Gateway fails the plan.
 
@@ -495,6 +501,76 @@ Redundancy is more connectors on one tunnel, not more tunnels: run `cloudflared`
 | `allow_unmanaged_tunnel_hostnames` | `false` | Fails the plan if an ingress rule has no `zone_key`, since nothing would route the hostname to the tunnel. |
 | `allow_default_tunnel_route` | `false` | Prohibits `0.0.0.0/0` or `::/0` tunnel routes, which would make one connector the internet egress for every WARP device. |
 | `allow_public_tunnel_route_prefixes` | `false` | Restricts tunnel routes to RFC 1918, RFC 6598 or IPv6 ULA ranges. |
+
+---
+
+## Logpush
+
+The `logpush` layer manages Logpush jobs: one dataset, pushed from an account or a zone, to one destination - a SIEM, an HTTP endpoint or an object store. It is how Cloudflare's logs leave Cloudflare: the account audit trail, Gateway and Access activity, and every HTTP request and firewall event on a zone.
+
+> **Enterprise only.** Cloudflare refuses a Logpush job on any other plan. On an account without it, leave `logpush_jobs = {}`.
+
+```hcl
+# accounts/account_a/logpush.tfvars
+logpush_jobs = {
+  audit_archive = {
+    dataset = "audit_logs"
+    # No destination_conf: an R2 URI carries its access key, so it arrives in TF_VAR_logpush_destination_secrets
+    output_options = {
+      field_names = ["When", "ActionType", "ActorEmail", "ActorIP", "ResourceType", "ResourceID"]
+    }
+  }
+
+  primary_http_requests = {
+    dataset          = "http_requests"
+    zone_key         = "primary"
+    destination_conf = "s3://example-com-logs/http_requests/{DATE}?region=eu-west-2&sse=AES256"
+    filter = <<-JSON
+      {"where":{"and":[{"key":"ClientRequestPath","operator":"!eq","value":"/healthz"}]}}
+    JSON
+    output_options = {
+      field_names = ["EdgeStartTimestamp", "RayID", "ClientIP", "ClientRequestHost", "ClientRequestURI", "EdgeResponseStatus"]
+    }
+  }
+}
+```
+
+### Scope
+Each dataset is produced per zone (`http_requests`, `dns_logs`, ...) or per account (`audit_logs`, `gateway_dns`, `access_requests`, ...), and a few, such as `firewall_events`, at both. A job for a zone dataset names a `zone_key`; a job for an account dataset does not. The catalogue that decides which is `logpush_zone_datasets` and `logpush_account_datasets` in `layers/logpush/variables.tf`, and a job in the wrong scope fails the plan rather than the apply.
+
+A zone-scoped job also needs its zone on Enterprise. The layer reads `zone_tier` from `zones.tfvars` and fails the plan below `logpush_min_zone_tier`, so declare the zone's real plan there.
+
+`output_options.field_names` is required on every job. Cloudflare has no "all fields" option, and each dataset's page in the Logpush documentation lists its fields.
+
+### Destinations and Secrets
+A destination with no credential in its URI - S3, Google Cloud Storage - is committed as `destination_conf`. One that carries a credential - R2 access keys, a Splunk HEC token, a Datadog API key, an Azure SAS, an HTTP auth header - is not: the job leaves `destination_conf` out, and the whole URI is supplied at plan time, keyed by job:
+
+```bash
+export TF_VAR_logpush_destination_secrets='{"audit_archive":"r2://<bucket>/audit/{DATE}?account-id=<id>&access-key-id=<key_id>&secret-access-key=<secret>"}'
+```
+
+The plan fails on a credential-shaped `destination_conf` in a `.tfvars`, on a job with neither or both, and on a secret keyed to no job.
+
+Where Cloudflare asks for proof of control before it will push - object stores such as S3 and Google Cloud Storage - it writes a challenge file into the destination, and the file's contents go in `TF_VAR_logpush_ownership_challenges` under the job's key.
+
+Both are read by the plan, so the pipeline takes them from the `<account>-plan` environment (`TF_VAR_LOGPUSH_DESTINATION_SECRETS`, `TF_VAR_LOGPUSH_OWNERSHIP_CHALLENGES`), not the apply one. Both reach state and the saved plan in plain text.
+
+### Governing defaults
+
+| Setting | Default | Effect |
+|---|---|---|
+| `default_logpush_job_enabled` | `true` | A declared job pushes. The provider's own default is disabled, which looks configured and ships nothing. |
+| `default_logpush_timestamp_format` | `"rfc3339"` | Parsed by every SIEM without a custom rule, and what a dashboard-built job uses. The API's own default is `unixnano`. |
+| `default_logpush_output_type` | `"ndjson"` | One record format across every job. |
+| `default_cve_2021_44228_redaction` | `true` | Rewrites `${` to `x{` in the output, so a Log4Shell lookup string a client sent never reaches a downstream log processor intact. |
+| `logpush_min_zone_tier` | `"enterprise"` | Fails the plan for a zone-scoped job on a lower plan, which Cloudflare would refuse at apply. |
+| `required_logpush_account_datasets` | `[]` | Account datasets every account must push, e.g. `["audit_logs"]`. Empty by default because Logpush is Enterprise-only. |
+| `allow_logpush_sampling` | `false` | Fails the plan if a job samples its output. A sampled log drops the event that matters as readily as any other. |
+| `allow_insecure_logpush_destinations` | `false` | Fails the plan for a plain `http://` destination or `insecure-skip-verify=true`, checked against secret destinations too. |
+
+### Out of Scope
+- **The destination itself:** buckets, bucket policies, SIEM indexes and HEC tokens are created where they live. An R2 log bucket can come from the `r2` layer; its access key cannot, by design.
+- **Ownership challenge automation:** the token is read out of the destination, which this layer holds no credential for.
 
 ---
 
@@ -889,7 +965,7 @@ The Release Manager automates:
 Within your customer's dedicated deployment repository, you can manage multiple administrative accounts (for example: `production`, `staging`, `development`):
 
 1. Create a directory `accounts/<account_name>/`.
-2. Copy all sixteen template `.tfvars` files from `accounts/account_a/`:
+2. Copy all seventeen template `.tfvars` files from `accounts/account_a/`:
    - `account.tfvars`
    - `account_governance.tfvars`
    - `bulk_redirects.tfvars`
@@ -897,6 +973,7 @@ Within your customer's dedicated deployment repository, you can manage multiple 
    - `gateway.tfvars`
    - `lists.tfvars`
    - `load_balancing.tfvars`
+   - `logpush.tfvars`
    - `r2.tfvars`
    - `rules.tfvars`
    - `tunnels.tfvars`

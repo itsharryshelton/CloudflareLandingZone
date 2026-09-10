@@ -66,6 +66,7 @@ Platform Layer (Central Governance)
 ├── zerotrust            (Access applications, service tokens, IdPs)
 ├── tunnels              (Cloudflare Tunnels, public hostnames, private network routes)
 ├── gateway              (SWG egress filtering: DNS, network, and HTTP)
+├── logpush              (Log streams: audit, Gateway and zone logs to a SIEM or R2 - Enterprise)
 └── wan                  (Magic WAN tunnels, interconnects, static routes)
 
 Application Layer (Zone & Workload Scope)

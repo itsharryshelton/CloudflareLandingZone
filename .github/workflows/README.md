@@ -60,7 +60,7 @@ Terraform source, so adding an account, a layer or a module needs no edit here:
   |---|---|---|
   | 1 | `account_governance` | Account-wide permissions and resource-group scope. Every later tier's token is evaluated against what this applies, so it goes out on its own and first. |
   | 2 | `zones`, `bulk_redirects`, `gateway`, `lists`, `wan` | `zones` *creates* zones. The rest touch no zone at all, so nothing waits on them - they ride along in this tier rather than being ordered against each other. `lists` must land before `waf`, which it does by being a tier earlier. |
-  | 3 | `dns`, `load_balancing`, `r2`, `rules`, `tunnels`, `waf`, `workers`, `zerotrust` | Resolve a zone with `data "cloudflare_zone"`, which fails at plan time until tier 2 has created it. `r2` is here because a bucket can be served from a custom domain, even where no bucket currently is; `tunnels` for the same reason, since a tunnel's public hostname needs a CNAME in its zone. `zerotrust` is here by `POST_ZONE_LAYERS` instead: Access applications are addressed by hostname, so they need the zone to exist even though the layer never reads one. |
+  | 3 | `dns`, `load_balancing`, `logpush`, `r2`, `rules`, `tunnels`, `waf`, `workers`, `zerotrust` | Resolve a zone with `data "cloudflare_zone"`, which fails at plan time until tier 2 has created it. `r2` is here because a bucket can be served from a custom domain, even where no bucket currently is; `tunnels` for the same reason, since a tunnel's public hostname needs a CNAME in its zone; `logpush` because a zone-scoped job is created against its zone, even on an account whose jobs are all account-scoped. `zerotrust` is here by `POST_ZONE_LAYERS` instead: Access applications are addressed by hostname, so they need the zone to exist even though the layer never reads one. |
 
   Tier 2 and 3 membership is **derived from the Terraform source** - `zone_base`
   call versus `data "cloudflare_zone"` block - so a new layer classifies itself.
@@ -232,7 +232,7 @@ two accounts and eight layers that is eighteen environments.
 
 | Environment                          | Reviewers    | `CLOUDFLARE_API_TOKEN` scope                                                                                                                                                                                                    |
 | --------------------------------------| --------------| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `account_a-plan`                     | none         | read-only: `Zone:Read`, `DNS:Read`, `Zone Settings:Read`, `Zone WAF:Read`, `Account Load Balancers:Read`, `Zone Load Balancers:Read`, `Workers R2 Storage:Read`, `Account Settings:Read`, `Zero Trust:Read`                     |
+| `account_a-plan`                     | none         | read-only: `Zone:Read`, `DNS:Read`, `Zone Settings:Read`, `Zone WAF:Read`, `Account Load Balancers:Read`, `Zone Load Balancers:Read`, `Workers R2 Storage:Read`, `Account Settings:Read`, `Zero Trust:Read`, `Logs:Read` at account and zone scope                     |
 | `account_a-zones-apply`              | **required** | `Zone:Edit`, `DNS:Edit`, `Zone Settings:Edit`                                                                                                                                                                                   |
 | `account_a-waf-apply`                | **required** | `Zone WAF:Edit`, `Zone:Read`, notably *not* `Zone:Edit`                                                                                                                                                                         |
 | `account_a-load_balancing-apply`     | **required** | `Account Load Balancers:Edit`, `Zone Load Balancers:Edit`, `Zone:Read`                                                                                                                                                          |
@@ -240,6 +240,7 @@ two accounts and eight layers that is eighteen environments.
 | `account_a-account_governance-apply` | **required** | `Account Settings:Edit`, and nothing at zone scope                                                                                                                                                                              |
 | `account_a-zerotrust-apply`          | **required** | `Access: Organizations, Identity Providers, and Groups:Edit`, `Access: Apps and Policies:Edit`, `Access: Service Tokens:Edit`, all at account scope                                                                             |
 | `account_a-tunnels-apply`            | **required** | `Cloudflare Tunnel:Edit` at account scope; plus `Zone:Read` and `DNS:Edit` only if an ingress rule publishes a hostname, for its proxied CNAME                                                                   |
+| `account_a-logpush-apply`            | **required** | `Logs:Edit` at account and zone scope, and `Zone:Read`; plus `Zero Trust: PII Read` at account scope only if a job pushes an Access, Gateway or DEX dataset |
 | `account_a-gateway-apply`            | **required** | `Zero Trust:Edit` at account scope, and nothing else. The API refers to the same grant as Zero Trust Write; it covers both the Gateway policy APIs and the category and application catalogues the layer resolves names against |
 | `account_a-wan-apply`                | **required** | `Magic Transit:Edit` at account scope, and nothing else. The permission group is named after the older product and covers the Cloudflare WAN tunnel and route APIs                                                              |
 
@@ -305,6 +306,14 @@ Cloudflare One, so give both the same reviewer list. The layer never sends a
 tunnel secret or reads a connector token, so its environment carries no
 `TF_VAR_` secret and its state holds no credential that can run a connector.
 
+The `logpush` token decides where logs go. `Logs:Edit` can point any dataset -
+every request to every zone, every DNS query a Gateway user made - at any
+destination it can name, and it can switch off the job a SOC depends on:
+exfiltration and blinding in one grant. Jobs on Access, Gateway and DEX datasets
+also need `Zero Trust: PII Read`, without which Cloudflare will not create,
+change or delete them. It changes no traffic, but give it the same reviewer list
+as `gateway` and `zerotrust`.
+
 The `zerotrust` apply environment also carries one secret no other environment
 does: **`TF_VAR_IDENTITY_PROVIDER_SECRETS`**, a JSON object of OAuth client
 secrets keyed the same way as the `identity_providers` map, exported as
@@ -347,6 +356,26 @@ nor is `TF_VAR_IDENTITY_PROVIDER_SECRETS`: exporting an unset environment secret
 would hand Terraform an empty string where it expects a map and fail the run for
 every layer that does not need one. Export them in the run step of your own copy
 of that workflow, conditionally on the secret being set.
+
+The `logpush` layer takes two secrets, and those are wired in:
+[`_terraform-run.yml`](_terraform-run.yml) exports them for the `logpush` layer
+only, and only when set - the conditional export described above - so an unset
+secret never reaches Terraform as an empty string. They belong in the
+**`<account>-plan`** environment, because the plan step is what reads them and
+apply runs the saved plan without re-reading `TF_VAR_`:
+
+```
+TF_VAR_LOGPUSH_DESTINATION_SECRETS  = {"audit_archive":"r2://<bucket>/audit/{DATE}?account-id=<id>&access-key-id=<key id>&secret-access-key=<secret>"}
+TF_VAR_LOGPUSH_OWNERSHIP_CHALLENGES = {"primary_http_requests":"<challenge token>"}
+```
+
+The first is the whole destination URI, keyed by job, for any job whose
+destination carries a credential - R2 keys, a Splunk HEC token, a Datadog API
+key, an Azure SAS. The second is the ownership challenge token for destinations
+that ask for one. Both land in the saved plan and in `logpush` state in plain
+text. The plan environment has no reviewer gate, so anyone who can dispatch a
+plan can reach them - the same trade `TF_VAR_IDENTITY_PROVIDER_SECRETS` makes.
+Scope each destination credential to the one bucket or index it writes to.
 
 On the apply environments, also set **Deployment branches** to `main` only, so a
 branch cannot reach a write token.
