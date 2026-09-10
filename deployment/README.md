@@ -14,6 +14,7 @@ Everything you edit lives here. The modules under [../modules/](../modules/) sta
 │   ├── load_balancing/                # own state: monitors, pools, zone load balancers
 │   ├── r2/                            # own state: buckets, CORS, lifecycle, retention, domains
 │   ├── rules/                         # own state: cache rules, transform rules, origin rules
+│   ├── tunnels/                       # own state: Cloudflare Tunnels, public hostnames, private network routes
 │   ├── waf/                           # own state: firewall custom rules, rate limiting
 │   ├── wan/                           # own state: Magic WAN IPsec and GRE tunnels, static routes
 │   ├── workers/                       # own state: Worker scripts, KV namespaces, routes, crons
@@ -30,12 +31,13 @@ Everything you edit lives here. The modules under [../modules/](../modules/) sta
     │   ├── load_balancing.tfvars      # load balancers   -> load_balancing
     │   ├── r2.tfvars                  # object storage   -> r2
     │   ├── rules.tfvars               # traffic rules    -> rules
+    │   ├── tunnels.tfvars             # Cloudflare Tunnel -> tunnels
     │   ├── waf.tfvars                 # firewall rules   -> waf
     │   ├── wan.tfvars                 # site tunnels     -> wan
     │   ├── workers.tfvars             # edge compute     -> workers
     │   ├── zerotrust.tfvars           # Access posture   -> zerotrust
     │   ├── zone_config.tfvars         # zone settings    -> zones
-    │   └── zones.tfvars               # zone inventory   -> zones, dns, waf, lb, r2, rules, workers
+    │   └── zones.tfvars               # zone inventory   -> zones, dns, waf, lb, r2, rules, tunnels, workers
     └── account_b/
         └── ...
 ```
@@ -64,6 +66,7 @@ Tier 3: Zone-Dependent & Consumer Layers
 ├── load_balancing                     (resolves zone IDs; provisions origin pools and health monitors)
 ├── r2                                 (provisions buckets; binds custom domains to existing zones)
 ├── rules                              (resolves zone IDs; manages cache, transform, and origin rules)
+├── tunnels                            (resolves zone IDs; publishes tunnel hostnames as proxied CNAMEs)
 ├── waf                                (resolves zone IDs; consumes account lists created in Tier 2)
 ├── workers                            (resolves zone IDs; binds script routes and custom domains)
 └── zerotrust                          (Access hostnames require valid, proxied DNS records)
@@ -72,7 +75,7 @@ Tier 3: Zone-Dependent & Consumer Layers
 Tier membership is derived directly from the Terraform source code:
 - **Tier 1 (`account_governance`):** Account-wide permissions and resource-group scopes. Every downstream token is evaluated against what this layer applies, so it runs on its own first.
 - **Tier 2 (`zones`, `bulk_redirects`, `gateway`, `lists`, `wan`):** `zones` creates the zone containers at Cloudflare. The remaining layers touch no zones, so nothing waits on them. `lists` is deliberately placed in Tier 2 so that named lists exist before `waf` references them.
-- **Tier 3 (`dns`, `load_balancing`, `r2`, `rules`, `waf`, `workers`, `zerotrust`):** These layers resolve zones dynamically via `data "cloudflare_zone"`, which fails at plan time until Tier 2 has created the zone. `zerotrust` is included here because Access applications are addressed by hostname and require the corresponding zone and DNS record to exist.
+- **Tier 3 (`dns`, `load_balancing`, `r2`, `rules`, `tunnels`, `waf`, `workers`, `zerotrust`):** These layers resolve zones dynamically via `data "cloudflare_zone"`, which fails at plan time until Tier 2 has created the zone. `tunnels` resolves one for the proxied CNAME behind each public hostname. `zerotrust` is included here because Access applications are addressed by hostname and require the corresponding zone and DNS record to exist.
 
 ## Why split this way
 
@@ -86,9 +89,9 @@ Tier membership is derived directly from the Terraform source code:
 
 ## Layers do not read each other's state
 
-The `dns`, `waf`, `load_balancing`, `r2`, `rules`, and `workers` layers resolve a zone key to a zone ID using `data "cloudflare_zone"` filtered by name and account ID, rather than reading `terraform_remote_state`. State files remain completely decoupled: any layer can be applied, re-initialised, or migrated without affecting the others.
+The `dns`, `waf`, `load_balancing`, `r2`, `rules`, `tunnels`, and `workers` layers resolve a zone key to a zone ID using `data "cloudflare_zone"` filtered by name and account ID, rather than reading `terraform_remote_state`. State files remain completely decoupled: any layer can be applied, re-initialised, or migrated without affecting the others.
 
-This design requires the Cloudflare API to be accessible at plan time for consumer layers, and plans will fail if the zone does not yet exist. Apply `zones` first; `dns`, `waf`, `load_balancing`, `r2`, `rules`, and `workers` can then plan and apply concurrently.
+This design requires the Cloudflare API to be accessible at plan time for consumer layers, and plans will fail if the zone does not yet exist. Apply `zones` first; `dns`, `waf`, `load_balancing`, `r2`, `rules`, `tunnels`, and `workers` can then plan and apply concurrently.
 
 `account_governance` queries the API to resolve role, permission group, and resource group names to IDs. `zerotrust` queries the account's existing Zero Trust organisation to adopt the configured team name. `gateway` dynamically resolves Cloudflare's content categories, security categories, and application catalogues so that configuration files reference human-readable names like `"Microsoft 365"` rather than arbitrary IDs like `606`.
 
@@ -145,6 +148,7 @@ The pipeline maps variable files to layers dynamically. The table below lists th
 | `load_balancing` | `account.tfvars`, `zones.tfvars`, `load_balancing.tfvars` | None |
 | `r2` | `account.tfvars`, `zones.tfvars`, `r2.tfvars` | None |
 | `rules` | `account.tfvars`, `zones.tfvars`, `rules.tfvars` | None |
+| `tunnels` | `account.tfvars`, `zones.tfvars`, `tunnels.tfvars` | None (no tunnel secret is sent and no connector token is read) |
 | `waf` | `account.tfvars`, `zones.tfvars`, `waf.tfvars` | None |
 | `wan` | `account.tfvars`, `wan.tfvars` | `TF_VAR_wan_ipsec_tunnel_psks`, `TF_VAR_wan_bgp_md5_keys` |
 | `workers` | `account.tfvars`, `zones.tfvars`, `workers.tfvars` | None (Worker secrets use Secrets Store) |
@@ -183,6 +187,7 @@ Keys are scoped locally to each account tree: `primary` in `account_a` is comple
 - A load balancer hostname outside its zone domain fails the plan.
 - An R2 bucket configured for public anonymous `.r2.dev` access fails the plan.
 - A Cloudflare WAN static route pointing to an unmanaged tunnel fails the plan.
+- A Cloudflare Tunnel hostname outside its referenced zone, or a tunnel route naming an undeclared tunnel, fails the plan.
 - A user group assigning an undeclared member fails the plan.
 - An unmanaged root CA certificate or uninspected HTTP rule in Gateway fails the plan.
 
@@ -432,6 +437,64 @@ Service token secrets are generated by Cloudflare and stored in state. They are 
 | `lock_dashboard_to_read_only` | `false` | When enabled, locks the Zero Trust dashboard to read-only, establishing GitOps as the sole modification route. |
 | `default_session_duration` | `"24h"` | Default session lifespan before re-authentication is required. |
 | `default_service_token_duration` | `"8760h"` | One-year lifespan for service tokens. Prevents unrotated perpetual tokens. |
+
+---
+
+## Cloudflare Tunnel
+
+The `tunnels` layer manages Cloudflare Tunnels: outbound-only `cloudflared` connectors that publish origins on a private network without opening an inbound port, the proxied DNS record behind each published hostname, and the private network routes and virtual networks WARP clients reach through a tunnel.
+
+It is deliberately separate from `zerotrust`. Access decides *who* may reach an application; a tunnel decides *what* is reachable at all. Separate state and separate tokens mean an Access policy change cannot delete a tunnel, and a tunnel change cannot loosen a policy.
+
+```hcl
+# accounts/account_a/tunnels.tfvars
+cloudflare_tunnels = {
+  london_dc = {
+    name = "lon-dc-01"
+    ingress = [
+      { hostname = "grafana.example.com", zone_key = "primary", path = "^/api/", service = "http://grafana-api.internal:3000" },
+      { hostname = "grafana.example.com", zone_key = "primary", service = "http://grafana.internal:3000" },
+    ]
+  }
+  manchester_dc = { name = "man-dc-01" }
+}
+
+tunnel_virtual_networks = {
+  manchester = { name = "man-dc" }
+}
+
+tunnel_routes = {
+  london_servers     = { network = "172.16.10.0/24", tunnel_key = "london_dc" }
+  manchester_servers = { network = "172.16.10.0/24", tunnel_key = "manchester_dc", virtual_network_key = "manchester" }
+}
+```
+
+### Public Hostnames
+Ingress rules are evaluated in order and the first match wins, so a path-specific rule goes above the bare hostname it narrows. A catch-all rule (`default_catch_all_service`, a 404 by default) is appended automatically, because `cloudflared` requires the last rule to match everything.
+
+Every rule with a `zone_key` gets its proxied CNAME (`<tunnel-id>.cfargotunnel.com`) created in that zone by this layer, in the same apply as the tunnel, so a hostname cannot exist without the record that routes to it. Do not also declare that record in `dns.tfvars`: Cloudflare refuses a second record of the same name.
+
+A published hostname is reachable by anybody on the internet unless an Access application in `zerotrust` covers it. This layer cannot see that layer's state, so it cannot check. Pair every hostname with an application there, and set `origin_request.access` so `cloudflared` also validates the Access token at the origin.
+
+### Connector Tokens
+No tunnel secret is sent, so Cloudflare generates one it never returns, and the layer never reads the connector token. State and outputs hold nothing that can run a connector, and the `tunnels` environment carries no `TF_VAR_` secret. Fetch a token when installing a connector - from the dashboard, `cloudflared tunnel token <tunnel-id>`, or `GET /accounts/<account_id>/cfd_tunnel/<tunnel_id>/token` - and deliver it to the host through a secret store. A tunnel shows `inactive` until a connector runs.
+
+Redundancy is more connectors on one tunnel, not more tunnels: run `cloudflared` with the same token on a second host.
+
+### Out of Scope
+- **Running `cloudflared`:** connectors are deployed on the origin network by whatever manages those hosts.
+- **Who may use a route:** a private network route makes a range reachable by an enrolled device. Restricting it to people is a Gateway network policy or an Access application with a private destination.
+
+### Governing defaults
+
+| Setting | Default | Effect |
+|---|---|---|
+| `default_tunnel_config_src` | `"cloudflare"` | Remotely managed: the ingress rules here are what every connector runs, and a dashboard edit shows up as drift. |
+| `default_catch_all_service` | `"http_status:404"` | Unmatched requests get a 404 rather than falling through to a real service. |
+| `allow_no_tls_verify` | `false` | Fails the plan if an origin setting disables certificate verification. Use `ca_pool` or `origin_server_name` instead. |
+| `allow_unmanaged_tunnel_hostnames` | `false` | Fails the plan if an ingress rule has no `zone_key`, since nothing would route the hostname to the tunnel. |
+| `allow_default_tunnel_route` | `false` | Prohibits `0.0.0.0/0` or `::/0` tunnel routes, which would make one connector the internet egress for every WARP device. |
+| `allow_public_tunnel_route_prefixes` | `false` | Restricts tunnel routes to RFC 1918, RFC 6598 or IPv6 ULA ranges. |
 
 ---
 
@@ -826,7 +889,7 @@ The Release Manager automates:
 Within your customer's dedicated deployment repository, you can manage multiple administrative accounts (for example: `production`, `staging`, `development`):
 
 1. Create a directory `accounts/<account_name>/`.
-2. Copy all fifteen template `.tfvars` files from `accounts/account_a/`:
+2. Copy all sixteen template `.tfvars` files from `accounts/account_a/`:
    - `account.tfvars`
    - `account_governance.tfvars`
    - `bulk_redirects.tfvars`
@@ -836,6 +899,7 @@ Within your customer's dedicated deployment repository, you can manage multiple 
    - `load_balancing.tfvars`
    - `r2.tfvars`
    - `rules.tfvars`
+   - `tunnels.tfvars`
    - `waf.tfvars`
    - `wan.tfvars`
    - `workers.tfvars`
