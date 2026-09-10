@@ -308,8 +308,18 @@ jobs:
         if: inputs.mode == 'plan'
         env:
           TF_VAR_identity_provider_secrets: ${{ secrets.TF_VAR_IDENTITY_PROVIDER_SECRETS }}
+          LOGPUSH_DESTINATION_SECRETS: ${{ inputs.layer == 'logpush' && secrets.TF_VAR_LOGPUSH_DESTINATION_SECRETS || '' }}
+          LOGPUSH_OWNERSHIP_CHALLENGES: ${{ inputs.layer == 'logpush' && secrets.TF_VAR_LOGPUSH_OWNERSHIP_CHALLENGES || '' }}
         run: |
           set -euo pipefail
+          if [[ -n "${LOGPUSH_DESTINATION_SECRETS:-}" ]]; then
+            export TF_VAR_logpush_destination_secrets="$LOGPUSH_DESTINATION_SECRETS"
+          fi
+          if [[ -n "${LOGPUSH_OWNERSHIP_CHALLENGES:-}" ]]; then
+            export TF_VAR_logpush_ownership_challenges="$LOGPUSH_OWNERSHIP_CHALLENGES"
+          fi
+          unset LOGPUSH_DESTINATION_SECRETS LOGPUSH_OWNERSHIP_CHALLENGES
+
           # Which account var files this layer takes is derived from the config,
           # not hardcoded - see .github/scripts/tf-varfiles.sh. Written to a file
           # first so a non-zero exit from the script fails this step (a process
