@@ -45,9 +45,12 @@ Nothing is hardcoded. [`tf-matrix.sh`](../scripts/tf-matrix.sh) and
 [`tf-varfiles.sh`](../scripts/tf-varfiles.sh) read the answers out of the
 Terraform source, so adding an account, a layer or a module needs no edit here:
 
-- **Which pairs are affected**, from the changed files. A change to
-  `accounts/account_a/waf.tfvars` plans the `waf` layer for `account_a` and
-  nothing else; a change to `modules/zone_base/` plans every layer that calls
+- **Which pairs run.** `terraform-plan.yml` and `terraform-apply.yml` are manual,
+  so there is no diff to narrow against: they run every pair the `account` and
+  `layer` inputs allow, which by default is the whole fleet. `ci.yml`'s offline
+  plan does narrow by the changed files: a change to
+  `accounts/account_a/waf.tfvars` selects the `waf` layer for `account_a` and
+  nothing else; a change to `modules/zone_base/` selects every layer that calls
   that module, for every account.
 - **Which var files a layer takes**: a var file belongs to a layer when every
   top-level variable it assigns is declared by that layer. This works because
@@ -134,9 +137,9 @@ object per `{account, layer}` pair:
 
 ```
 <TF_BACKEND_BUCKET>/
-  Your-Org/zones.tfstate
-  Your-Org/waf.tfstate
-  Your-Org/gateway.tfstate
+  account_a/zones.tfstate
+  account_a/waf.tfstate
+  account_a/gateway.tfstate
   ...one key per layer directory
 ```
 
@@ -213,9 +216,12 @@ To create the App, once, at organisation level:
    account permissions and no write anywhere.
 3. Generate a private key, put the PEM in `MODULES_APP_PRIVATE_KEY`, and the App
    ID in `MODULES_APP_ID`.
-4. **Install the App on the Module Repositories only** - "Only select
-   repositories". Installing it org-wide would give every workflow here read
-   access to every repository in the org.
+4. **Install the App on the modules repository only** - "Only select
+   repositories". [`modules-auth`](../actions/modules-auth/action.yml) mints its
+   token for one repository, its `repository` input (default
+   `cloudflare-platform-modules`), so an org-wide install buys nothing - and it
+   would let anyone holding the private key mint a token for every repository
+   in the org.
 
 A token is minted fresh per job, expires within the hour, and is revoked by the
 action's post step. Nothing is tied to an individual, so nobody leaving breaks
@@ -227,8 +233,13 @@ whoever last edited it remembered to make it.
 
 ### Environments
 
-Per account: **one plan environment, plus one apply environment per layer.** For
-two accounts and eight layers that is eighteen environments.
+Per account: **one plan environment, plus one apply environment per layer** -
+one more environment than there are directories under `deployment/layers/`.
+Create `<account>-plan` by hand;
+[`bootstrap-environments.sh`](../scripts/bootstrap-environments.sh) creates
+every `<account>-<layer>-apply` with its reviewer gate and `main`-only branch
+policy. [VARIABLES_AND_SECRETS.md](../../VARIABLES_AND_SECRETS.md) lists every
+value each one needs.
 
 | Environment                          | Reviewers    | `CLOUDFLARE_API_TOKEN` scope                                                                                                                                                                                                    |
 | --------------------------------------| --------------| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
@@ -244,9 +255,14 @@ two accounts and eight layers that is eighteen environments.
 | `account_a-logpush-apply`            | **required** | `Logs:Edit` at account and zone scope, and `Zone:Read`; plus `Zero Trust: PII Read` at account scope only if a job pushes an Access, Gateway or DEX dataset |
 | `account_a-gateway-apply`            | **required** | `Zero Trust:Edit` at account scope, and nothing else. The API refers to the same grant as Zero Trust Write; it covers both the Gateway policy APIs and the category and application catalogues the layer resolves names against |
 | `account_a-wan-apply`                | **required** | `Magic Transit:Edit` at account scope, and nothing else. The permission group is named after the older product and covers the Cloudflare WAN tunnel and route APIs                                                              |
+| `account_a-bulk_redirects-apply`     | **required** | `Account Filter Lists:Edit`, `Account Rulesets:Edit` at account scope, and nothing at zone scope. Can redirect any hostname the account serves |
+| `account_a-dns-apply`                | **required** | `DNS:Edit`, `Zone:Read` |
+| `account_a-lists-apply`              | **required** | `Account Filter Lists:Edit` at account scope |
+| `account_a-rules-apply`              | **required** | Not yet documented in the layer's `providers.tf`. Needs edit on the zone-level cache, late transform and origin ruleset phases, and `Zone:Read` |
+| `account_a-workers-apply`            | **required** | `Workers Scripts:Edit`, `Workers KV Storage:Edit` at account scope, and `Zone:Read`; plus `Workers Routes:Edit` only if a Worker declares routes, and `DNS:Edit` only for a custom domain |
 
 …and the same for `account_b`. Each token is scoped to **one account and one
-layer**: the scopes are the ones documented in each layer's `providers.tf`, and
+layer**: the scopes are the ones documented in each layer's `providers.tf` where it carries them, and
 splitting them is the reason the layers were split in the first place. A WAF
 token cannot delete a zone.
 
@@ -325,10 +341,12 @@ signing thumbprint removed - admits more devices everywhere the check is named,
 without a single policy diff. Give it the same reviewer list as `zerotrust` and
 `gateway`.
 
-The `zerotrust` apply environment also carries one secret no other environment
-does: **`TF_VAR_IDENTITY_PROVIDER_SECRETS`**, a JSON object of OAuth client
-secrets keyed the same way as the `identity_providers` map, exported as
-`TF_VAR_identity_provider_secrets` for the run.
+The `zerotrust` layer takes one secret: **`TF_VAR_IDENTITY_PROVIDER_SECRETS`**,
+a JSON object of OAuth client secrets keyed the same way as the
+`identity_providers` map, exported as `TF_VAR_identity_provider_secrets` for the
+run. It belongs in the **`<account>-plan`** environment, not `zerotrust`'s apply
+one: the plan step is what reads it, and apply runs the saved plan without
+re-reading `TF_VAR_`.
 
 ```
 TF_VAR_IDENTITY_PROVIDER_SECRETS = {"entra_id":"<Entra app registration client secret>"}
@@ -341,8 +359,14 @@ Terraform records what it sent - which is why this layer's state and its plan
 files are treated as credential material. See
 [../../deployment/README.md](../../deployment/README.md).
 
-The `wan` apply environment carries secrets on the same terms, and for the same
-reasons. **`TF_VAR_WAN_IPSEC_TUNNEL_PSKS`** is a JSON object of IPsec pre-shared
+Unlike the other layer secrets below, it is exported on **every** plan, set or
+not. An unset secret reaches Terraform as an empty string, which is not a valid
+map, so a `zerotrust` plan without `TF_VAR_IDENTITY_PROVIDER_SECRETS` fails with
+`Missing expression`. On an account with no identity provider secrets, set it to
+`{}`.
+
+The `wan` layer takes secrets on the same terms, and for the same reasons.
+**`TF_VAR_WAN_IPSEC_TUNNEL_PSKS`** is a JSON object of IPsec pre-shared
 keys keyed the same way as the `wan_ipsec_tunnels` map, exported as
 `TF_VAR_wan_ipsec_tunnel_psks` for the run, and
 **`TF_VAR_WAN_BGP_MD5_KEYS`** does the same for BGP session keys where any tunnel
@@ -362,11 +386,12 @@ secret for that reason alone. It is not a security control - Cloudflare's own
 documentation says MD5 is not a valid security mechanism and the key is not
 treated as a secret. It stops accidental peering, not an attacker.
 
-Neither variable is wired into [`_terraform-run.yml`](_terraform-run.yml), and
-nor is `TF_VAR_IDENTITY_PROVIDER_SECRETS`: exporting an unset environment secret
-would hand Terraform an empty string where it expects a map and fail the run for
-every layer that does not need one. Export them in the run step of your own copy
-of that workflow, conditionally on the secret being set.
+Neither variable is wired into [`_terraform-run.yml`](_terraform-run.yml) yet:
+exported unconditionally, an unset secret would hand Terraform an empty string
+where it expects a map and fail every `wan` plan without one. Export them in the
+plan step of your own copy of that workflow, conditionally on the secret being
+set - the way the `logpush` and `device_posture` ones below are - and hold them
+in **`<account>-plan`**, for the same reason those are.
 
 The `logpush` layer takes two secrets, and those are wired in:
 [`_terraform-run.yml`](_terraform-run.yml) exports them for the `logpush` layer
@@ -455,7 +480,7 @@ Error message: operation error S3: PutObject, https response error StatusCode: 4
 api error PreconditionFailed: At least one of the pre-conditions you specified did not hold.
 Lock Info:
   ID:        0cad19f9-e895-589b-6622-33ddfc27a0ae
-  Path:      <bucket>/Your-Org/dns.tfstate
+  Path:      <bucket>/account_a/dns.tfstate
   Operation: OperationTypePlan
 ```
 
@@ -480,13 +505,18 @@ interrupted apply got; the plan does.
 
 ## Adding an account or a layer
 
-Adding an **account**: create `deployment/accounts/<name>/`, then create the
-environments (`<name>-plan` and one `<name>-<layer>-apply` per layer) with their
-scoped tokens. No workflow edit.
+Adding an **account**: create `deployment/accounts/<name>/`, create
+`<name>-plan` by hand, then re-run
+[`bootstrap-environments.sh`](../scripts/bootstrap-environments.sh) for the
+`<name>-<layer>-apply` ones, and give each its own scoped token. No workflow
+edit.
 
 Adding a **layer**: create `deployment/layers/<product>/`, add
 `accounts/*/<product>.tfvars`, and create a `<account>-<product>-apply`
-environment per account.
+environment per account (`ONLY_LAYER=<product>` with
+`bootstrap-environments.sh`) holding its own token. If the layer takes a
+`TF_VAR_` secret, add a conditional export for it to the plan step in
+[`_terraform-run.yml`](_terraform-run.yml).
 
 No edit to `terraform-plan.yml` or `terraform-apply.yml` - both derive the work
 from `tf-matrix.sh` - unless the layer introduces a fourth dependency tier, in

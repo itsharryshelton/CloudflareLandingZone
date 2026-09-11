@@ -41,7 +41,7 @@ Everything you edit lives here. The modules under [../modules/](../modules/) sta
     │   ├── workers.tfvars             # edge compute     -> workers
     │   ├── zerotrust.tfvars           # Access posture   -> zerotrust
     │   ├── zone_config.tfvars         # zone settings    -> zones
-    │   └── zones.tfvars               # zone inventory   -> zones, dns, waf, lb, logpush, r2, rules, tunnels, workers
+    │   └── zones.tfvars               # zone inventory   -> zones, bulk_redirects, dns, waf, lb, logpush, r2, rules, tunnels, workers
     └── account_b/
         └── ...
 ```
@@ -135,12 +135,12 @@ export TF_VAR_device_posture_integration_secrets='{"intune":{"client_secret":"<e
 
 Terraform is executed strictly within GitHub Actions CI/CD pipelines and never on local developer or operator workstations. The project must never be initialised or applied locally: credentials, scoped API tokens, and remote state keys reside exclusively within GitHub Environments protected by strict RBAC, mandatory reviews, and approval gates.
 
-When a pull request or deployment workflow is triggered:
-1. `tf-matrix.sh` identifies the affected accounts and layers based on repository file diffs.
+Plans and applies are dispatched by hand from the Actions tab. When one runs:
+1. `tf-matrix.sh` selects every account and layer pair the `account` and `layer` inputs allow - the whole fleet by default - and sorts the layers into three apply tiers. (On a pull request, `ci.yml` uses the same script to pick pairs from the changed files for its offline plan.)
 2. The pipeline runner initialises the target layer dynamically using remote backend flags, without hardcoding bucket configurations into version control.
 3. `tf-varfiles.sh` resolves and supplies the exact `-var-file` arguments declared for that layer.
-4. The plan is generated, posted to the pull request for review, and saved as an immutable plan artifact.
-5. Upon human approval, the apply workflow consumes the exact plan file produced in the planning stage.
+4. The plan runs in the `<account>-plan` environment with a read-only token and is saved as an immutable plan artifact. A value-free summary of resource addresses and actions goes to the job summary.
+5. Upon human approval in the `<account>-<layer>-apply` environment, the apply workflow consumes the exact plan file produced in the planning stage.
 
 ### Layer Variable File Mapping
 
@@ -160,9 +160,9 @@ The pipeline maps variable files to layers dynamically. The table below lists th
 | `rules`              | `account.tfvars`, `zones.tfvars`, `rules.tfvars`          | None                                                                                                                |
 | `tunnels`            | `account.tfvars`, `zones.tfvars`, `tunnels.tfvars`        | None (no tunnel secret is sent and no connector token is read)                                                      |
 | `waf`                | `account.tfvars`, `zones.tfvars`, `waf.tfvars`            | None                                                                                                                |
-| `wan`                | `account.tfvars`, `wan.tfvars`                            | `TF_VAR_wan_ipsec_tunnel_psks`, `TF_VAR_wan_bgp_md5_keys`                                                           |
+| `wan`                | `account.tfvars`, `wan.tfvars`                            | `TF_VAR_wan_ipsec_tunnel_psks`, `TF_VAR_wan_bgp_md5_keys` (not yet exported by the pipeline)                                                           |
 | `workers`            | `account.tfvars`, `zones.tfvars`, `workers.tfvars`        | None (Worker secrets use Secrets Store)                                                                             |
-| `zerotrust`          | `account.tfvars`, `zerotrust.tfvars`                      | `TF_VAR_identity_provider_secrets`                                                                                  |
+| `zerotrust`          | `account.tfvars`, `zerotrust.tfvars`                      | `TF_VAR_identity_provider_secrets` (from the `<account>-plan` environment; must be set, `{}` if none)                                                                                  |
 | `zones`              | `account.tfvars`, `zones.tfvars`, `zone_config.tfvars`    | None                                                                                                                |
 
 ### Remote state
@@ -432,7 +432,7 @@ access_applications = {
 A Cloudflare Zero Trust organisation must exist before Access resources can be provisioned. Setting `zero_trust_team_name` adopts and manages the organisation. If left unset, the layer adopts the team name already provisioned on the account. Renaming an existing team domain breaks active Access URLs and WARP registrations, so `allow_team_name_change` must be explicitly set to authorise renames.
 
 ### Secrets Injection
-Identity provider client secrets (such as Microsoft Entra ID application registration secrets) must never be committed to `.tfvars` files. Secrets are supplied via environment variables at apply time:
+Identity provider client secrets (such as Microsoft Entra ID application registration secrets) must never be committed to `.tfvars` files. They are supplied at plan time, keyed by identity provider, from the `<account>-plan` environment's `TF_VAR_IDENTITY_PROVIDER_SECRETS`. The pipeline exports it on every plan, so it must be set whenever this layer is planned - to `{}` on an account with no identity provider secrets:
 
 ```bash
 export TF_VAR_identity_provider_secrets='{"entra_id":"<the_secret>"}'
@@ -767,7 +767,7 @@ wan_static_routes = {
 In a `/31` tunnel interface, Cloudflare occupies one IP address and the customer edge router occupies the other. Static routes must target the customer router as the next hop. The layer derives customer next-hop IP addresses automatically from `tunnel_key`, preventing configuration errors that route traffic into Cloudflare's own endpoint.
 
 ### Secrets Injection
-IPsec Pre-Shared Keys (PSKs) must never be stored in `.tfvars`. Supply them using environment variables:
+IPsec Pre-Shared Keys (PSKs), and BGP MD5 keys where a tunnel peers, must never be stored in `.tfvars`. They are supplied as `TF_VAR_wan_ipsec_tunnel_psks` and `TF_VAR_wan_bgp_md5_keys`. The pipeline does not export either yet: add a conditional export to the plan step of `_terraform-run.yml` and hold the secrets in `<account>-plan` - see [.github/workflows/README.md](../.github/workflows/README.md).
 
 ```bash
 export TF_VAR_wan_ipsec_tunnel_psks='{"london_primary":"<32_char_secure_psk>"}'
@@ -1060,7 +1060,7 @@ Within your customer's dedicated deployment repository, you can manage multiple 
    - `zones.tfvars`
 3. Update `account.tfvars` with the target Cloudflare Account ID.
 4. Populate `zones.tfvars` with your zone inventory, and configure layer-specific `.tfvars` files as required.
-5. Provision layer-scoped Cloudflare API tokens and R2 remote state storage credentials within the corresponding GitHub Environment.
+5. Create the account's `<account>-plan` environment by hand, re-run `.github/scripts/bootstrap-environments.sh` for its `<account>-<layer>-apply` environments, and give each its own scoped `CLOUDFLARE_API_TOKEN`. The R2 state credentials are repository secrets, shared by every account. See [VARIABLES_AND_SECRETS.md](../VARIABLES_AND_SECRETS.md).
 6. The CI/CD pipeline dynamically discovers the new account tree and includes it in subsequent plan and apply runs.
 
 No `.tf` orchestrator modifications are required.
@@ -1075,4 +1075,6 @@ To introduce a new Cloudflare product layer:
 4. Add `preflight.tf` to assert on all logical key references and platform guardrails at plan time.
 5. Provide a baseline `defaults.auto.tfvars` where appropriate.
 6. Add `<product>.tfvars` to each account directory under `accounts/*/`.
-7. Update `.github/scripts/tf-matrix.sh` to classify the layer into its appropriate pipeline tier.
+7. Leave `.github/scripts/tf-matrix.sh` alone unless the layer must apply first (`PREREQ_LAYERS`) or must wait for zones without reading one (`POST_ZONE_LAYERS`). Its tier is otherwise derived from the source: a `data "cloudflare_zone"` block puts it in tier 3, anything else in tier 2.
+8. Add the layer to the `ci.yml` self-test: the per-layer loop, the `zones.tfvars` expectation if it declares `zones`, and the tier 3 expectation if it resolves a zone.
+9. Create a `<account>-<product>-apply` environment per account with its own scoped token (`ONLY_LAYER=<product>` with `bootstrap-environments.sh`). If the layer takes a `TF_VAR_` secret, add a conditional export to the plan step of `_terraform-run.yml`.

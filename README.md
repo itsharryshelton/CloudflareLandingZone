@@ -158,19 +158,18 @@ CFLZ uses GitHub Actions driven strictly by GitOps workflows. Terraform is execu
 - **Distributed State Lock Recovery (`state-unlock.yml`):** Safely releases abandoned S3 conditional lockfiles in Cloudflare R2 left behind by cancelled or interrupted pipeline jobs, resolving `PreconditionFailed` deadlocks without requiring manual R2 bucket intervention.
 - **R2 State Backend with Native Locking:** Terraform state resides in Cloudflare R2 via the S3-compatible backend (`use_lockfile = true`), partitioned with one independent state key per account and layer. Native S3 conditional writes enforce distributed locking without requiring external lock tables (such as DynamoDB).
 - **Proactive API Rate Limiting:** The provider's requests are paced through a loopback HTTP rate limiter ([`cf-api-throttle.py`](.github/scripts/cf-api-throttle.py)) running inside the runner container. This prevents plan and apply runs against dense zones from breaching Cloudflare's threshold of 1,200 requests per 5 minutes per credential (HTTP 429).
-- **Least-Privilege Environment Scoping:** API tokens, backend R2 keys, and environment variables are strictly isolated across per-layer GitHub Environments (`<account>-<layer>-plan` and `<account>-<layer>-apply`), ensuring credentials cannot leak across tenant boundaries or administrative domains.
+- **Least-Privilege Environment Scoping:** Each account has one `<account>-plan` GitHub Environment holding a read-only token, and one `<account>-<layer>-apply` environment per layer holding that layer's write token behind a required reviewer, so a credential for one layer cannot change another. The R2 state keys are repository secrets scoped to the state bucket alone. See [VARIABLES_AND_SECRETS.md](VARIABLES_AND_SECRETS.md).
 
 
 
 ## Documentation
 
-| Document | For |
-|---|---|
-| [GETTING_STARTED.md](GETTING_STARTED.md) | Making a change through the pipeline, common tasks, and what the error messages mean |
-| [VARIABLES_AND_SECRETS.md](VARIABLES_AND_SECRETS.md) | Quick reference: every GitHub variable, secret and environment to set, per layer |
-| [deployment/README.md](deployment/README.md) | How layers and accounts fit together |
-| [.github/workflows/README.md](.github/workflows/README.md) | Pipeline, environments, token scopes, security notes |
-| [CONTRIBUTING.md](CONTRIBUTING.md) | Changing the Terraform rather than the configuration |
+| Document                                                   | For                                                                              |
+| ------------------------------------------------------------| ----------------------------------------------------------------------------------|
+| [VARIABLES_AND_SECRETS.md](VARIABLES_AND_SECRETS.md)       | Quick reference: every GitHub variable, secret and environment to set, per layer |
+| [deployment/README.md](deployment/README.md)               | How layers and accounts fit together                                             |
+| [.github/workflows/README.md](.github/workflows/README.md) | Pipeline, environments, token scopes, security notes                             |
+| [CONTRIBUTING.md](CONTRIBUTING.md)                         | Changing the Terraform rather than the configuration                             |
 
 > ## A Note on Feature Coverage & Maintenance
 > This project is designed to give you a solid, enterprise-ready starting point for deploying Cloudflare Landing Zones, but it doesn't cover every single Cloudflare feature out of the box. You may find that your specific deployment requires tweaking the `.tf` files to add new variables or support additional resources.  
