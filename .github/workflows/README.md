@@ -59,7 +59,7 @@ Terraform source, so adding an account, a layer or a module needs no edit here:
   | Tier | Layers | Why it is here |
   |---|---|---|
   | 1 | `account_governance` | Account-wide permissions and resource-group scope. Every later tier's token is evaluated against what this applies, so it goes out on its own and first. |
-  | 2 | `zones`, `bulk_redirects`, `gateway`, `lists`, `wan` | `zones` *creates* zones. The rest touch no zone at all, so nothing waits on them - they ride along in this tier rather than being ordered against each other. `lists` must land before `waf`, which it does by being a tier earlier. |
+  | 2 | `zones`, `bulk_redirects`, `device_posture`, `gateway`, `lists`, `wan` | `zones` *creates* zones. The rest touch no zone at all, so nothing waits on them - they ride along in this tier rather than being ordered against each other. `lists` must land before `waf`, and `device_posture` before `zerotrust`, whose Access policies name its rules; both do by being a tier earlier. |
   | 3 | `dns`, `load_balancing`, `logpush`, `r2`, `rules`, `tunnels`, `waf`, `workers`, `zerotrust` | Resolve a zone with `data "cloudflare_zone"`, which fails at plan time until tier 2 has created it. `r2` is here because a bucket can be served from a custom domain, even where no bucket currently is; `tunnels` for the same reason, since a tunnel's public hostname needs a CNAME in its zone; `logpush` because a zone-scoped job is created against its zone, even on an account whose jobs are all account-scoped. `zerotrust` is here by `POST_ZONE_LAYERS` instead: Access applications are addressed by hostname, so they need the zone to exist even though the layer never reads one. |
 
   Tier 2 and 3 membership is **derived from the Terraform source** - `zone_base`
@@ -239,6 +239,7 @@ two accounts and eight layers that is eighteen environments.
 | `account_a-r2-apply`                 | **required** | `Workers R2 Storage:Edit` at account scope; plus `Zone:Read` and `Zone DNS:Edit` only if a bucket has a custom domain                                                                                                           |
 | `account_a-account_governance-apply` | **required** | `Account Settings:Edit`, and nothing at zone scope                                                                                                                                                                              |
 | `account_a-zerotrust-apply`          | **required** | `Access: Organizations, Identity Providers, and Groups:Edit`, `Access: Apps and Policies:Edit`, `Access: Service Tokens:Edit`, all at account scope                                                                             |
+| `account_a-device_posture-apply`     | **required** | `Zero Trust:Edit` at account scope, and nothing else. The same grant as `gateway`: Cloudflare has no narrower permission group for posture rules and service provider integrations |
 | `account_a-tunnels-apply`            | **required** | `Cloudflare Tunnel:Edit` at account scope; plus `Zone:Read` and `DNS:Edit` only if an ingress rule publishes a hostname, for its proxied CNAME                                                                   |
 | `account_a-logpush-apply`            | **required** | `Logs:Edit` at account and zone scope, and `Zone:Read`; plus `Zero Trust: PII Read` at account scope only if a job pushes an Access, Gateway or DEX dataset |
 | `account_a-gateway-apply`            | **required** | `Zero Trust:Edit` at account scope, and nothing else. The API refers to the same grant as Zero Trust Write; it covers both the Gateway policy APIs and the category and application catalogues the layer resolves names against |
@@ -314,6 +315,16 @@ also need `Zero Trust: PII Read`, without which Cloudflare will not create,
 change or delete them. It changes no traffic, but give it the same reviewer list
 as `gateway` and `zerotrust`.
 
+The `device_posture` token holds `Zero Trust:Edit`, the same grant as `gateway`,
+because Cloudflare offers nothing narrower for posture. So the split this layer
+buys is of state and review, not of API scope: that token could edit a Gateway
+policy too. What it decides is quieter than it looks. Every Access and Gateway
+policy that requires a check trusts this layer's definition of passing, so
+loosening a check - a lower OS version, an EDR score threshold dropped, a
+signing thumbprint removed - admits more devices everywhere the check is named,
+without a single policy diff. Give it the same reviewer list as `zerotrust` and
+`gateway`.
+
 The `zerotrust` apply environment also carries one secret no other environment
 does: **`TF_VAR_IDENTITY_PROVIDER_SECRETS`**, a JSON object of OAuth client
 secrets keyed the same way as the `identity_providers` map, exported as
@@ -376,6 +387,20 @@ that ask for one. Both land in the saved plan and in `logpush` state in plain
 text. The plan environment has no reviewer gate, so anyone who can dispatch a
 plan can reach them - the same trade `TF_VAR_IDENTITY_PROVIDER_SECRETS` makes.
 Scope each destination credential to the one bucket or index it writes to.
+
+The `device_posture` layer takes one secret, wired in the same way and for the
+same reason held in the **`<account>-plan`** environment:
+**`TF_VAR_DEVICE_POSTURE_INTEGRATION_SECRETS`**, a JSON object of service
+provider credentials keyed like the `device_posture_integrations` map.
+
+```
+TF_VAR_DEVICE_POSTURE_INTEGRATION_SECRETS = {"intune":{"client_secret":"<Entra app registration client secret>"}}
+```
+
+Most types take `client_secret`; Uptycs takes `client_key` and `client_secret`,
+and a custom integration `access_client_secret`. Each one reads device inventory
+out of an MDM or EDR, lands in the saved plan and in `device_posture` state in
+plain text, and should be scoped read-only at the provider with an expiry.
 
 On the apply environments, also set **Deployment branches** to `main` only, so a
 branch cannot reach a write token.

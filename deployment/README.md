@@ -8,6 +8,7 @@ Everything you edit lives here. The modules under [../modules/](../modules/) sta
 ├── layers/                            # code, shared by every account
 │   ├── account_governance/            # own state: members, user groups, RBAC
 │   ├── bulk_redirects/                # own state: URL redirect lists and execution ruleset
+│   ├── device_posture/                # own state: device posture checks, MDM and EDR integrations
 │   ├── dns/                           # own state: per-zone DNS records
 │   ├── gateway/                       # own state: SWG egress filtering, TLS inspection, root CA
 │   ├── lists/                         # own state: account-level IP, ASN and hostname lists
@@ -26,6 +27,7 @@ Everything you edit lives here. The modules under [../modules/](../modules/) sta
     │   ├── account.tfvars             # account id       -> every layer
     │   ├── account_governance.tfvars  # dashboard access -> account_governance
     │   ├── bulk_redirects.tfvars      # URL redirects    -> bulk_redirects
+    │   ├── device_posture.tfvars      # posture checks   -> device_posture
     │   ├── dns.tfvars                 # DNS records      -> dns
     │   ├── gateway.tfvars             # egress filtering -> gateway
     │   ├── lists.tfvars               # shared lists     -> lists
@@ -59,6 +61,7 @@ Tier 1: Platform Authorisation
 Tier 2: Foundational Zones & Account Services
 ├── zones                              (provisions zone containers, rate plans, and baseline TLS posture)
 ├── bulk_redirects                     (account-scoped redirect lists and rules; independent of zones)
+├── device_posture                     (account-scoped posture checks and MDM/EDR integrations; required before zerotrust)
 ├── gateway                            (account-scoped SWG policies, TLS decryption settings, root CA)
 ├── lists                              (account-scoped IP, ASN, and hostname lists; required before WAF)
 └── wan                                (account-scoped Magic WAN tunnels and static routes)
@@ -77,7 +80,7 @@ Tier 3: Zone-Dependent & Consumer Layers
 
 Tier membership is derived directly from the Terraform source code:
 - **Tier 1 (`account_governance`):** Account-wide permissions and resource-group scopes. Every downstream token is evaluated against what this layer applies, so it runs on its own first.
-- **Tier 2 (`zones`, `bulk_redirects`, `gateway`, `lists`, `wan`):** `zones` creates the zone containers at Cloudflare. The remaining layers touch no zones, so nothing waits on them. `lists` is deliberately placed in Tier 2 so that named lists exist before `waf` references them.
+- **Tier 2 (`zones`, `bulk_redirects`, `device_posture`, `gateway`, `lists`, `wan`):** `zones` creates the zone containers at Cloudflare. The remaining layers touch no zones, so nothing waits on them. `lists` is deliberately placed in Tier 2 so that named lists exist before `waf` references them, and `device_posture` so that a posture rule exists before a `zerotrust` Access policy requires it.
 - **Tier 3 (`dns`, `load_balancing`, `logpush`, `r2`, `rules`, `tunnels`, `waf`, `workers`, `zerotrust`):** These layers resolve zones dynamically via `data "cloudflare_zone"`, which fails at plan time until Tier 2 has created the zone. `tunnels` resolves one for the proxied CNAME behind each public hostname, and `logpush` one for each zone-scoped job. `zerotrust` is included here because Access applications are addressed by hostname and require the corresponding zone and DNS record to exist.
 
 ## Why split this way
@@ -98,7 +101,7 @@ This design requires the Cloudflare API to be accessible at plan time for consum
 
 `account_governance` queries the API to resolve role, permission group, and resource group names to IDs. `zerotrust` queries the account's existing Zero Trust organisation to adopt the configured team name. `gateway` dynamically resolves Cloudflare's content categories, security categories, and application catalogues so that configuration files reference human-readable names like `"Microsoft 365"` rather than arbitrary IDs like `606`.
 
-`wan`, `bulk_redirects`, and `lists` are completely account-scoped and contain no zone data sources.
+`wan`, `bulk_redirects`, `lists`, and `device_posture` are completely account-scoped and contain no zone data sources.
 
 ## Config precedence
 
@@ -123,6 +126,7 @@ export AWS_SECRET_ACCESS_KEY="<R2 secret key for state backend>"
 export TF_VAR_identity_provider_secrets='{"entra_id":"<oauth_client_secret>"}'
 export TF_VAR_wan_ipsec_tunnel_psks='{"london_primary":"<pre_shared_key>"}'
 export TF_VAR_logpush_destination_secrets='{"audit_archive":"r2://<bucket>/audit/{DATE}?account-id=<id>&access-key-id=<key_id>&secret-access-key=<secret>"}'
+export TF_VAR_device_posture_integration_secrets='{"intune":{"client_secret":"<entra_app_client_secret>"}}'
 ```
 
 `.gitignore` enforces default-deny rules for `*.tfvars`, with explicit whitelisting for `layers/*/defaults.auto.tfvars` and `accounts/*/*.tfvars`. It explicitly re-denies `**/terraform.tfvars`, `**/local.auto.tfvars`, and `**/*.local.tfvars`.
@@ -142,23 +146,24 @@ When a pull request or deployment workflow is triggered:
 
 The pipeline maps variable files to layers dynamically. The table below lists the configuration files and sensitive environment variables consumed by each layer during automated execution:
 
-| Layer | Required `-var-file` Arguments | Sensitive Environment Variables |
-|---|---|---|
-| `account_governance` | `account.tfvars`, `account_governance.tfvars` | None |
-| `bulk_redirects` | `account.tfvars`, `zones.tfvars`, `bulk_redirects.tfvars` | None |
-| `dns` | `account.tfvars`, `zones.tfvars`, `dns.tfvars` | None |
-| `gateway` | `account.tfvars`, `gateway.tfvars` | None |
-| `lists` | `account.tfvars`, `lists.tfvars` | None |
-| `load_balancing` | `account.tfvars`, `zones.tfvars`, `load_balancing.tfvars` | None |
-| `logpush` | `account.tfvars`, `zones.tfvars`, `logpush.tfvars` | `TF_VAR_logpush_destination_secrets`, `TF_VAR_logpush_ownership_challenges` (from the `<account>-plan` environment) |
-| `r2` | `account.tfvars`, `zones.tfvars`, `r2.tfvars` | None |
-| `rules` | `account.tfvars`, `zones.tfvars`, `rules.tfvars` | None |
-| `tunnels` | `account.tfvars`, `zones.tfvars`, `tunnels.tfvars` | None (no tunnel secret is sent and no connector token is read) |
-| `waf` | `account.tfvars`, `zones.tfvars`, `waf.tfvars` | None |
-| `wan` | `account.tfvars`, `wan.tfvars` | `TF_VAR_wan_ipsec_tunnel_psks`, `TF_VAR_wan_bgp_md5_keys` |
-| `workers` | `account.tfvars`, `zones.tfvars`, `workers.tfvars` | None (Worker secrets use Secrets Store) |
-| `zerotrust` | `account.tfvars`, `zerotrust.tfvars` | `TF_VAR_identity_provider_secrets` |
-| `zones` | `account.tfvars`, `zones.tfvars`, `zone_config.tfvars` | None |
+| Layer                | Required `-var-file` Arguments                            | Sensitive Environment Variables                                                                                     |
+| ----------------------| -----------------------------------------------------------| ---------------------------------------------------------------------------------------------------------------------|
+| `account_governance` | `account.tfvars`, `account_governance.tfvars`             | None                                                                                                                |
+| `bulk_redirects`     | `account.tfvars`, `zones.tfvars`, `bulk_redirects.tfvars` | None                                                                                                                |
+| `device_posture`     | `account.tfvars`, `device_posture.tfvars`                 | `TF_VAR_device_posture_integration_secrets` (from the `<account>-plan` environment)                                 |
+| `dns`                | `account.tfvars`, `zones.tfvars`, `dns.tfvars`            | None                                                                                                                |
+| `gateway`            | `account.tfvars`, `gateway.tfvars`                        | None                                                                                                                |
+| `lists`              | `account.tfvars`, `lists.tfvars`                          | None                                                                                                                |
+| `load_balancing`     | `account.tfvars`, `zones.tfvars`, `load_balancing.tfvars` | None                                                                                                                |
+| `logpush`            | `account.tfvars`, `zones.tfvars`, `logpush.tfvars`        | `TF_VAR_logpush_destination_secrets`, `TF_VAR_logpush_ownership_challenges` (from the `<account>-plan` environment) |
+| `r2`                 | `account.tfvars`, `zones.tfvars`, `r2.tfvars`             | None                                                                                                                |
+| `rules`              | `account.tfvars`, `zones.tfvars`, `rules.tfvars`          | None                                                                                                                |
+| `tunnels`            | `account.tfvars`, `zones.tfvars`, `tunnels.tfvars`        | None (no tunnel secret is sent and no connector token is read)                                                      |
+| `waf`                | `account.tfvars`, `zones.tfvars`, `waf.tfvars`            | None                                                                                                                |
+| `wan`                | `account.tfvars`, `wan.tfvars`                            | `TF_VAR_wan_ipsec_tunnel_psks`, `TF_VAR_wan_bgp_md5_keys`                                                           |
+| `workers`            | `account.tfvars`, `zones.tfvars`, `workers.tfvars`        | None (Worker secrets use Secrets Store)                                                                             |
+| `zerotrust`          | `account.tfvars`, `zerotrust.tfvars`                      | `TF_VAR_identity_provider_secrets`                                                                                  |
+| `zones`              | `account.tfvars`, `zones.tfvars`, `zone_config.tfvars`    | None                                                                                                                |
 
 ### Remote state
 
@@ -196,6 +201,7 @@ Keys are scoped locally to each account tree: `primary` in `account_a` is comple
 - A zone-scoped Logpush job on a zone below Enterprise, a dataset pushed from the wrong scope, or a credential committed in a Logpush destination fails the plan.
 - A user group assigning an undeclared member fails the plan.
 - An unmanaged root CA certificate or uninspected HTTP rule in Gateway fails the plan.
+- A firewall posture check that passes a disabled firewall, a binary check with no signing thumbprint, a posture result that expires before it is refreshed, or a service provider integration missing its credential fails the plan.
 
 ---
 
@@ -443,6 +449,74 @@ Service token secrets are generated by Cloudflare and stored in state. They are 
 | `lock_dashboard_to_read_only` | `false` | When enabled, locks the Zero Trust dashboard to read-only, establishing GitOps as the sole modification route. |
 | `default_session_duration` | `"24h"` | Default session lifespan before re-authentication is required. |
 | `default_service_token_duration` | `"8760h"` | One-year lifespan for service tokens. Prevents unrotated perpetual tokens. |
+
+---
+
+## Device Posture
+
+The `device_posture` layer manages the checks a device must pass before an Access or Gateway policy lets it through - Cloudflare One Client checks run on the device (client running, OS version, disk encryption, firewall, a signed EDR binary, a corporate serial number) - and the service provider integrations that read a verdict from an MDM or EDR: Intune, CrowdStrike, SentinelOne, Kolide, Tanium, Workspace ONE, Uptycs or a custom API.
+
+It is deliberately separate from `zerotrust`. Two layers consume a posture rule - Access policies in `zerotrust` and Gateway policies in `gateway` - and applying it in Tier 2 means a rule exists before either names it. It also keeps the MDM and EDR credentials out of `zerotrust` state, which already holds identity provider secrets and service tokens.
+
+```hcl
+# accounts/account_a/device_posture.tfvars
+device_posture_rules = {
+  require_client = { name = "Cloudflare One Client Running", type = "warp" }
+
+  windows_supported_build = {
+    name      = "Windows 11 23H2 or Later"
+    type      = "os_version"
+    platforms = ["windows"]
+    input     = { operating_system = "windows", operator = ">=", version = "10.0.22631" }
+  }
+
+  intune_compliant = {
+    name            = "Intune Compliant"
+    type            = "intune"
+    integration_key = "intune"
+    input           = { compliance_status = "compliant" }
+  }
+}
+
+device_posture_integrations = {
+  intune = {
+    name   = "Microsoft Intune"
+    type   = "intune"
+    config = { client_id = "<application id>", customer_id = "<tenant id>" }
+  }
+}
+```
+
+### Referencing a Rule
+Neither consuming layer can read this layer's state, so a rule is referenced by ID: apply it, read `device_posture_rule_ids` from this layer's outputs, and put the ID in `device_posture_ids` (`zerotrust.tfvars`) or `device_posture_check_ids` (`gateway.tfvars`).
+
+Renaming a rule replaces it and changes its ID. Removing one that a policy still names leaves the policy requiring a check nothing can pass - and because this layer applies first, removing both in one run deletes the rule before the policy stops naming it. Remove the reference, apply, then remove the rule.
+
+### Secrets Injection
+An integration's credential never goes in `.tfvars`. It is supplied at plan time, keyed by integration, from the `<account>-plan` environment's `TF_VAR_DEVICE_POSTURE_INTEGRATION_SECRETS`:
+
+```bash
+export TF_VAR_device_posture_integration_secrets='{"intune":{"client_secret":"<entra_app_client_secret>"}}'
+```
+
+The plan fails for an integration missing a setting or credential its type needs, and for a credential no integration reads. Cloudflare tests the connection on create, so a wrong credential still fails at apply. The example account trees keep their integrations commented out, because CI plans this layer offline with no secrets.
+
+### Governing defaults
+
+| Setting                         | Default      | Effect                                                                                                                                                                                         |
+| ---------------------------------| --------------| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `default_posture_schedule`      | `"5m"`       | Client re-check interval, stated explicitly as Cloudflare's own default.                                                                                                                       |
+| `default_integration_interval`  | `"10m"`      | How often Cloudflare polls a service provider.                                                                                                                                                 |
+| `derive_posture_expiration`     | `true`       | A rule with no expiration gets twice its polling period. Without one, a device that stops reporting keeps its last pass indefinitely. An explicit expiration shorter than that fails the plan. |
+| `require_signed_binary_checks`  | `true`       | Fails the plan for a file or application check with no signing thumbprint, which any file at that path would pass.                                                                             |
+| `restricted_posture_rule_types` | `["tanium"]` | Refuses the legacy Access-only Tanium check, which Gateway cannot evaluate.                                                                                                                    |
+
+A firewall check with `enabled = false` always fails the plan: it passes only devices whose firewall is off.
+
+### Out of Scope
+- **Zero Trust lists:** the serial number or device ID list a `serial_number` or `unique_client_id` check reads is maintained outside Terraform, and referenced by `list_id`.
+- **Client certificates:** the signing certificate a `client_certificate_v2` check validates against is uploaded separately, and referenced by `certificate_id`.
+- **WARP client deployment and device profiles.**
 
 ---
 
@@ -965,10 +1039,11 @@ The Release Manager automates:
 Within your customer's dedicated deployment repository, you can manage multiple administrative accounts (for example: `production`, `staging`, `development`):
 
 1. Create a directory `accounts/<account_name>/`.
-2. Copy all seventeen template `.tfvars` files from `accounts/account_a/`:
+2. Copy all eighteen template `.tfvars` files from `accounts/account_a/`:
    - `account.tfvars`
    - `account_governance.tfvars`
    - `bulk_redirects.tfvars`
+   - `device_posture.tfvars`
    - `dns.tfvars`
    - `gateway.tfvars`
    - `lists.tfvars`

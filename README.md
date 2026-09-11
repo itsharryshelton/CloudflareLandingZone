@@ -64,6 +64,7 @@ Monolithic Terraform states create catastrophic blast radius vulnerabilities wit
 Platform Layer (Central Governance)
 ├── account_governance   (RBAC, user groups, audit configuration)
 ├── zerotrust            (Access applications, service tokens, IdPs)
+├── device_posture       (Device posture checks, MDM and EDR integrations such as Intune and CrowdStrike)
 ├── tunnels              (Cloudflare Tunnels, public hostnames, private network routes)
 ├── gateway              (SWG egress filtering: DNS, network, and HTTP)
 ├── logpush              (Log streams: audit, Gateway and zone logs to a SIEM or R2 - Enterprise)
@@ -166,6 +167,7 @@ CFLZ uses GitHub Actions driven strictly by GitOps workflows. Terraform is execu
 | Document | For |
 |---|---|
 | [GETTING_STARTED.md](GETTING_STARTED.md) | Making a change through the pipeline, common tasks, and what the error messages mean |
+| [VARIABLES_AND_SECRETS.md](VARIABLES_AND_SECRETS.md) | Quick reference: every GitHub variable, secret and environment to set, per layer |
 | [deployment/README.md](deployment/README.md) | How layers and accounts fit together |
 | [.github/workflows/README.md](.github/workflows/README.md) | Pipeline, environments, token scopes, security notes |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Changing the Terraform rather than the configuration |

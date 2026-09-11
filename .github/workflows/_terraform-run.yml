@@ -310,15 +310,21 @@ jobs:
           TF_VAR_identity_provider_secrets: ${{ secrets.TF_VAR_IDENTITY_PROVIDER_SECRETS }}
           LOGPUSH_DESTINATION_SECRETS: ${{ inputs.layer == 'logpush' && secrets.TF_VAR_LOGPUSH_DESTINATION_SECRETS || '' }}
           LOGPUSH_OWNERSHIP_CHALLENGES: ${{ inputs.layer == 'logpush' && secrets.TF_VAR_LOGPUSH_OWNERSHIP_CHALLENGES || '' }}
+          DEVICE_POSTURE_INTEGRATION_SECRETS: ${{ inputs.layer == 'device_posture' && secrets.TF_VAR_DEVICE_POSTURE_INTEGRATION_SECRETS || '' }}
         run: |
           set -euo pipefail
+          # Exported only when set: an unset secret would reach Terraform as an
+          # empty string where it expects a map, and fail the run.
           if [[ -n "${LOGPUSH_DESTINATION_SECRETS:-}" ]]; then
             export TF_VAR_logpush_destination_secrets="$LOGPUSH_DESTINATION_SECRETS"
           fi
           if [[ -n "${LOGPUSH_OWNERSHIP_CHALLENGES:-}" ]]; then
             export TF_VAR_logpush_ownership_challenges="$LOGPUSH_OWNERSHIP_CHALLENGES"
           fi
-          unset LOGPUSH_DESTINATION_SECRETS LOGPUSH_OWNERSHIP_CHALLENGES
+          if [[ -n "${DEVICE_POSTURE_INTEGRATION_SECRETS:-}" ]]; then
+            export TF_VAR_device_posture_integration_secrets="$DEVICE_POSTURE_INTEGRATION_SECRETS"
+          fi
+          unset LOGPUSH_DESTINATION_SECRETS LOGPUSH_OWNERSHIP_CHALLENGES DEVICE_POSTURE_INTEGRATION_SECRETS
 
           # Which account var files this layer takes is derived from the config,
           # not hardcoded - see .github/scripts/tf-varfiles.sh. Written to a file
