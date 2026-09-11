@@ -85,46 +85,81 @@ Application Layer (Zone & Workload Scope)
 
 
 ## Deployment & Multi-Tenant Model
+
 While the repository supports standalone deployments out of the box, enterprise environments should follow two core architectural patterns:
 
 ### 1. Isolated Per-Customer Repositories
+
 Do not run multiple customers inside a single repository directory. Managing multiple clients under one repo shares pipeline permissions and state keys, exposing all clients to a single operator error.
 
-> Best Practice: Copy or fork this repository into the customer’s own isolated estate (their GitHub Org, their R2 state bucket, their scoped API tokens).
+> [!TIP]
+> **Best Practice:** Copy or fork this repository into the customer’s own isolated estate (their GitHub Organisation, their R2 state bucket, their scoped API tokens) using the [Release Manager](https://github.com/itsharryshelton/CloudflareLandingZone-Release-Manager).
 
 ### 2. Externalised Versioned Modules
-While modules/ sits inside this repository for development convenience for this template repo: production environments should reference tagged, external module repositories:
+
+While `modules/` sits inside this repository for development convenience in this upstream template, production environments should reference tagged, external module repositories:
 
 ```hcl
-module "zone_base" {
-  source = "git::https://github.com/<your-org>/cloudflare-lz-modules.git//modules/zone_base?ref=v1.4.0"
+module "dns" {
+  source = "git::https://github.com/your-org/terraform-cloudflare-lz-dns.git?ref=v1.2.0"
 }
 ```
-This guarantees that changes on main do not automatically alter live infrastructure until a customer explicitly bumps their module version.
+
+This guarantees that changes on `main` do not automatically alter live infrastructure until a customer explicitly bumps their module version in their deployment layer.
+
+## Architectural Decisions: CFLZ vs Cloudflare Guidance
+
+Cloudflare's official Terraform best practices recommend organising configurations strictly by **Account > Zone > Product** (e.g., `account_a/zone_a/dns/`) and explicitly advise operators to *"Avoid modules (or use them sparingly)"*. While adequate for simple setups with a handful of domains, that layout collapses under enterprise and MSP operational demands. CFLZ deliberately takes an alternative architectural route.
+
+### 1. Resolving Cloudflare's "Avoid Modules" Dilemma
+
+Cloudflare’s official documentation warns against modules primarily because teams often create monolithic, polymorphic abstractions that hide critical security and network behaviours behind complex ternary operators and unpinned local paths. When a shared monolithic module changes internally, dependent resources can be unexpectedly altered or recreated.
+
+CFLZ's production model-using dedicated repositories with isolated scopes and immutable SemVer tags-directly resolves Cloudflare's critique:
+
+- **Interface Stability:** Breaking changes to a module (such as modifying required inputs or altering resource addressing that triggers recreation) cannot reach target customer environments without an explicit, intentional tag bump in the layer's `.tf` file.
+- **Independent Lifecycle:** An update to `terraform-cloudflare-lz-waf` does not alter the checksum or state lifecycle of `terraform-cloudflare-lz-dns`.
+- **Auditability:** Dedicated repositories allow fine-grained commit histories and vulnerability tracking per Cloudflare product area, aligning directly with enterprise change management and ISO/SOC2 audit standards.
+
+> [!IMPORTANT]
+> **Enforce GitHub Tag Protection & Commit-Pinned Sources:** In a production implementation (as opposed to this upstream template repository), each module should reside in its own dedicated repository. Operators must configure **GitHub Tag Protection Rules** on module repositories to guarantee that release tags cannot be overwritten or deleted. For maximum immutability, layers should reference tagged releases or commit SHAs.
+
+### 2. Fleet Orchestration vs Zone Directory Duplication
+
+Cloudflare's recommended structure treats each zone as a filesystem directory containing duplicate `.tf` files. For an enterprise or MSP managing 50+ zones across multiple accounts, this leads to hundreds of redundant files: bumping a provider version or adjusting a baseline setting requires edits across dozens of directories.
+
+CFLZ inverts this relationship:
+- **Product Layers as Root Orchestrators:** Code lives once under `deployment/layers/<product>/`.
+- **Zones as Data Declarations:** Zones are managed as entries (`for_each` maps) inside `deployment/accounts/<account>/*.tfvars`.
+- **Targeted Operations Without Monoliths:** Unlike monolithic workspaces, layers can be targeted individually in CI/CD pipelines (`tf-matrix.sh`), ensuring fast execution, discrete plans, and an isolated blast radius per product.
+
 
 
 ## CI/CD Pipeline & State Management
 
-CFLZ uses GitHub Actions driven strictly by GitOps workflows. Terraform is executed only inside the pipeline-never on local developer workstations.
+CFLZ uses GitHub Actions driven strictly by GitOps workflows. Terraform is executed exclusively inside the pipeline - never on local developer workstations.
 
-| Workflow | Trigger | Touches Cloudflare |
-|---|---|---|
-| `ci.yml` | every pull request and push | no |
-| `terraform-plan.yml` | pull requests touching Terraform, manual | reads |
-| `terraform-apply.yml` | push to `main`, manual | reads and writes, after approval |
+| Workflow                                                       | Trigger                          | Touches Cloudflare? | Can change anything?              |
+| ----------------------------------------------------------------| ----------------------------------| ---------------------| -----------------------------------|
+| [`ci.yml`](.github/workflows/ci.yml)                           | Every PR, every push to `main`   | No                  | No (offline validation & linting) |
+| [`secret-scanning.yml`](.github/workflows/secret-scanning.yml) | Every PR, push to `main`, manual | No                  | No                                |
+| [`terraform-plan.yml`](.github/workflows/terraform-plan.yml)   | Manual dispatch only             | Reads               | No                                |
+| [`terraform-apply.yml`](.github/workflows/terraform-apply.yml) | Manual dispatch only             | Reads & writes      | Yes, after human approval         |
+| [`state-forget.yml`](.github/workflows/state-forget.yml)       | Manual dispatch only             | No                  | State only, after approval        |
+| [`state-unlock.yml`](.github/workflows/state-unlock.yml)       | Manual dispatch only             | No                  | State lock only, after approval   |
+| [`_terraform-run.yml`](.github/workflows/_terraform-run.yml)   | Reusable (called by plan/apply)  | Per caller mode     | Controlled by caller              |
 
-Apply always consumes a plan file produced earlier in the same run, so the change a
-reviewer approved is the change that executes. There is no `-auto-approve` anywhere,
-and no destroy path.
+### Operational Governance & Safety Guardrails
 
-State lives in Cloudflare R2 through the S3 compatible backend, one key per account
-per layer.
+- **Apply Never Runs Without an Approved Plan:** `terraform-apply.yml` has no automated `push` trigger. Merging code to `main` never applies changes to live infrastructure automatically. When ready, operators trigger the apply workflow manually. It plans first, publishes the plan artifact, halts for designated human reviewer approval within the target GitHub Environment, and then applies that exact, immutable plan file. There is no `-auto-approve` flag and no destroy path anywhere in the platform.
+- **Automated Secret Scanning (`secret-scanning.yml`):** Runs on every pull request, push to `main`, and manual dispatch. It enforces automated credential leak detection (via `betterleaks`) to guarantee that sensitive credentials-such as Cloudflare API tokens, Entra ID client secrets, or R2 access keys - are never committed to version control.
+- **Zero-Downtime State Refactoring (`state-forget.yml`):** A maintenance workflow that instructs Terraform to forget a resource without deleting it at Cloudflare (`terraform state rm`). This facilitates moving resources between layers (for example, handing DNS records from the `zones` layer over to the dedicated `dns` layer) without edge disruption, gated by explicit human approval.
+- **Distributed State Lock Recovery (`state-unlock.yml`):** Safely releases abandoned S3 conditional lockfiles in Cloudflare R2 left behind by cancelled or interrupted pipeline jobs, resolving `PreconditionFailed` deadlocks without requiring manual R2 bucket intervention.
+- **R2 State Backend with Native Locking:** Terraform state resides in Cloudflare R2 via the S3-compatible backend (`use_lockfile = true`), partitioned with one independent state key per account and layer. Native S3 conditional writes enforce distributed locking without requiring external lock tables (such as DynamoDB).
+- **Proactive API Rate Limiting:** The provider's requests are paced through a loopback HTTP rate limiter ([`cf-api-throttle.py`](.github/scripts/cf-api-throttle.py)) running inside the runner container. This prevents plan and apply runs against dense zones from breaching Cloudflare's threshold of 1,200 requests per 5 minutes per credential (HTTP 429).
+- **Least-Privilege Environment Scoping:** API tokens, backend R2 keys, and environment variables are strictly isolated across per-layer GitHub Environments (`<account>-<layer>-plan` and `<account>-<layer>-apply`), ensuring credentials cannot leak across tenant boundaries or administrative domains.
 
-Terraform runs in the pipeline and nowhere else. Not on an operator's machine, and not
-on a contributor's either. Credentials and state keys stay in GitHub Environments,
-where they are scoped per account and per layer and can be rotated in one place. A
-change reaches a customer by pull request, plan, review and approval, so there is
-always a recorded plan behind it.
+
 
 ## Documentation
 
