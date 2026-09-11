@@ -89,5 +89,12 @@ resource "terraform_data" "preflight" {
       condition     = length(local.observability_disabled) == 0
       error_message = "These Workers have Workers Logs switched off: ${join("; ", local.observability_disabled)}. A Worker on a route is in the request path, and logging cannot be turned on retroactively for the requests you needed. If the concern is volume, set observability.head_sampling_rate instead, or set allow_disabled_observability = true in layers/workers/defaults.auto.tfvars."
     }
+
+    # Tags are written after the apply by a job that only sees the output, so a
+    # bad key would otherwise surface there - after this plan was approved.
+    precondition {
+      condition     = length(local.resource_tag_problems) == 0
+      error_message = "resource_tags in accounts/<account>/tags.tfvars: ${join("; ", local.resource_tag_problems)}."
+    }
   }
 }

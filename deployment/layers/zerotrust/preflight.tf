@@ -72,5 +72,12 @@ resource "terraform_data" "preflight" {
       condition     = length(local.orphaned_identity_provider_secrets) == 0
       error_message = "identity_provider_secrets holds entries for keys that are not in var.identity_providers: ${join(", ", local.orphaned_identity_provider_secrets)}. Either the provider was removed and the secret was not, or the key is misspelled and the provider it was meant for is about to be created without one. Revoke the secret at the identity provider and remove it from the environment."
     }
+
+    # Tags are written after the apply by a job that only sees the output, so a
+    # bad key would otherwise surface there - after this plan was approved.
+    precondition {
+      condition     = length(local.resource_tag_problems) == 0
+      error_message = "resource_tags in accounts/<account>/tags.tfvars: ${join("; ", local.resource_tag_problems)}."
+    }
   }
 }

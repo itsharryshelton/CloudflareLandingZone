@@ -11,7 +11,7 @@ it - token scopes, security trade-offs, rate limiting - see
 |---|---|---|---|
 | 1 | [Repository variables](#1-repository-variables) | Repo **Settings → Secrets and variables → Actions → Variables** | 3 |
 | 2 | [Repository secrets](#2-repository-secrets) | Repo **Settings → Secrets and variables → Actions → Secrets** | 3 |
-| 3 | [Environments](#3-environments) | Repo **Settings → Environments** | 1 + one per layer, per account |
+| 3 | [Environments](#3-environments) | Repo **Settings → Environments** | 2 + one per layer, per account |
 | 4 | [`CLOUDFLARE_API_TOKEN`](#4-cloudflare_api_token---one-per-environment) | Environment secret, in **every** environment | 1 per environment |
 | 5 | [Layer secrets (`TF_VAR_*`)](#5-layer-secrets-tf_var_) | Environment secret, `<account>-plan` | Only for layers that use them |
 
@@ -50,16 +50,19 @@ Setup steps: [Reading the private modules repository](.github/workflows/README.m
 
 ## 3. Environments
 
-Per account, you need **one plan environment plus one apply environment per
-layer** - one more than there are directories under `deployment/layers/`.
+Per account, you need **one plan environment, one apply environment per layer,
+and one for the resource tags job** - two more than there are directories under
+`deployment/layers/`.
 
 | Environment | Reviewers | Deployment branches | Created by |
 |---|---|---|---|
 | `<account>-plan` | none | any (manual plans run from feature branches) | **you, by hand** |
 | `<account>-<layer>-apply` | **required** | `main` only | [`bootstrap-environments.sh`](.github/scripts/bootstrap-environments.sh) |
+| `<account>-tags-apply` | none - it only tags what an approved apply just output | `main` only | [`bootstrap-environments.sh`](.github/scripts/bootstrap-environments.sh) |
 
 ```bash
-# Creates every <account>-<layer>-apply environment found in the tree, gated and main-only
+# Creates every <account>-<layer>-apply environment found in the tree, gated and
+# main-only, plus <account>-tags-apply, main-only with no reviewers
 REVIEWER_TEAMS="cf-admins" bash .github/scripts/bootstrap-environments.sh
 ```
 
@@ -91,6 +94,7 @@ the CSV once they are all uploaded.
 | `<account>-logpush-apply` | `logpush` | `terraform-logpush-apply` | `Logs:Edit` (account + zone), `Zone:Read`; `Zero Trust: PII Read` for Access/Gateway/DEX datasets |
 | `<account>-r2-apply` | `r2` | `terraform-r2-apply` | `Workers R2 Storage:Edit`; `Zone:Read` + `DNS:Edit` if a bucket has a custom domain |
 | `<account>-rules-apply` | `rules` | *not created - make by hand* | Not yet documented in the layer's `providers.tf`. Needs edit on the zone-level cache, late transform and origin ruleset phases, and `Zone:Read` |
+| `<account>-tags-apply` | none - the resource tags job | `terraform-tags-apply` | Resource Tagging write at account scope, plus zone scope for zone tags. Beta groups, found by name - never `Access: Tags` |
 | `<account>-tunnels-apply` | `tunnels` | `terraform-tunnels-apply` | `Cloudflare Tunnel:Edit`; `Zone:Read` + `DNS:Edit` if a hostname is published |
 | `<account>-waf-apply` | `waf` | `terraform-waf-apply` | `Zone WAF:Edit`, `Zone:Read` |
 | `<account>-wan-apply` | `wan` | `terraform-wan-apply` | `Magic Transit:Edit` |
@@ -193,11 +197,11 @@ They are **not** stored in GitHub.
 | | `CSV_OUTPUT_PATH` | no (prompts) | Where to write the token CSV |
 | | `ONLY_TOKEN` | no | Create one token only, e.g. `terraform-waf-apply` |
 | | `DRY_RUN` | no | `1` = print payloads, create nothing |
-| `bootstrap-environments.sh` | `REVIEWER_TEAMS` or `REVIEWER_USERS` | one of them | Space-separated team slugs or usernames |
+| `bootstrap-environments.sh` | `REVIEWER_TEAMS` or `REVIEWER_USERS` | one of them, unless `ONLY_LAYER=tags` | Space-separated team slugs or usernames |
 | | `PREVENT_SELF_REVIEW` | no (default `true`) | Needs a second reviewer to be workable |
 | | `WAIT_TIMER` | no (default `0`) | Minutes before approval is offered |
 | | `DEPLOY_BRANCH` | no (default `main`) | Only branch allowed to apply |
-| | `ONLY_LAYER` | no | Create environments for one layer only |
+| | `ONLY_LAYER` | no | Create environments for one layer only, or `tags` for the tags environment |
 | | `REPO` | no | `owner/name`, defaults to the origin remote |
 | | `DRY_RUN` | no | `1` = print changes, touch nothing |
 

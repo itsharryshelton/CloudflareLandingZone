@@ -107,9 +107,9 @@ jobs:
           #
           # Deliberately a blacklist and not a character allowlist: a state
           # index key can contain the resource's own data, and DNS record
-          # content is close to arbitrary text. The SPF record in this account's
-          # test zone is a working example -
-          # cloudflare_dns_record.this["TXT/plintdc.com/v=spf1 include:... -all"]
+          # content is close to arbitrary text. An SPF record is a working
+          # example -
+          # cloudflare_dns_record.this["TXT/example.com/v=spf1 include:... -all"]
           # - so an allowlist that forbids spaces, or `=`, or `:`, rejects real
           # addresses. What is checked instead is that the address starts like
           # one and carries nothing that suggests a mangled copy-paste.

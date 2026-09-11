@@ -74,6 +74,63 @@ Terraform source, so adding an account, a layer or a module needs no edit here:
 `ci.yml` asserts all three, so a regression in the derivation fails a PR rather
 than silently causing a merged change never to be planned.
 
+## Resource tags
+
+Zones, Access applications, R2 buckets, KV namespaces and Workers carry
+[Cloudflare resource tags](https://developers.cloudflare.com/resource-tagging/) -
+`environment`, `team`, and anything else an account wants to filter or report
+by. The Cloudflare provider has no tagging resource yet (none as of 5.24.0) and
+the Tagging API is in public beta, so tags are written by
+[`resource-tags.sh`](../scripts/resource-tags.sh) rather than by Terraform.
+Terraform still decides what they are:
+
+1. **`accounts/<account>/tags.tfvars`** assigns one variable, `resource_tags`:
+   account-wide defaults, the values a key may take, and per-type defaults and
+   per-resource tags keyed by the same logical keys as the other tfvars. Its
+   header carries the precedence rules.
+2. **Each tagging layer** - `zones`, `zerotrust`, `r2`, `workers` - declares that
+   variable, validates the shared settings and its own section at plan time
+   (unknown resource keys, malformed tag keys, values outside
+   `allowed_values`), and outputs the complete tag set of every resource it
+   owns, with its ID, as `resource_tags`. See `tags.tf` in each. Every resource
+   also carries `managed-by = terraform` and `layer = <layer>`, which tfvars
+   cannot override, so a `tag=!managed-by` filter finds what was made by hand.
+3. **The apply job** exports that output as an artifact straight after
+   `terraform apply`. Only it can read state, and state is the only thing that
+   knows the IDs.
+4. **The `resource tags` job** in `terraform-apply.yml` runs once per account
+   after the last tier, downloads that run's manifests and makes Cloudflare
+   match them. It reads each resource's tags and writes only the ones that
+   differ, so a run with nothing to change writes nothing. It runs in its own
+   `<account>-tags-apply` environment: no layer's token needs tag write, and the
+   tag token can do nothing but tag. That environment has **no reviewers** - the
+   job starts by itself once the Terraform tiers finish. It only writes what an
+   apply the reviewers have just approved output, and it has no plan of its own
+   to show, so a second approval would add a click and no information. The tag
+   diff each resource got is in the job summary. The environment is still
+   restricted to `main`, which is what keeps the token off other branches.
+
+A tag change is therefore an ordinary change. Edit `tags.tfvars`, and the apply
+re-plans the four layers - the plan shows only `Changes to Outputs` - and the
+tags job writes the difference.
+
+- **Cloudflare replaces a resource's whole tag set on every write.** A tag added
+  in the dashboard to a resource Terraform manages is removed on the next apply.
+  Resources outside the manifests - Workers deployed with wrangler, say - are
+  never touched.
+- **DNS records are not tagged.** An account can hold thousands, and the beta
+  caps an account at 10,000 tags.
+- **A layer whose apply failed is not re-tagged in that run**, because it
+  uploaded no manifest. The layers that did apply still are, and the next
+  successful apply catches the rest up.
+- **To tag another layer's resources**, declare `resource_tags` there, add a
+  `tags.tf` that outputs the same shape, and add the layer to the `tags.tfvars`
+  expectation in `ci.yml`. The workflows find tagging layers by the output, so
+  neither needs an edit.
+- **When the provider ships a tagging resource**, `for_each` it over the same
+  locals in each `tags.tf`, then delete the script, its job and the
+  `<account>-tags-apply` environments.
+
 ## API rate limiting
 
 Cloudflare allows **1200 API requests per five minutes per credential**. The
@@ -120,10 +177,11 @@ request count, 429s retried, worst queue wait — to the job summary. **A non-ze
 about the limiter exiting early means Terraform went unpaced and any 429 in that
 log has a different cause.
 
-Two things do *not* go through it, both deliberately: `init` (which fetches
-providers and modules from the registry and GitHub, not from Cloudflare) and the
+Three things do *not* go through it, all deliberately: `init` (which fetches
+providers and modules from the registry and GitHub, not from Cloudflare), the
 post-apply `kv-bulk-load.sh` (which uses `wrangler`, and moves 15,000 keys in a
-handful of bulk calls).
+handful of bulk calls), and `resource-tags.sh`, which runs in a job of its own
+with a token of its own - a separate 1200-request budget - and paces itself.
 
 ### Credential handling
 
@@ -233,13 +291,15 @@ whoever last edited it remembered to make it.
 
 ### Environments
 
-Per account: **one plan environment, plus one apply environment per layer** -
-one more environment than there are directories under `deployment/layers/`.
-Create `<account>-plan` by hand;
-[`bootstrap-environments.sh`](../scripts/bootstrap-environments.sh) creates
-every `<account>-<layer>-apply` with its reviewer gate and `main`-only branch
-policy. [VARIABLES_AND_SECRETS.md](../../VARIABLES_AND_SECRETS.md) lists every
-value each one needs.
+Per account: **one plan environment, one apply environment per layer, and
+`<account>-tags-apply`** for the [resource tags](#resource-tags) job - two more
+environments than there are directories under `deployment/layers/`. Create
+`<account>-plan` by hand;
+[`bootstrap-environments.sh`](../scripts/bootstrap-environments.sh) creates the
+rest with a `main`-only branch policy: every `<account>-<layer>-apply` with its
+reviewer gate, and `<account>-tags-apply` without one.
+[VARIABLES_AND_SECRETS.md](../../VARIABLES_AND_SECRETS.md) lists every value each
+one needs.
 
 | Environment                          | Reviewers    | `CLOUDFLARE_API_TOKEN` scope                                                                                                                                                                                                    |
 | --------------------------------------| --------------| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
@@ -260,6 +320,7 @@ value each one needs.
 | `account_a-lists-apply`              | **required** | `Account Filter Lists:Edit` at account scope |
 | `account_a-rules-apply`              | **required** | Not yet documented in the layer's `providers.tf`. Needs edit on the zone-level cache, late transform and origin ruleset phases, and `Zone:Read` |
 | `account_a-workers-apply`            | **required** | `Workers Scripts:Edit`, `Workers KV Storage:Edit` at account scope, and `Zone:Read`; plus `Workers Routes:Edit` only if a Worker declares routes, and `DNS:Edit` only for a custom domain |
+| `account_a-tags-apply`               | none         | Resource Tagging write at account scope, plus zone scope for zone tags, and nothing else. Used by the `resource tags` job, not by a layer. The groups are in beta and not in Cloudflare's published list, so `bootstrap-account-tokens.sh` finds them by name - and never takes `Access: Tags`, a different feature |
 
 …and the same for `account_b`. Each token is scoped to **one account and one
 layer**: the scopes are the ones documented in each layer's `providers.tf` where it carries them, and
@@ -508,8 +569,9 @@ interrupted apply got; the plan does.
 Adding an **account**: create `deployment/accounts/<name>/`, create
 `<name>-plan` by hand, then re-run
 [`bootstrap-environments.sh`](../scripts/bootstrap-environments.sh) for the
-`<name>-<layer>-apply` ones, and give each its own scoped token. No workflow
-edit.
+`<name>-<layer>-apply` ones and `<name>-tags-apply`, and give each its own
+scoped token. No workflow edit. Give it a `tags.tfvars` too, or its resources
+carry only the `managed-by` and `layer` tags.
 
 Adding a **layer**: create `deployment/layers/<product>/`, add
 `accounts/*/<product>.tfvars`, and create a `<account>-<product>-apply`
@@ -529,7 +591,8 @@ layer turns it red until it is added to:
 
 - the per-layer loop that checks a `<layer>.tfvars` change selects only that layer;
 - the `zones.tfvars` expectation, if the layer declares the `zones` variable;
-- the tier 3 expectation, if the layer resolves a zone through a data source.
+- the tier 3 expectation, if the layer resolves a zone through a data source;
+- the `tags.tfvars` expectation, if the layer declares `resource_tags`.
 
 That is deliberate. The self-test exists so a mistake in the derivation cannot
 merge silently, and a new layer landing in the wrong tier is exactly the mistake

@@ -422,6 +422,19 @@ jobs:
             echo "::notice::$acct/zone_config.tfvars is absent or assigns nothing - assertion skipped"
           fi
 
+          # tags.tfvars owns var.resource_tags, which every layer that tags its
+          # resources declares, and only those. Each reads its own section, so the
+          # file must reach all of them - a layer missing here would silently stop
+          # being re-planned, and so re-tagged, when its tags change.
+          if [[ -f "deployment/accounts/$acct/tags.tfvars" ]] &&
+             grep -qE '^[a-zA-Z_][a-zA-Z0-9_]*[[:space:]]*=' "deployment/accounts/$acct/tags.tfvars"; then
+            assert_matrix "resource tags reach exactly the tagging layers" \
+              "deployment/accounts/$acct/tags.tfvars" \
+              "$(expect "$acct:r2" "$acct:workers" "$acct:zerotrust" "$acct:zones")" || rc=1
+          else
+            echo "::notice::$acct/tags.tfvars is absent or assigns nothing - assertion skipped"
+          fi
+
           # Worker source and KV data live inside the layer, so a change to one is
           # a layer change and re-plans every account - which is what should
           # happen when the code every Worker runs is edited.

@@ -6,6 +6,13 @@ resource "terraform_data" "preflight" {
       condition     = length(local.orphaned_zone_config_keys) == 0
       error_message = "zone_config has entries with no matching zone in var.zones: ${join(", ", local.orphaned_zone_config_keys)}. Valid zone keys: ${join(", ", keys(var.zones))}. Left unchecked those zones would deploy with no DNS records."
     }
+
+    # Tags are written after the apply by a job that only sees the output, so a
+    # bad key would otherwise surface there - after this plan was approved.
+    precondition {
+      condition     = length(local.resource_tag_problems) == 0
+      error_message = "resource_tags in accounts/<account>/tags.tfvars: ${join("; ", local.resource_tag_problems)}."
+    }
   }
 }
 

@@ -134,7 +134,7 @@ Ask yourself whether the module would make sense to somebody who has never seen
 ## Adding an account
 
 Create `deployment/accounts/<name>/` with the tfvars files, then create the
-GitHub environments. No workflow edit and no `.tf` edit. The scripts discover
+GitHub environments, `<name>-tags-apply` included. No workflow edit and no `.tf` edit. The scripts discover
 accounts from the directory tree.
 
 ## Configuration rules

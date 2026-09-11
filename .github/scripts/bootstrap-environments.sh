@@ -11,6 +11,10 @@
 #   <account>-plan           read-only token, no gate. Created by hand, and left
 #                            alone here - it must run on PR branches.
 #   <account>-<layer>-apply  one per layer, created here, each gated.
+#   <account>-tags-apply     the resource-tags job in terraform-apply.yml. Not
+#                            a layer, but it holds a token, so it is created
+#                            here with the same main-only branch policy - and
+#                            no reviewers. See STAGE_ENVS below.
 #
 # Accounts and layers are read out of the working tree for the same reason
 # tf-matrix.sh reads them: adding a layer must not need an edit in two places.
@@ -24,7 +28,8 @@
 #
 # Reads from the environment:
 #   REPO                 owner/name. Defaults to the origin remote.
-#   REVIEWER_USERS       space-separated usernames. One of these two is required.
+#   REVIEWER_USERS       space-separated usernames. One of these two is required,
+#                        unless ONLY_LAYER names an ungated stage environment.
 #   REVIEWER_TEAMS       space-separated team slugs in the repo's org.
 #   PREVENT_SELF_REVIEW  true|false - see below.
 #   WAIT_TIMER           minutes before the approval prompt is offered. 0 = at once.
@@ -56,6 +61,27 @@ DEPLOY_BRANCH="${DEPLOY_BRANCH:-main}"
 ONLY_LAYER="${ONLY_LAYER:-all}"
 DRY_RUN="${DRY_RUN:-0}"
 
+# Pipeline jobs that hold a Cloudflare token but are not a layer. Each gets an
+# <account>-<name>-apply environment with the same main-only branch policy as a
+# layer's, can be picked out with ONLY_LAYER like one, and has NO reviewers:
+#
+#   tags  the resource-tags job. It writes only what an apply the reviewers have
+#         just approved output, its token can do nothing but tag, and it has no
+#         plan of its own to show - a second approval would be a click with
+#         nothing behind it.
+#
+# The environment is kept rather than dropped because it is what scopes the
+# token to this job and keeps it off every branch but DEPLOY_BRANCH.
+STAGE_ENVS=(tags)
+
+is_stage_env() {
+  local s
+  for s in "${STAGE_ENVS[@]}"; do
+    if [[ "$s" == "$1" ]]; then return 0; fi
+  done
+  return 1
+}
+
 command -v gh >/dev/null || { echo "::error::gh not found - https://cli.github.com/" >&2; exit 1; }
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
@@ -72,7 +98,7 @@ esac
 [[ "$WAIT_TIMER" =~ ^[0-9]+$ ]] || {
   echo "::error::WAIT_TIMER must be a whole number of minutes, got '$WAIT_TIMER'" >&2; exit 1; }
 
-if [[ -z "$REVIEWER_USERS" && -z "$REVIEWER_TEAMS" ]]; then
+if [[ -z "$REVIEWER_USERS" && -z "$REVIEWER_TEAMS" ]] && ! is_stage_env "$ONLY_LAYER"; then
   # Failing here rather than defaulting: an environment created with no reviewers
   # looks identical in the Actions UI to one with them, and the first anybody
   # would notice is a write token applying unreviewed.
@@ -96,6 +122,9 @@ mapfile -t ALL_LAYERS < <(list_subdirs "$REPO_ROOT/deployment/layers")
 [[ ${#ACCOUNTS[@]}   -gt 0 ]] || { echo "::error::no accounts under deployment/accounts" >&2; exit 1; }
 [[ ${#ALL_LAYERS[@]} -gt 0 ]] || { echo "::error::no layers under deployment/layers" >&2; exit 1; }
 
+# Stage environments are selected exactly like layers from here on.
+ALL_LAYERS+=("${STAGE_ENVS[@]}")
+
 if [[ "$ONLY_LAYER" == "all" ]]; then
   LAYERS=("${ALL_LAYERS[@]}")
 else
@@ -110,6 +139,7 @@ echo "Repo:     $REPO"
 echo "Accounts: ${ACCOUNTS[*]}"
 echo "Layers:   ${LAYERS[*]}"
 echo "Gate:     reviewers required, ${DEPLOY_BRANCH} only, prevent_self_review=${PREVENT_SELF_REVIEW}"
+echo "          except ${STAGE_ENVS[*]}: ${DEPLOY_BRANCH} only, no reviewers"
 echo
 
 # ---------------------------------------------------------------------------
@@ -160,11 +190,33 @@ body="$(cat <<JSON
 JSON
 )"
 
+# Stage environments: the same branch policy, and an explicit empty reviewer
+# list rather than an omitted one, so a re-run also clears reviewers from an
+# environment that was created gated.
+stage_body="$(cat <<JSON
+{
+  "wait_timer": 0,
+  "reviewers": [],
+  "deployment_branch_policy": {
+    "protected_branches": false,
+    "custom_branch_policies": true
+  }
+}
+JSON
+)"
+
 created=0
 updated=0
 for account in "${ACCOUNTS[@]}"; do
   for layer in "${LAYERS[@]}"; do
     env_name="${account}-${layer}-apply"
+
+    env_body="$body"
+    gate="gated"
+    if is_stage_env "$layer"; then
+      env_body="$stage_body"
+      gate="no reviewers"
+    fi
 
     if gh api "repos/$REPO/environments/$env_name" >/dev/null 2>&1; then
       action=update; updated=$((updated + 1))
@@ -173,13 +225,13 @@ for account in "${ACCOUNTS[@]}"; do
     fi
 
     if [[ "$DRY_RUN" == "1" ]]; then
-      printf '%-6s %s\n' "$action" "$env_name"
+      printf '%-6s %s (%s)\n' "$action" "$env_name" "$gate"
       continue
     fi
 
     gh api -X PUT "repos/$REPO/environments/$env_name" \
       -H 'Accept: application/vnd.github+json' \
-      --input - <<<"$body" >/dev/null
+      --input - <<<"$env_body" >/dev/null
 
     # The PUT above only switches custom branch policies ON - it does not populate
     # the list, and an empty list means NO branch may deploy. This call is not
@@ -190,7 +242,7 @@ for account in "${ACCOUNTS[@]}"; do
         -f "name=$DEPLOY_BRANCH" -f 'type=branch' >/dev/null
     fi
 
-    printf '%-6s %s\n' "$action" "$env_name"
+    printf '%-6s %s (%s)\n' "$action" "$env_name" "$gate"
   done
 done
 

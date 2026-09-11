@@ -11,6 +11,9 @@
 #           by hostname (zerotrust). Cannot be planned until tier 2 has run.
 #
 # Which layer lands in which tier is derived in .github/scripts/tf-matrix.sh, not listed here.
+#
+# After the last tier, the resource-tags job applies Cloudflare resource tags
+# from the manifests the tagging layers exported - see resource-tags.sh.
 
 name: Terraform Apply
 
@@ -49,6 +52,7 @@ jobs:
       tier1_any: ${{ steps.select.outputs.tier1_any }}
       tier2_any: ${{ steps.select.outputs.tier2_any }}
       any: ${{ steps.select.outputs.any }}
+      tag_accounts: ${{ steps.tags.outputs.tag_accounts }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -63,6 +67,27 @@ jobs:
           ONLY_ACCOUNT: ${{ inputs.account || 'all' }}
           ONLY_LAYER: ${{ inputs.layer || 'all' }}
         run: bash .github/scripts/tf-matrix.sh
+
+      # Accounts the resource-tags job runs for: those with a tagging layer among
+      # the selected pairs. A layer tags if it outputs resource_tags - read from
+      # the source like every other classification here, so a layer that starts
+      # tagging needs no edit to this workflow.
+      - name: Select accounts to tag
+        id: tags
+        env:
+          MATRIX: ${{ steps.select.outputs.matrix }}
+        run: |
+          set -euo pipefail
+          tagging=()
+          for layer_dir in deployment/layers/*/; do
+            if grep -rhqE '^[[:space:]]*output[[:space:]]+"resource_tags"' "$layer_dir"*.tf; then
+              tagging+=("$(basename "$layer_dir")")
+            fi
+          done
+          layers_json="$(jq -c -n '$ARGS.positional' --args "${tagging[@]}")"
+          accounts="$(jq -c --argjson ls "$layers_json" '[.[] | select(.layer as $l | $ls | index($l)) | .account] | unique' <<<"$MATRIX")"
+          echo "tagging layers: $layers_json - accounts to tag: $accounts"
+          echo "tag_accounts=$accounts" >>"$GITHUB_OUTPUT"
 
       - name: Refuse to run if the dependency graph is deeper than this workflow
         env:
@@ -117,6 +142,7 @@ jobs:
       mode: apply
       environment: ${{ matrix.account }}-${{ matrix.layer }}-apply
       plan_artifact: tfplan-${{ matrix.account }}-${{ matrix.layer }}-${{ github.run_id }}-${{ github.run_attempt }}
+      tags_artifact: tags__${{ matrix.account }}__${{ matrix.layer }}__${{ github.run_id }}-${{ github.run_attempt }}
     secrets: inherit
 
   # TIER 2 - zones, plus every layer that touches no zone.
@@ -160,6 +186,7 @@ jobs:
       mode: apply
       environment: ${{ matrix.account }}-${{ matrix.layer }}-apply
       plan_artifact: tfplan-${{ matrix.account }}-${{ matrix.layer }}-${{ github.run_id }}-${{ github.run_attempt }}
+      tags_artifact: tags__${{ matrix.account }}__${{ matrix.layer }}__${{ github.run_id }}-${{ github.run_attempt }}
     secrets: inherit
 
   # TIER 3 - layers that need a zone to already exist.
@@ -202,7 +229,72 @@ jobs:
       mode: apply
       environment: ${{ matrix.account }}-${{ matrix.layer }}-apply
       plan_artifact: tfplan-${{ matrix.account }}-${{ matrix.layer }}-${{ github.run_id }}-${{ github.run_attempt }}
+      tags_artifact: tags__${{ matrix.account }}__${{ matrix.layer }}__${{ github.run_id }}-${{ github.run_attempt }}
     secrets: inherit
+
+  # RESOURCE TAGS - after the last tier, from what each tagging layer has just
+  # output. Not Terraform: the provider has no tagging resource yet. See
+  # .github/scripts/resource-tags.sh and "Resource tags" in the README.
+  #
+  # A job of its own, in an environment of its own, so no layer's token needs
+  # tag write and the tag token can do nothing but tag. That environment has no
+  # reviewers: the job writes only what the approved applies above just output,
+  # and has no plan of its own to show, so it starts as soon as they finish.
+  resource-tags:
+    name: resource tags
+    needs: [discover, apply-tier0, apply-tier1, apply-tier2]
+    # Runs if any apply ran at all, including one that partly failed: the layers
+    # that did apply uploaded a manifest, and only those are tagged. Skipped when
+    # the run selected no tagging layer.
+    if: >-
+      !cancelled() &&
+      needs.discover.outputs.tag_accounts != '[]' &&
+      (needs['apply-tier0'].result != 'skipped' ||
+       needs['apply-tier1'].result != 'skipped' ||
+       needs['apply-tier2'].result != 'skipped')
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        account: ${{ fromJSON(needs.discover.outputs.tag_accounts) }}
+    environment: ${{ matrix.account }}-tags-apply
+    # One tagging run per account at a time. Not cancel-in-progress, for the
+    # same reason as the Terraform runs: a cancelled run stops between writes.
+    concurrency:
+      group: tags-${{ matrix.account }}
+      cancel-in-progress: false
+    env:
+      ACCOUNT_DIR: deployment/accounts/${{ matrix.account }}
+      TAGS_ENVIRONMENT: ${{ matrix.account }}-tags-apply
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+    steps:
+      - uses: actions/checkout@v7
+
+      # Double underscores in the artifact name, so one account's pattern
+      # cannot match another account whose name it is a prefix of.
+      - name: Download this run's tag manifests
+        uses: actions/download-artifact@v8
+        with:
+          pattern: tags__${{ matrix.account }}__*__${{ github.run_id }}-${{ github.run_attempt }}
+          merge-multiple: true
+          path: resource-tags
+
+      - name: Apply resource tags
+        run: |
+          set -euo pipefail
+          if [[ -z "${CLOUDFLARE_API_TOKEN:-}" ]]; then
+            echo "::error::missing secret CLOUDFLARE_API_TOKEN (environment '$TAGS_ENVIRONMENT'). See .github/workflows/README.md."
+            exit 1
+          fi
+          # The account ID is a fact of the account tree, read the same way
+          # _terraform-run.yml reads it for the token check and the KV load.
+          CLOUDFLARE_ACCOUNT_ID="$(grep -oE '[0-9a-f]{32}' "$ACCOUNT_DIR/account.tfvars" | head -n1)"
+          export CLOUDFLARE_ACCOUNT_ID
+          bash .github/scripts/resource-tags.sh resource-tags
+
+      - name: Remove the manifests
+        if: always()
+        run: rm -rf resource-tags
 
   # ---------------------------------------------------------------------------
   apply-complete:
@@ -217,6 +309,7 @@ jobs:
         apply-tier1,
         plan-tier2,
         apply-tier2,
+        resource-tags,
       ]
     if: always()
     steps:
@@ -233,9 +326,10 @@ jobs:
             [apply-tier1]='${{ needs['apply-tier1'].result }}'
             [plan-tier2]='${{ needs['plan-tier2'].result }}'
             [apply-tier2]='${{ needs['apply-tier2'].result }}'
+            [resource-tags]='${{ needs['resource-tags'].result }}'
           )
 
-          STAGES=(discover plan-tier0 apply-tier0 plan-tier1 apply-tier1 plan-tier2 apply-tier2)
+          STAGES=(discover plan-tier0 apply-tier0 plan-tier1 apply-tier1 plan-tier2 apply-tier2 resource-tags)
 
           {
             echo "### Apply run summary"

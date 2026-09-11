@@ -6,7 +6,9 @@
 # MODES
 #   plan   init, plan to a file, upload the plan as an artifact, publish a
 #          value-free summary of what would change.
-#   apply  init, download that same plan file, `terraform apply <plan>`.
+#   apply  init, download that same plan file, `terraform apply <plan>`. A
+#          layer that outputs resource_tags then exports it for the
+#          resource-tags job in terraform-apply.yml.
 #
 # Apply NEVER generates its own plan, by design so that a reviewer has approved what is being applied
 # =============================================================================
@@ -74,6 +76,14 @@ on:
         required: false
         type: number
         default: 5
+      tags_artifact:
+        description: >-
+          Apply only. Artifact to upload the layer's `resource_tags` output to,
+          for the resource-tags job in terraform-apply.yml. A layer with no such
+          output uploads nothing; empty skips the export altogether.
+        required: false
+        type: string
+        default: ''
 
 # NOTE: `permissions` is deliberately not declared here. A called workflow cannot
 # hold more than its caller granted, so each caller sets its own least-privilege
@@ -491,6 +501,36 @@ jobs:
           terraform apply -lock-timeout=5m -input=false \
             -parallelism="$TF_PARALLELISM" tfplan
 
+      # Tags are written by the resource-tags job in terraform-apply.yml, with a
+      # token of its own, from what this layer has just applied - see
+      # resource-tags.sh. Exported here because only this job can read state,
+      # and state is the only thing that knows the IDs. Straight after apply and
+      # ahead of the KV load, so a failed load cannot cost the run its tags.
+      - name: Export the resource tag manifest
+        id: tags
+        if: inputs.mode == 'apply' && inputs.tags_artifact != ''
+        env:
+          LAYER: ${{ inputs.layer }}
+        run: |
+          set -euo pipefail
+          if ! grep -rhqE '^[[:space:]]*output[[:space:]]+"resource_tags"' "$LAYER_DIR"/*.tf; then
+            echo "$LAYER_DIR outputs no resource_tags - nothing to export"
+            exit 0
+          fi
+          mkdir -p resource-tags
+          terraform -chdir="$LAYER_DIR" output -json resource_tags >"resource-tags/$LAYER.json"
+          echo "$(jq -r '.resources | length' "resource-tags/$LAYER.json") resource(s) in the tag manifest"
+          echo "exported=true" >>"$GITHUB_OUTPUT"
+
+      - name: Upload the resource tag manifest
+        if: steps.tags.outputs.exported == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ inputs.tags_artifact }}
+          path: resource-tags/${{ inputs.layer }}.json
+          retention-days: ${{ inputs.plan_retention_days }}
+          if-no-files-found: error
+
       # Bulk KV data is loaded after apply if used
       - name: Setup Node for wrangler
         if: inputs.mode == 'apply' && inputs.layer == 'workers'
@@ -556,3 +596,4 @@ jobs:
           rm -f "$LAYER_DIR/backend.generated.tf" "$LAYER_DIR/tfplan" \
                 "$LAYER_DIR/tfplan.json" varfiles.txt comment.md \
                 "$CF_THROTTLE_PID" "$CF_THROTTLE_LOG"
+          rm -rf resource-tags
