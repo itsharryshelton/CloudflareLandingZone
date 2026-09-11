@@ -210,11 +210,13 @@ $(for account in "${ACCOUNTS[@]}"; do
     done
   done)
 
-Three layers also take a secret that is not a Cloudflare token, on the same terms:
-  zerotrust  TF_VAR_IDENTITY_PROVIDER_SECRETS     {"entra_id":"<client secret>"}
-  wan        TF_VAR_WAN_IPSEC_TUNNEL_PSKS         once wan_ipsec_tunnels is populated
-  logpush    TF_VAR_LOGPUSH_DESTINATION_SECRETS   {"<job key>":"<destination URI, credential included>"}
-             TF_VAR_LOGPUSH_OWNERSHIP_CHALLENGES  {"<job key>":"<token>"}, where a destination asks for one
-The logpush ones go in <account>-plan, not an apply environment: the plan reads
-them, and apply runs the saved plan without re-reading TF_VAR_.
+Four layers also take a secret that is not a Cloudflare token, on the same terms:
+  zerotrust       TF_VAR_IDENTITY_PROVIDER_SECRETS           {"entra_id":"<client secret>"}
+  wan             TF_VAR_WAN_IPSEC_TUNNEL_PSKS               once wan_ipsec_tunnels is populated
+  logpush         TF_VAR_LOGPUSH_DESTINATION_SECRETS         {"<job key>":"<destination URI, credential included>"}
+                  TF_VAR_LOGPUSH_OWNERSHIP_CHALLENGES        {"<job key>":"<token>"}, where a destination asks for one
+  device_posture  TF_VAR_DEVICE_POSTURE_INTEGRATION_SECRETS  {"<integration key>":{"client_secret":"<secret>"}}
+The logpush and device_posture ones go in <account>-plan, not an apply
+environment: the plan reads them, and apply runs the saved plan without
+re-reading TF_VAR_.
 EOF

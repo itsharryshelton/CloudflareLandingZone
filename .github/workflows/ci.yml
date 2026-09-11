@@ -385,7 +385,7 @@ jobs:
           # other. load_balancing is deliberately not in the list: its tfvars is
           # currently a commented-out example, and a file that assigns nothing
           # selects every layer for that account by design.
-          for layer in account_governance bulk_redirects dns gateway lists logpush r2 rules tunnels waf wan workers zerotrust; do
+          for layer in account_governance bulk_redirects device_posture dns gateway lists logpush r2 rules tunnels waf wan workers zerotrust; do
             if [[ ! -f "deployment/accounts/$acct/$layer.tfvars" ]]; then
               echo "::notice::$acct has no $layer.tfvars - assertion skipped"
               continue
@@ -492,6 +492,21 @@ jobs:
             rc=1
           else
             echo "ok: lists applies ahead of waf, so a list exists before a rule names it"
+          fi
+
+          # An Access policy names a posture rule by ID, and an ID is not a
+          # Terraform dependency either. device_posture reads no zone, so the
+          # derivation puts it in tier 2 - ahead of zerotrust - and that is the
+          # only thing ordering the two. A data source added to it would move it
+          # into tier 3 alongside zerotrust, racing the policies that name it.
+          posture_tier="$(layer_tier device_posture)"
+          zerotrust_tier="$(layer_tier zerotrust)"
+          if [[ -z "$posture_tier" || -z "$zerotrust_tier" || "$posture_tier" -ge "$zerotrust_tier" ]]; then
+            echo "::error::the device_posture layer must apply in an earlier tier than zerotrust" \
+                 "(device_posture=${posture_tier:-absent}, zerotrust=${zerotrust_tier:-absent}, full order: $order)"
+            rc=1
+          else
+            echo "ok: device_posture applies ahead of zerotrust, so a posture rule exists before a policy requires it"
           fi
 
           # terraform-apply.yml declares a fixed number of sequential stages,

@@ -555,6 +555,26 @@ TOKEN_SPECS["terraform-logpush-apply"]="$(cat <<JSON
 JSON
 )"
 
+# 9d. terraform-deviceposture-apply
+# Zero Trust Write is the only grant that reaches posture rules and service
+# provider integrations - the same one the gateway token holds.
+DEVICE_POSTURE_ACCT_PERMS="$(build_perm_array "account" "Zero Trust:Edit|Zero Trust Write")"
+TOKEN_SPECS["terraform-deviceposture-apply"]="$(cat <<JSON
+{
+  "name": "terraform-deviceposture-apply",
+  "policies": [
+    {
+      "effect": "allow",
+      "permission_groups": $DEVICE_POSTURE_ACCT_PERMS,
+      "resources": {
+        "$ACCOUNT_RESOURCE": "*"
+      }
+    }
+  ]
+}
+JSON
+)"
+
 # 10. terraform-zone-apply
 ZONE_PERMS="$(build_perm_array "zone" \
   "DNS:Edit|DNS Write" \
@@ -583,6 +603,7 @@ JSON
 TOKEN_NAMES=(
   "terraform-plan"
   "terraform-accountgovernance-apply"
+  "terraform-deviceposture-apply"
   "terraform-dns-apply"
   "terraform-gateway-apply"
   "terraform-loadbalancing-apply"
@@ -684,6 +705,7 @@ SECURITY WARNING & NEXT STEPS:
 
    gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-plan
    gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-account_governance-apply
+   gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-device_posture-apply
    gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-dns-apply
    gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-gateway-apply
    gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-load_balancing-apply
