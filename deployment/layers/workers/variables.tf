@@ -79,7 +79,7 @@ variable "kv_namespaces" {
     Declare the namespace here, leave `pairs` empty, and load it from the pipeline
     against the namespace ID this layer outputs:
 
-      wrangler kv bulk put ./redirects/esl-uk.json --namespace-id "$NAMESPACE_ID" --remote
+      wrangler kv bulk put ./data/bulk/redirects-uk.json --namespace-id "$NAMESPACE_ID" --remote
 
     That is the supported replacement for hand-rolled curl loops against the KV
     bulk endpoint, and it keeps the data out of the plan while Terraform still
@@ -510,4 +510,57 @@ variable "allow_disabled_observability" {
     volume or cost, set `head_sampling_rate` instead: a tenth of the requests
     still answers "is it working".
   EOT
+}
+
+# Resource tags (accounts/<account>/tags.tfvars)
+variable "resource_tags" {
+  description = <<-EOT
+    Cloudflare resource tags. The same file reaches every layer that tags - zones,
+    zerotrust, r2 and workers - and each reads `defaults`, `allowed_values` and
+    its own section, ignoring the rest. Declared in full everywhere because
+    Terraform rejects a .tfvars attribute the type does not declare.
+
+    - `defaults`       - (Optional) Tags for every resource of every type.
+    - `allowed_values` - (Optional) Tag key => the only values it may take, so
+                         "prod" and "production" cannot split one filter.
+    - `zones`, `access_applications`, `r2_buckets`, `kv_namespaces`,
+      `worker_scripts` - (Optional) One per resource type, each with:
+                           `defaults`  - tags for every resource of the type
+                           `resources` - logical key => tags for one resource,
+                                         keyed as in that type's own tfvars
+
+    Later wins: defaults, then <type>.defaults, then <type>.resources[key]. A
+    null value drops a key an earlier level set. `managed-by` and `layer` are
+    set by the layer itself and rejected here.
+
+    Nothing in Terraform calls the Tagging API - the provider has no resource
+    for it. tags.tf resolves each resource's set and outputs it as
+    `resource_tags`, and .github/scripts/resource-tags.sh applies it after the
+    apply.
+  EOT
+  type = object({
+    defaults       = optional(map(string), {})
+    allowed_values = optional(map(list(string)), {})
+    zones = optional(object({
+      defaults  = optional(map(string), {})
+      resources = optional(map(map(string)), {})
+    }), {})
+    access_applications = optional(object({
+      defaults  = optional(map(string), {})
+      resources = optional(map(map(string)), {})
+    }), {})
+    r2_buckets = optional(object({
+      defaults  = optional(map(string), {})
+      resources = optional(map(map(string)), {})
+    }), {})
+    kv_namespaces = optional(object({
+      defaults  = optional(map(string), {})
+      resources = optional(map(map(string)), {})
+    }), {})
+    worker_scripts = optional(object({
+      defaults  = optional(map(string), {})
+      resources = optional(map(map(string)), {})
+    }), {})
+  })
+  default = {}
 }

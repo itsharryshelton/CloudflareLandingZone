@@ -22,8 +22,13 @@ every value in state, prints it in a plan, and issues one API call per key on
 every apply.
 
 A dataset - a redirect table, a catalogue - does not belong here at any size that
-would make it interesting. Declare the namespace with no `pairs_file`, and load it
-from the pipeline against the ID the layer outputs:
+would make it interesting. Declare the namespace with no `pairs_file` and commit
+the dataset to `data/bulk/`, named after the namespace title minus its
+environment suffix - `redirects-uk-prod` and `redirects-uk-dev` both read
+`data/bulk/redirects-uk.json`. After every `workers` apply,
+[`kv-bulk-load.sh`](../../../../../.github/scripts/kv-bulk-load.sh) loads it
+against the ID the layer outputs, then deletes any key the file no longer lists.
+By hand, the load is:
 
 ```bash
 NAMESPACE_ID=$(terraform -chdir=deployment/layers/workers output -json kv_namespaces \

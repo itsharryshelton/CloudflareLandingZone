@@ -33,5 +33,12 @@ resource "terraform_data" "preflight" {
       condition     = length(local.bucket_wide_expiry_rules) == 0
       error_message = "These lifecycle rules delete objects with an empty prefix, which means the entire bucket on a schedule: ${join("; ", local.bucket_wide_expiry_rules)}. R2 has no versioning, so nothing deleted comes back. Scope the rule with a prefix, or set allow_bucket_wide_object_expiry = true in layers/r2/defaults.auto.tfvars if the bucket really is scratch space."
     }
+
+    # Tags are written after the apply by a job that only sees the output, so a
+    # bad key would otherwise surface there - after this plan was approved.
+    precondition {
+      condition     = length(local.resource_tag_problems) == 0
+      error_message = "resource_tags in accounts/<account>/tags.tfvars: ${join("; ", local.resource_tag_problems)}."
+    }
   }
 }

@@ -230,6 +230,27 @@ get_all_zerotrust_write_perms() {
   ]'
 }
 
+# Helper to find Resource Tagging write permissions at one scope ("account" or
+# "zone"). Resource Tagging is in beta and its permission groups are not in
+# Cloudflare's published list, so they are found by name. "Access: Tags" is
+# excluded by name: those are Access application tags, a different feature, and
+# a loose match on "Tags" would otherwise hand this token Access write.
+get_tagging_write_perms() {
+  echo "$PERM_GROUPS_JSON" | jq --arg scope "$1" '[
+    .[] |
+    select(
+      if $scope == "account" then ((.scopes // []) | index("com.cloudflare.api.account") != null)
+      else ((.scopes // []) | index("com.cloudflare.api.account.zone") != null) end
+    ) |
+    select(
+      (.name | test("(^| )tag"; "i")) and
+      (.name | test("access"; "i") | not) and
+      ((.name | endswith("Write")) or (.name | endswith("Edit")))
+    ) |
+    {id: .id}
+  ]'
+}
+
 echo "Permission catalogue loaded successfully."
 echo
 
@@ -599,6 +620,27 @@ TOKEN_SPECS["terraform-zone-apply"]="$(cat <<JSON
 JSON
 )"
 
+# 11. terraform-tags-apply
+TAGS_ACCT_PERMS="$(get_tagging_write_perms account)"
+TAGS_ZONE_PERMS="$(get_tagging_write_perms zone)"
+if [[ "$(jq 'length' <<<"$TAGS_ACCT_PERMS")" -eq 0 ]]; then
+  echo "[WARNING] No Resource Tagging write permission group in the catalogue - terraform-tags-apply cannot be provisioned. Check the group names under Account API Tokens in the dashboard." >&2
+  TOKEN_SPECS["terraform-tags-apply"]=""
+else
+  if [[ "$(jq 'length' <<<"$TAGS_ZONE_PERMS")" -eq 0 ]]; then
+    echo "[WARNING] No zone-scoped Resource Tagging write group found - terraform-tags-apply will be account-scoped only, and tagging zones may be refused." >&2
+  fi
+  TOKEN_SPECS["terraform-tags-apply"]="$(jq -n --argjson acct "$TAGS_ACCT_PERMS" --argjson zone "$TAGS_ZONE_PERMS" --arg account "$ACCOUNT_RESOURCE" --arg zones "$ZONE_RESOURCE" '{
+    name: "terraform-tags-apply",
+    policies: (
+      [{effect: "allow", permission_groups: $acct, resources: {($account): "*"}}]
+      + (if ($zone | length) > 0
+         then [{effect: "allow", permission_groups: $zone, resources: {($account): {($zones): "*"}}}]
+         else [] end)
+    )
+  }')"
+fi
+
 # Execution & Token Generation
 TOKEN_NAMES=(
   "terraform-plan"
@@ -609,6 +651,7 @@ TOKEN_NAMES=(
   "terraform-loadbalancing-apply"
   "terraform-logpush-apply"
   "terraform-r2-apply"
+  "terraform-tags-apply"
   "terraform-tunnels-apply"
   "terraform-waf-apply"
   "terraform-wan-apply"
@@ -618,7 +661,13 @@ TOKEN_NAMES=(
 )
 
 if [[ "$ONLY_TOKEN" != "all" ]]; then
-  if [[ -z "${TOKEN_SPECS[$ONLY_TOKEN]:-}" ]]; then
+  # By name rather than by spec: terraform-tags-apply is a real token whose spec
+  # can be empty, and that is reported when it is provisioned, not as a typo.
+  known=false
+  for t in "${TOKEN_NAMES[@]}"; do
+    if [[ "$t" == "$ONLY_TOKEN" ]]; then known=true; fi
+  done
+  if [[ "$known" != true ]]; then
     echo "[ERROR] Unknown token name '$ONLY_TOKEN'. Valid token names are:" >&2
     for t in "${TOKEN_NAMES[@]}"; do echo "  - $t" >&2; done
     exit 1
@@ -638,7 +687,11 @@ if [[ "$DRY_RUN" == "1" ]]; then
   echo "--- DRY RUN DETAILS ---"
   for t in "${TARGET_TOKENS[@]}"; do
     echo "[$t Payload]:"
-    echo "${TOKEN_SPECS[$t]}" | jq .
+    if [[ -z "${TOKEN_SPECS[$t]}" ]]; then
+      echo "  (none - no matching permission group in the catalogue, see the warning above)"
+    else
+      echo "${TOKEN_SPECS[$t]}" | jq .
+    fi
     echo
   done
   echo "Dry run complete. No tokens were created and no CSV file was written."
@@ -658,6 +711,13 @@ FAILED_COUNT=0
 for token_name in "${TARGET_TOKENS[@]}"; do
   payload="${TOKEN_SPECS[$token_name]}"
   echo -n "Provisioning token: ${token_name}... "
+
+  if [[ -z "$payload" ]]; then
+    echo "SKIPPED"
+    echo "[ERROR] ${token_name} has no permission groups to grant - see the warning printed when the catalogue was loaded." >&2
+    FAILED_COUNT=$((FAILED_COUNT + 1))
+    continue
+  fi
 
   # Dispatch POST /accounts/{account_id}/tokens
   RESPONSE="$(curl -sS -X POST "${API_BASE}/accounts/${ACCOUNT_ID}/tokens" \
@@ -711,6 +771,7 @@ SECURITY WARNING & NEXT STEPS:
    gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-load_balancing-apply
    gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-logpush-apply
    gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-r2-apply
+   gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-tags-apply   (terraform-tags-apply)
    gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-tunnels-apply
    gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-waf-apply
    gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-wan-apply

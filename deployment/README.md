@@ -35,6 +35,7 @@ Everything you edit lives here. The modules under [../modules/](../modules/) sta
     │   ├── logpush.tfvars             # log streams      -> logpush
     │   ├── r2.tfvars                  # object storage   -> r2
     │   ├── rules.tfvars               # traffic rules    -> rules
+    │   ├── tags.tfvars                # resource tags    -> zones, zerotrust, r2, workers
     │   ├── tunnels.tfvars             # Cloudflare Tunnel -> tunnels
     │   ├── waf.tfvars                 # firewall rules   -> waf
     │   ├── wan.tfvars                 # site tunnels     -> wan
@@ -156,14 +157,16 @@ The pipeline maps variable files to layers dynamically. The table below lists th
 | `lists`              | `account.tfvars`, `lists.tfvars`                          | None                                                                                                                |
 | `load_balancing`     | `account.tfvars`, `zones.tfvars`, `load_balancing.tfvars` | None                                                                                                                |
 | `logpush`            | `account.tfvars`, `zones.tfvars`, `logpush.tfvars`        | `TF_VAR_logpush_destination_secrets`, `TF_VAR_logpush_ownership_challenges` (from the `<account>-plan` environment) |
-| `r2`                 | `account.tfvars`, `zones.tfvars`, `r2.tfvars`             | None                                                                                                                |
+| `r2`                 | `account.tfvars`, `zones.tfvars`, `r2.tfvars`, `tags.tfvars` | None                                                                                                                |
 | `rules`              | `account.tfvars`, `zones.tfvars`, `rules.tfvars`          | None                                                                                                                |
 | `tunnels`            | `account.tfvars`, `zones.tfvars`, `tunnels.tfvars`        | None (no tunnel secret is sent and no connector token is read)                                                      |
 | `waf`                | `account.tfvars`, `zones.tfvars`, `waf.tfvars`            | None                                                                                                                |
 | `wan`                | `account.tfvars`, `wan.tfvars`                            | `TF_VAR_wan_ipsec_tunnel_psks`, `TF_VAR_wan_bgp_md5_keys` (not yet exported by the pipeline)                                                           |
-| `workers`            | `account.tfvars`, `zones.tfvars`, `workers.tfvars`        | None (Worker secrets use Secrets Store)                                                                             |
-| `zerotrust`          | `account.tfvars`, `zerotrust.tfvars`                      | `TF_VAR_identity_provider_secrets` (from the `<account>-plan` environment; must be set, `{}` if none)                                                                                  |
-| `zones`              | `account.tfvars`, `zones.tfvars`, `zone_config.tfvars`    | None                                                                                                                |
+| `workers`            | `account.tfvars`, `zones.tfvars`, `workers.tfvars`, `tags.tfvars` | None (Worker secrets use Secrets Store)                                                                             |
+| `zerotrust`          | `account.tfvars`, `zerotrust.tfvars`, `tags.tfvars`       | `TF_VAR_identity_provider_secrets` (from the `<account>-plan` environment; must be set, `{}` if none)                                                                                  |
+| `zones`              | `account.tfvars`, `zones.tfvars`, `zone_config.tfvars`, `tags.tfvars` | None                                                                                                                |
+
+Like `zones.tfvars`, `tags.tfvars` reaches several layers: it assigns `resource_tags`, which `zones`, `zerotrust`, `r2` and `workers` each declare and each read their own section of. The layers resolve and output the tags; a pipeline job writes them after apply, because the provider has no tagging resource yet. See [Resource tags](../.github/workflows/README.md#resource-tags).
 
 ### Remote state
 
@@ -1039,7 +1042,7 @@ The Release Manager automates:
 Within your customer's dedicated deployment repository, you can manage multiple administrative accounts (for example: `production`, `staging`, `development`):
 
 1. Create a directory `accounts/<account_name>/`.
-2. Copy all eighteen template `.tfvars` files from `accounts/account_a/`:
+2. Copy all nineteen template `.tfvars` files from `accounts/account_a/`:
    - `account.tfvars`
    - `account_governance.tfvars`
    - `bulk_redirects.tfvars`
@@ -1051,6 +1054,7 @@ Within your customer's dedicated deployment repository, you can manage multiple 
    - `logpush.tfvars`
    - `r2.tfvars`
    - `rules.tfvars`
+   - `tags.tfvars`
    - `tunnels.tfvars`
    - `waf.tfvars`
    - `wan.tfvars`
@@ -1060,7 +1064,7 @@ Within your customer's dedicated deployment repository, you can manage multiple 
    - `zones.tfvars`
 3. Update `account.tfvars` with the target Cloudflare Account ID.
 4. Populate `zones.tfvars` with your zone inventory, and configure layer-specific `.tfvars` files as required.
-5. Create the account's `<account>-plan` environment by hand, re-run `.github/scripts/bootstrap-environments.sh` for its `<account>-<layer>-apply` environments, and give each its own scoped `CLOUDFLARE_API_TOKEN`. The R2 state credentials are repository secrets, shared by every account. See [VARIABLES_AND_SECRETS.md](../VARIABLES_AND_SECRETS.md).
+5. Create the account's `<account>-plan` environment by hand, re-run `.github/scripts/bootstrap-environments.sh` for its `<account>-<layer>-apply` environments and `<account>-tags-apply`, and give each its own scoped `CLOUDFLARE_API_TOKEN`. The R2 state credentials are repository secrets, shared by every account. See [VARIABLES_AND_SECRETS.md](../VARIABLES_AND_SECRETS.md).
 6. The CI/CD pipeline dynamically discovers the new account tree and includes it in subsequent plan and apply runs.
 
 No `.tf` orchestrator modifications are required.
@@ -1076,5 +1080,5 @@ To introduce a new Cloudflare product layer:
 5. Provide a baseline `defaults.auto.tfvars` where appropriate.
 6. Add `<product>.tfvars` to each account directory under `accounts/*/`.
 7. Leave `.github/scripts/tf-matrix.sh` alone unless the layer must apply first (`PREREQ_LAYERS`) or must wait for zones without reading one (`POST_ZONE_LAYERS`). Its tier is otherwise derived from the source: a `data "cloudflare_zone"` block puts it in tier 3, anything else in tier 2.
-8. Add the layer to the `ci.yml` self-test: the per-layer loop, the `zones.tfvars` expectation if it declares `zones`, and the tier 3 expectation if it resolves a zone.
+8. Add the layer to the `ci.yml` self-test: the per-layer loop, the `zones.tfvars` expectation if it declares `zones`, the tier 3 expectation if it resolves a zone, and the `tags.tfvars` expectation if it declares `resource_tags`.
 9. Create a `<account>-<product>-apply` environment per account with its own scoped token (`ONLY_LAYER=<product>` with `bootstrap-environments.sh`). If the layer takes a `TF_VAR_` secret, add a conditional export to the plan step of `_terraform-run.yml`.

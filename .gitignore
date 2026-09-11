@@ -67,3 +67,6 @@ tfplan.json
 plan-summary.md
 varfiles.txt
 comment.md
+# Tag manifests exported by the apply job and read by the resource-tags job.
+# Both delete them; listed so a local run cannot leave them staged.
+resource-tags/
