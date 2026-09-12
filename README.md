@@ -74,6 +74,7 @@ Application Layer (Zone & Workload Scope)
 ├── zones                (Zone lifecycle, DNS records, vanity nameservers)
 │   ├── waf              (Firewall rulesets, rate limiting, bot policies)
 │   ├── load_balancing   (Health monitors, origin pools, failover logic)
+│   ├── origin_pulls     (Authenticated Origin Pulls: edge-to-origin mTLS, zone-wide and per hostname)
 │   └── r2               (Bucket policies, CORS, custom domains)
 ```
 
