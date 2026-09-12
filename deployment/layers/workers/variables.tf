@@ -148,9 +148,14 @@ variable "d1_databases" {
     Terraform owns the database and the binding; the tables inside it belong to
     the application. A migration is an ordered, one-way change that has to be
     applied in sequence, which is not what a plan reconciling desired state does.
-    Run them from the pipeline against the ID this layer outputs:
 
-      wrangler d1 migrations apply <name> --remote
+    Migrations are committed to this layer, in a directory named for the same key
+    used here:
+
+      layers/workers/migrations/<key>/0001_initial_schema.sql
+
+    .github/scripts/d1-migrations.sh applies them after every apply, against the
+    ID this layer outputs. See layers/workers/migrations/README.md.
 
     EVERY FIELD HERE IS REPLACE-ON-CHANGE
     Cloudflare fixes the name, jurisdiction and location when the database is

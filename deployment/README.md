@@ -1032,7 +1032,9 @@ worker_scripts = {
 
 - **Producer and consumer are declared in different places.** A producer is a `queue` binding on the Worker that writes; the consumer is declared on the queue, because Cloudflare gives a queue exactly one. A Worker may consume several queues, and any number of Workers may produce to one.
 - **Ordering is derived, not declared.** A queue must exist before a Worker can bind it, and the Worker must exist before it can be named as that queue's consumer. The layer resolves the queue from variables alone and the consumer from the deployed Worker's name, so Terraform works out `queue -> Worker -> consumer` from the references without a `depends_on`.
-- **D1 schema is not Terraform's.** The layer owns the database and the binding; tables come from `wrangler d1 migrations apply <name> --remote` in the pipeline, against the `database_id` this layer outputs. A migration is an ordered one-way change, which is not what a plan reconciling desired state does.
+- **D1 schema is not Terraform's.** The layer owns the database and the binding; tables come from migrations. A migration is an ordered one-way change, which is not what a plan reconciling desired state does.
+
+  Migrations live in the layer at `migrations/<database_key>/0001_initial_schema.sql`, keyed by the same logical key a binding uses. After every `workers` apply, [`d1-migrations.sh`](../.github/scripts/d1-migrations.sh) reads the `d1_databases` output, applies whatever has not run yet and records it in a `d1_migrations` table inside each database, so a re-run is a no-op. File names are validated before anything is applied, a directory naming no database fails the run, and a migration that removes data is called out in the log - D1 has no snapshot to restore from. See [migrations/README.md](layers/workers/migrations/README.md).
 - **Every D1 field is replace-on-change.** Name, jurisdiction and location are fixed at creation, and a replaced D1 database is an empty one - there is no snapshot and no undo. Read a plan proposing a replacement as a plan to lose the data.
 
 ### Architectural Standards

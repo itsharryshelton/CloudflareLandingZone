@@ -21,17 +21,10 @@
  * with how many retries and into which dead letter queue - is declared on the
  * queue in workers.tfvars, not here. A queue has exactly one consumer.
  *
- * The table is created by a migration run from the pipeline, not by Terraform
- * and not by this Worker:
- *
- *   wrangler d1 migrations apply account-a-telemetry --remote
- *
- *   CREATE TABLE IF NOT EXISTS events (
- *     id         TEXT PRIMARY KEY,
- *     occurred   INTEGER NOT NULL,
- *     kind       TEXT NOT NULL,
- *     payload    TEXT NOT NULL
- *   );
+ * The table is created by a migration, not by Terraform and not by this Worker:
+ * ../../migrations/<database_key>/0001_initial_schema.sql, applied after every
+ * apply by .github/scripts/d1-migrations.sh. The columns this file reads and
+ * writes - id, occurred, kind, payload - are defined there.
  */
 
 const MAX_PAYLOAD_BYTES = 32 * 1024;
