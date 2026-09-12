@@ -73,11 +73,35 @@ resource_tags = {
   }
 
   # ---------------------------------------------------------------------------
+  # D1 databases
+  # ---------------------------------------------------------------------------
+  d1_databases = {
+    defaults = { environment = "prod" }
+
+    resources = {
+      telemetry = { team = "platform" }
+    }
+  }
+
+  # ---------------------------------------------------------------------------
+  # Queues
+  # ---------------------------------------------------------------------------
+  queues = {
+    defaults = { environment = "prod" }
+
+    resources = {
+      telemetry     = { team = "platform" }
+      telemetry_dlq = { team = "platform" }
+    }
+  }
+
+  # ---------------------------------------------------------------------------
   # Workers
   # ---------------------------------------------------------------------------
   worker_scripts = {
     resources = {
-      security_headers = { environment = "prod", team = "web" }
+      security_headers    = { environment = "prod", team = "web" }
+      telemetry_processor = { environment = "prod", team = "platform" }
     }
   }
 }

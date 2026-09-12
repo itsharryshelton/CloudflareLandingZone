@@ -76,7 +76,8 @@ than silently causing a merged change never to be planned.
 
 ## Resource tags
 
-Zones, Access applications, R2 buckets, KV namespaces and Workers carry
+Zones, Access applications, R2 buckets, KV namespaces, D1 databases, queues and
+Workers carry
 [Cloudflare resource tags](https://developers.cloudflare.com/resource-tagging/) -
 `environment`, `team`, and anything else an account wants to filter or report
 by. The Cloudflare provider has no tagging resource yet (none as of 5.24.0) and
