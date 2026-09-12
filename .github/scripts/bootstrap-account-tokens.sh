@@ -460,7 +460,9 @@ JSON
 WORKERS_ACCT_PERMS="$(build_perm_array "account" \
   "Account Settings:Read|Account Settings Read" \
   "Cloudflare Agents:Edit|CF Agents:Edit|Cloudflare Agents Write|CF Agents Write|Agents Write|Cloudflare Agents Read" \
+  "D1:Edit|D1 Write" \
   "Pages:Edit|Pages Write" \
+  "Queues:Edit|Queues Write" \
   "Secrets Store:Edit|Secrets Store Write" \
   "Workers CI:Edit|Workers CI Write|Workers CI Read" \
   "Workers Containers:Edit|Workers Containers Write|Workers Containers Read" \

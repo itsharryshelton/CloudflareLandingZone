@@ -10,6 +10,8 @@
 resource "terraform_data" "preflight" {
   input = {
     kv_namespaces    = length(var.kv_namespaces)
+    d1_databases     = length(var.d1_databases)
+    queues           = length(var.queues)
     worker_scripts   = length(var.worker_scripts)
     referenced_zones = length(local.referenced_zones)
   }
@@ -28,6 +30,46 @@ resource "terraform_data" "preflight" {
     precondition {
       condition     = length(local.dangling_worker_keys) == 0
       error_message = "A service binding references a Worker that this layer does not declare: ${join("; ", local.dangling_worker_keys)}. Valid keys: ${join(", ", keys(var.worker_scripts))}. For a Worker owned elsewhere, set service to its name instead of worker_key."
+    }
+
+    precondition {
+      condition     = length(local.dangling_d1_database_keys) == 0
+      error_message = "A binding references a D1 database that this layer does not declare: ${join("; ", local.dangling_d1_database_keys)}. Valid keys: ${join(", ", keys(var.d1_databases))}. A database created elsewhere can still be bound - pass its database_id directly instead."
+    }
+
+    precondition {
+      condition     = length(local.dangling_queue_keys) == 0
+      error_message = "A binding references a queue that this layer does not declare: ${join("; ", local.dangling_queue_keys)}. Valid keys: ${join(", ", keys(var.queues))}. A queue owned elsewhere can still be produced to - pass its queue_name directly instead."
+    }
+
+    precondition {
+      condition     = length(local.dangling_queue_consumer_worker_keys) == 0
+      error_message = "A queue consumer references a Worker that this layer does not declare: ${join("; ", local.dangling_queue_consumer_worker_keys)}. Valid keys: ${join(", ", keys(var.worker_scripts))}. For a Worker deployed elsewhere, set script_name to its name instead of worker_key - Cloudflare refuses a consumer naming a Worker that does not exist."
+    }
+
+    precondition {
+      condition     = length(local.dangling_dead_letter_queue_keys) == 0
+      error_message = "A queue consumer's dead letter queue names a queue this layer does not declare: ${join("; ", local.dangling_dead_letter_queue_keys)}. Valid keys: ${join(", ", keys(var.queues))}. For a queue owned elsewhere, set dead_letter_queue to its name instead."
+    }
+
+    precondition {
+      condition     = length(local.self_dead_letter_queues) == 0
+      error_message = "These queues are their own dead letter queue: ${join("; ", local.self_dead_letter_queues)}. A message that exhausts its retries would be written straight back to the queue it just failed on, which bills for every attempt and never drains. Point it at a separate queue."
+    }
+
+    precondition {
+      condition     = length(local.queues_without_consumer) == 0
+      error_message = "These queues have nothing reading them: ${join("; ", local.queues_without_consumer)}. Producers keep succeeding, the backlog grows, and each message is dropped when it reaches the retention period with nothing raising an error. Declare a consumer, or set allow_queues_without_consumer = true in layers/workers/defaults.auto.tfvars where the consumer genuinely lives outside this pipeline. A queue another queue dead letters into is already exempt."
+    }
+
+    precondition {
+      condition     = length(local.consumers_without_dead_letter_queue) == 0
+      error_message = "These queue consumers have no dead letter queue: ${join("; ", local.consumers_without_dead_letter_queue)}. A message that fails max_retries times is deleted, with no error and no copy to look at - the batch that broke the consumer is the one nobody can examine. Add dead_letter_queue_key pointing at another entry in var.queues, or set allow_queue_consumer_without_dead_letter_queue = true where the messages are genuinely disposable."
+    }
+
+    precondition {
+      condition     = length(local.replicated_d1_in_jurisdiction) == 0
+      error_message = "These D1 databases are restricted to a jurisdiction and have read replication on: ${join("; ", local.replicated_d1_in_jurisdiction)}. Replication keeps a copy of the data in every supported region, which is the opposite of what the jurisdiction was set to achieve. Set read_replication_mode = \"disabled\" on the database, check default_d1_read_replication_mode, or set allow_replicated_d1_in_jurisdiction = true if the jurisdiction was a latency preference rather than a compliance requirement."
     }
 
     precondition {

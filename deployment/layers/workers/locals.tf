@@ -1,6 +1,6 @@
 # Applies the platform baseline, resolves logical keys to real IDs, loads any KV
 # data files, and derives the preflight assertions, so that workers.tf reads as
-# two plain module calls.
+# four plain module calls.
 
 locals {
   # Only zones a route or a custom domain actually targets are looked up, so a
@@ -58,6 +58,67 @@ locals {
 
       max_managed_pairs = namespace.max_managed_pairs != null ? namespace.max_managed_pairs : var.default_max_managed_kv_pairs
     }
+  }
+
+  # D1
+  d1_databases = {
+    for key, database in var.d1_databases : key => {
+      name = database.name
+
+      primary_location_hint = database.primary_location_hint != null ? database.primary_location_hint : var.default_d1_primary_location_hint
+      read_replication_mode = database.read_replication_mode != null ? database.read_replication_mode : var.default_d1_read_replication_mode
+
+      # No fleet default on purpose. A jurisdiction is a compliance decision about
+      # one database's data, and one applied to every database by a file nobody
+      # re-reads is how a database ends up restricted for no reason anybody can
+      # name - or unrestricted for the same reason.
+      jurisdiction = database.jurisdiction
+    }
+  }
+
+  # Queues
+  # Split in two, and the split is load-bearing rather than tidy. `queues` is
+  # derived from variables alone, so the queue itself can be created without
+  # waiting on anything; `queue_consumers` resolves logical keys through module
+  # outputs, which is what orders the consumer behind the Worker that serves it.
+  #
+  # Putting them in one local would close a loop: a producer's queue binding
+  # reads module.queues, so a value feeding module.queues that also read
+  # module.worker_scripts would make the queue wait on a Worker that is waiting
+  # on the queue.
+  queues = {
+    for key, queue in var.queues : key => {
+      name = queue.name
+
+      settings = {
+        delivery_delay           = queue.delivery_delay
+        delivery_paused          = queue.delivery_paused
+        message_retention_period = queue.message_retention_period != null ? queue.message_retention_period : var.default_queue_message_retention_period
+      }
+    }
+  }
+
+  queue_consumers = {
+    for key, queue in var.queues : key => {
+      type = queue.consumer.type
+
+      # `try` rather than a bare index, so a key naming nothing reaches the
+      # operator as the preflight message rather than as "Invalid index".
+      script_name = (
+        queue.consumer.worker_key != null
+        ? try(module.worker_scripts[queue.consumer.worker_key].script_name, null)
+        : queue.consumer.script_name
+      )
+
+      dead_letter_queue = (
+        queue.consumer.dead_letter_queue_key != null
+        ? try(module.queues[queue.consumer.dead_letter_queue_key].queue_name, null)
+        : queue.consumer.dead_letter_queue
+      )
+
+      settings = queue.consumer.settings
+    }
+    if queue.consumer != null
   }
 
   # Workers
@@ -120,6 +181,9 @@ locals {
           namespace_id = binding.kv_namespace_key != null ? try(module.kv_namespaces[binding.kv_namespace_key].namespace_id, null) : binding.namespace_id
           service      = binding.worker_key != null ? try(var.worker_scripts[binding.worker_key].name, null) : binding.service
 
+          database_id = binding.d1_database_key != null ? try(module.d1_databases[binding.d1_database_key].database_id, null) : binding.database_id
+          queue_name  = binding.queue_key != null ? try(module.queues[binding.queue_key].queue_name, null) : binding.queue_name
+
           bucket_name    = binding.bucket_name
           jurisdiction   = binding.jurisdiction
           text           = binding.text
@@ -128,9 +192,7 @@ locals {
           environment    = binding.environment
           class_name     = binding.class_name
           script_name    = binding.script_name
-          database_id    = binding.database_id
           id             = binding.id
-          queue_name     = binding.queue_name
           dataset        = binding.dataset
           index_name     = binding.index_name
           workflow_name  = binding.workflow_name
@@ -190,6 +252,87 @@ locals {
       if binding.worker_key != null && !contains(keys(var.worker_scripts), coalesce(binding.worker_key, ""))
     ]
   ]))
+
+  dangling_d1_database_keys = distinct(flatten([
+    for key, script in var.worker_scripts : [
+      for binding in script.bindings :
+      "worker_scripts.${key}.bindings.${binding.name} -> d1_database_key = \"${binding.d1_database_key}\""
+      if binding.d1_database_key != null && !contains(keys(var.d1_databases), coalesce(binding.d1_database_key, ""))
+    ]
+  ]))
+
+  dangling_queue_keys = distinct(flatten([
+    for key, script in var.worker_scripts : [
+      for binding in script.bindings :
+      "worker_scripts.${key}.bindings.${binding.name} -> queue_key = \"${binding.queue_key}\""
+      if binding.queue_key != null && !contains(keys(var.queues), coalesce(binding.queue_key, ""))
+    ]
+  ]))
+
+  # The consumer side names two things by key: the Worker that reads the queue,
+  # and the queue that failed messages land in.
+  dangling_queue_consumer_worker_keys = distinct([
+    for key, queue in var.queues :
+    "queues.${key}.consumer -> worker_key = \"${queue.consumer.worker_key}\""
+    if queue.consumer != null && try(queue.consumer.worker_key, null) != null
+    && !contains(keys(var.worker_scripts), coalesce(try(queue.consumer.worker_key, null), ""))
+  ])
+
+  dangling_dead_letter_queue_keys = distinct([
+    for key, queue in var.queues :
+    "queues.${key}.consumer -> dead_letter_queue_key = \"${queue.consumer.dead_letter_queue_key}\""
+    if queue.consumer != null && try(queue.consumer.dead_letter_queue_key, null) != null
+    && !contains(keys(var.queues), coalesce(try(queue.consumer.dead_letter_queue_key, null), ""))
+  ])
+
+  # Queue wiring. Each of these is accepted by Cloudflare and produces a queue
+  # that looks configured and loses messages.
+  self_dead_letter_queues = distinct(concat(
+    [
+      for key, queue in var.queues : "queues.${key} (\"${queue.name}\")"
+      if queue.consumer != null && try(queue.consumer.dead_letter_queue_key, null) == key
+    ],
+    [
+      for key, queue in var.queues : "queues.${key} (\"${queue.name}\")"
+      if queue.consumer != null && try(queue.consumer.dead_letter_queue, null) != null
+      && lower(coalesce(try(queue.consumer.dead_letter_queue, null), "")) == lower(queue.name)
+    ],
+  ))
+
+  # Queues another queue dead letters into, by key and by name. A holding pen for
+  # failed messages is meant to fill up, so it is exempt from the check below.
+  dead_letter_queue_targets = distinct(concat(
+    [
+      for key, queue in var.queues : coalesce(try(queue.consumer.dead_letter_queue_key, null), "")
+      if queue.consumer != null && try(queue.consumer.dead_letter_queue_key, null) != null
+    ],
+    [
+      for key, queue in var.queues : lower(coalesce(try(queue.consumer.dead_letter_queue, null), ""))
+      if queue.consumer != null && try(queue.consumer.dead_letter_queue, null) != null
+    ],
+  ))
+
+  queues_without_consumer = var.allow_queues_without_consumer ? [] : [
+    for key, queue in var.queues : "queues.${key} (\"${queue.name}\")"
+    if queue.consumer == null
+    && !contains(local.dead_letter_queue_targets, key)
+    && !contains(local.dead_letter_queue_targets, lower(queue.name))
+  ]
+
+  consumers_without_dead_letter_queue = var.allow_queue_consumer_without_dead_letter_queue ? [] : [
+    for key, queue in var.queues : "queues.${key} (\"${queue.name}\")"
+    if queue.consumer != null
+    && try(queue.consumer.dead_letter_queue_key, null) == null
+    && try(queue.consumer.dead_letter_queue, null) == null
+  ]
+
+  # D1. Replication is resolved rather than read from var, so a database that
+  # inherits "auto" from the fleet default is caught as well as one that asks for
+  # it.
+  replicated_d1_in_jurisdiction = var.allow_replicated_d1_in_jurisdiction ? [] : [
+    for key, database in local.d1_databases : "d1_databases.${key} (\"${database.name}\", jurisdiction \"${database.jurisdiction}\")"
+    if database.jurisdiction != null && database.read_replication_mode == "auto"
+  ]
 
   # Source and data files. Terraform reads these at plan time, so a missing one
   # is worth naming rather than letting filesha256 or file() report the path.

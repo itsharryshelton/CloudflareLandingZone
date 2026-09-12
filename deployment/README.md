@@ -20,7 +20,7 @@ Everything you edit lives here. The modules under [../modules/](../modules/) sta
 │   ├── tunnels/                       # own state: Cloudflare Tunnels, public hostnames, private network routes
 │   ├── waf/                           # own state: firewall custom rules, rate limiting
 │   ├── wan/                           # own state: Magic WAN IPsec and GRE tunnels, static routes
-│   ├── workers/                       # own state: Worker scripts, KV namespaces, routes, crons
+│   ├── workers/                       # own state: Worker scripts, KV namespaces, D1 databases, queues, routes, crons
 │   ├── zerotrust/                     # own state: Access applications, policies, service tokens, IdPs
 │   └── zones/                         # own state: zones, TLS posture, settings, bot management
 └── accounts/                          # config, one tree per Cloudflare account
@@ -41,7 +41,7 @@ Everything you edit lives here. The modules under [../modules/](../modules/) sta
     │   ├── tunnels.tfvars             # Cloudflare Tunnel -> tunnels
     │   ├── waf.tfvars                 # firewall rules   -> waf
     │   ├── wan.tfvars                 # site tunnels     -> wan
-    │   ├── workers.tfvars             # edge compute     -> workers
+    │   ├── workers.tfvars             # edge compute, KV, D1, queues -> workers
     │   ├── zerotrust.tfvars           # Access posture   -> zerotrust
     │   ├── zone_config.tfvars         # zone settings    -> zones
     │   └── zones.tfvars               # zone inventory   -> zones, bulk_redirects, dns, waf, lb, logpush, origin_pulls, r2, rules, tunnels, workers
@@ -78,7 +78,7 @@ Tier 3: Zone-Dependent & Consumer Layers
 ├── rules                              (resolves zone IDs; manages cache, transform, and origin rules)
 ├── tunnels                            (resolves zone IDs; publishes tunnel hostnames as proxied CNAMEs)
 ├── waf                                (resolves zone IDs; consumes account lists created in Tier 2)
-├── workers                            (resolves zone IDs; binds script routes and custom domains)
+├── workers                            (resolves zone IDs; binds script routes and custom domains; provisions KV, D1 and queues)
 └── zerotrust                          (Access hostnames require valid, proxied DNS records)
 ```
 
@@ -204,6 +204,8 @@ Keys are scoped locally to each account tree: `primary` in `account_a` is comple
 - Two WAF policies conflicting over the same zone are caught before apply.
 - A load balancer hostname outside its zone domain fails the plan.
 - An R2 bucket configured for public anonymous `.r2.dev` access fails the plan.
+- A queue with no consumer, a consumer with no dead letter queue, or a queue that dead letters into itself fails the plan.
+- A D1 database restricted to a jurisdiction while carrying read replication fails the plan.
 - A Cloudflare WAN static route pointing to an unmanaged tunnel fails the plan.
 - A Cloudflare Tunnel hostname outside its referenced zone, or a tunnel route naming an undeclared tunnel, fails the plan.
 - A zone-scoped Logpush job on a zone below Enterprise, a dataset pushed from the wrong scope, or a credential committed in a Logpush destination fails the plan.
@@ -935,9 +937,9 @@ bulk_redirect_rules = [
 
 ---
 
-## Workers & Workers KV
+## Workers, KV, D1 & Queues
 
-The `workers` layer manages Cloudflare Workers scripts, Workers KV namespaces, script bindings, routes, custom domains, and cron triggers.
+The `workers` layer manages Cloudflare Workers scripts, Workers KV namespaces, D1 databases, queues, script bindings, routes, custom domains, and cron triggers.
 
 ```hcl
 # accounts/account_a/workers.tfvars
@@ -976,11 +978,80 @@ worker_scripts = {
 }
 ```
 
+### Serverless State: D1 & Queues
+
+D1 databases and queues are declared in the same file and bound by logical key, so no account tree carries a database UUID or a queue ID.
+
+```hcl
+# accounts/account_a/workers.tfvars
+d1_databases = {
+  telemetry = {
+    name                  = "account-a-telemetry"
+    primary_location_hint = "weur"
+  }
+}
+
+queues = {
+  telemetry = {
+    name = "account-a-telemetry"
+
+    consumer = {
+      worker_key            = "telemetry_processor"
+      dead_letter_queue_key = "telemetry_dlq"
+
+      settings = {
+        batch_size       = 50
+        max_wait_time_ms = 5000
+        max_retries      = 3
+        retry_delay      = 30
+      }
+    }
+  }
+
+  # Holding pen for batches that failed three times. Exempt from
+  # allow_queues_without_consumer because another queue dead letters into it.
+  telemetry_dlq = {
+    name                     = "account-a-telemetry-dlq"
+    message_retention_period = 1209600
+  }
+}
+
+worker_scripts = {
+  telemetry_processor = {
+    name        = "account-a-telemetry-processor"
+    script_file = "queues/telemetry_processor.js"
+
+    bindings = [
+      # Producer side: this Worker writes to the queue.
+      { name = "TELEMETRY_QUEUE", type = "queue", queue_key = "telemetry" },
+      { name = "TELEMETRY_DB", type = "d1", d1_database_key = "telemetry" },
+    ]
+  }
+}
+```
+
+- **Producer and consumer are declared in different places.** A producer is a `queue` binding on the Worker that writes; the consumer is declared on the queue, because Cloudflare gives a queue exactly one. A Worker may consume several queues, and any number of Workers may produce to one.
+- **Ordering is derived, not declared.** A queue must exist before a Worker can bind it, and the Worker must exist before it can be named as that queue's consumer. The layer resolves the queue from variables alone and the consumer from the deployed Worker's name, so Terraform works out `queue -> Worker -> consumer` from the references without a `depends_on`.
+- **D1 schema is not Terraform's.** The layer owns the database and the binding; tables come from `wrangler d1 migrations apply <name> --remote` in the pipeline, against the `database_id` this layer outputs. A migration is an ordered one-way change, which is not what a plan reconciling desired state does.
+- **Every D1 field is replace-on-change.** Name, jurisdiction and location are fixed at creation, and a replaced D1 database is an empty one - there is no snapshot and no undo. Read a plan proposing a replacement as a plan to lose the data.
+
 ### Architectural Standards
 - **External Source Files:** JavaScript and TypeScript Worker source files are stored under `deployment/layers/workers/scripts/` and referenced by relative path. Script source code is not embedded directly in `.tfvars`.
 - **Content Hashing:** The module calculates SHA-256 hashes of script files automatically, ensuring that code updates trigger deployment plans.
 - **Secrets Store Integration:** Production secrets are bound using Cloudflare Secrets Store references rather than plain-text environment variables, preventing credential exposure in Terraform state.
 - **Workers KV Scalability:** `max_managed_pairs` limits the number of KV entries managed directly in Terraform. Large datasets should be synchronised using `wrangler kv bulk put` against the output namespace ID.
+- **Data Planes Stay Out Of State:** KV pairs beyond configuration, D1 rows and queue messages are all loaded or produced outside Terraform. The layer owns the container and the binding; the pipeline and the application own the contents.
+
+### Guardrails
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `allow_inline_secret_text` | `false` | Fails the plan if a Worker carries a `secret_text` binding, which holds the literal secret in the variable file, the plan output and state. Use a `secrets_store_secret` binding instead. |
+| `allow_unpinned_compatibility_date` | `false` | Fails the plan if a Worker has neither its own `compatibility_date` nor `default_compatibility_date`, which would pin its runtime to whenever it was last uploaded. |
+| `allow_disabled_observability` | `false` | Fails the plan if a Worker is deployed with Workers Logs off. Sample with `head_sampling_rate` where the concern is volume. |
+| `allow_queues_without_consumer` | `false` | Fails the plan if a queue has nothing reading it. Producers keep succeeding while the backlog ages out at the retention period, with nothing raising an error. A queue another queue dead letters into is exempt. |
+| `allow_queue_consumer_without_dead_letter_queue` | `false` | Fails the plan if a consumer has no dead letter queue, in which case a message that fails `max_retries` times is deleted with no copy to examine. |
+| `allow_replicated_d1_in_jurisdiction` | `false` | Fails the plan if a database restricted to a `jurisdiction` also has read replication on, which keeps a copy of the data in every supported region. |
 
 ---
 

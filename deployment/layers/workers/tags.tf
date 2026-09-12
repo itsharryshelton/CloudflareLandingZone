@@ -1,4 +1,5 @@
-# Cloudflare resource tags for the KV namespaces and Workers this layer owns.
+# Cloudflare resource tags for the KV namespaces, D1 databases, queues and
+# Workers this layer owns.
 #
 # The provider has no tagging resource yet, so nothing here calls the Tagging
 # API. This resolves each resource's complete tag set from var.resource_tags and
@@ -9,7 +10,7 @@
 # Workers deployed with wrangler from their own repositories are not in this
 # layer's state, so they are not tagged from here.
 #
-# When the provider ships a tagging resource, for_each it over the two
+# When the provider ships a tagging resource, for_each it over the four
 # *_resource_tags locals here and retire the script.
 
 locals {
@@ -20,15 +21,37 @@ locals {
     layer        = basename(abspath(path.module))
   }
 
-  # Every namespace and Worker, not only those tags.tfvars lists: the pipeline
-  # keys are what a `tag=!managed-by` filter relies on to find one somebody
-  # created by hand.
+  # Every namespace, database, queue and Worker, not only those tags.tfvars
+  # lists: the pipeline keys are what a `tag=!managed-by` filter relies on to
+  # find one somebody created by hand.
   kv_namespace_resource_tags = {
     for key in keys(var.kv_namespaces) : key => {
       for k, v in merge(
         var.resource_tags.defaults,
         var.resource_tags.kv_namespaces.defaults,
         lookup(var.resource_tags.kv_namespaces.resources, key, {}),
+        local.pipeline_tags,
+      ) : k => v if v != null
+    }
+  }
+
+  d1_database_resource_tags = {
+    for key in keys(var.d1_databases) : key => {
+      for k, v in merge(
+        var.resource_tags.defaults,
+        var.resource_tags.d1_databases.defaults,
+        lookup(var.resource_tags.d1_databases.resources, key, {}),
+        local.pipeline_tags,
+      ) : k => v if v != null
+    }
+  }
+
+  queue_resource_tags = {
+    for key in keys(var.queues) : key => {
+      for k, v in merge(
+        var.resource_tags.defaults,
+        var.resource_tags.queues.defaults,
+        lookup(var.resource_tags.queues.resources, key, {}),
         local.pipeline_tags,
       ) : k => v if v != null
     }
@@ -50,8 +73,12 @@ locals {
   resource_tag_sources = merge(
     { "resource_tags.defaults" = var.resource_tags.defaults },
     { "resource_tags.kv_namespaces.defaults" = var.resource_tags.kv_namespaces.defaults },
+    { "resource_tags.d1_databases.defaults" = var.resource_tags.d1_databases.defaults },
+    { "resource_tags.queues.defaults" = var.resource_tags.queues.defaults },
     { "resource_tags.worker_scripts.defaults" = var.resource_tags.worker_scripts.defaults },
     { for key, tags in var.resource_tags.kv_namespaces.resources : "resource_tags.kv_namespaces.resources.${key}" => tags },
+    { for key, tags in var.resource_tags.d1_databases.resources : "resource_tags.d1_databases.resources.${key}" => tags },
+    { for key, tags in var.resource_tags.queues.resources : "resource_tags.queues.resources.${key}" => tags },
     { for key, tags in var.resource_tags.worker_scripts.resources : "resource_tags.worker_scripts.resources.${key}" => tags },
   )
 
@@ -59,6 +86,14 @@ locals {
     [
       for key in keys(var.resource_tags.kv_namespaces.resources) : "resource_tags.kv_namespaces.resources.${key} names no namespace in var.kv_namespaces"
       if !contains(keys(var.kv_namespaces), key)
+    ],
+    [
+      for key in keys(var.resource_tags.d1_databases.resources) : "resource_tags.d1_databases.resources.${key} names no database in var.d1_databases"
+      if !contains(keys(var.d1_databases), key)
+    ],
+    [
+      for key in keys(var.resource_tags.queues.resources) : "resource_tags.queues.resources.${key} names no queue in var.queues"
+      if !contains(keys(var.queues), key)
     ],
     [
       for key in keys(var.resource_tags.worker_scripts.resources) : "resource_tags.worker_scripts.resources.${key} names no Worker in var.worker_scripts"
@@ -82,7 +117,7 @@ locals {
 }
 
 output "resource_tags" {
-  description = "Tag manifest for .github/scripts/resource-tags.sh: every KV namespace and Worker this layer owns, its ID, and the complete tag set it should carry. Read by the pipeline from state after apply, when the IDs are known."
+  description = "Tag manifest for .github/scripts/resource-tags.sh: every KV namespace, D1 database, queue and Worker this layer owns, its ID, and the complete tag set it should carry. Read by the pipeline from state after apply, when the IDs are known."
   value = {
     account_id = var.cloudflare_account_id
     layer      = local.pipeline_tags.layer
@@ -94,6 +129,25 @@ output "resource_tags" {
           resource_id   = module.kv_namespaces[key].namespace_id
           zone_id       = null
           tags          = local.kv_namespace_resource_tags[key]
+        }
+      ],
+      [
+        for key in sort(keys(local.d1_database_resource_tags)) : {
+          address       = "d1_databases.${key}"
+          resource_type = "d1_database"
+          resource_id   = module.d1_databases[key].database_id
+          zone_id       = null
+          tags          = local.d1_database_resource_tags[key]
+        }
+      ],
+      [
+        for key in sort(keys(local.queue_resource_tags)) : {
+          address       = "queues.${key}"
+          resource_type = "queue"
+          # The tagging API takes the queue's ID, not its name.
+          resource_id = module.queues[key].queue_id
+          zone_id     = null
+          tags        = local.queue_resource_tags[key]
         }
       ],
       [

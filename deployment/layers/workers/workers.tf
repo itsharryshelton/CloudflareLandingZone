@@ -1,10 +1,19 @@
-# Workers and Workers KV: one namespace per kv_namespaces entry, one Worker per
-# worker_scripts entry, with its bindings, routes, custom domains and cron
+# Workers and the state behind them: one namespace per kv_namespaces entry, one
+# database per d1_databases entry, one queue per queues entry, and one Worker per
+# worker_scripts entry with its bindings, routes, custom domains and cron
 # triggers.
 #
-# Namespaces are declared first and referenced by key, so a binding is written as
-# `kv_namespace_key = "config"` and Terraform works out the ordering. Nothing
-# in an account tree ever carries a namespace ID.
+# Storage is declared first and referenced by key, so a binding is written as
+# `kv_namespace_key = "config"` and Terraform works out the ordering. Nothing in
+# an account tree ever carries a namespace ID, a database UUID or a queue ID.
+#
+# Ordering around queues is worth knowing about, because it is a loop that only
+# stays open by being written this way. A queue must exist before a Worker can be
+# given a binding that writes to it, and the Worker must exist before it can be
+# named as that queue's consumer - so the chain is queue, Worker, consumer.
+# Terraform derives it from the references alone: module.queues takes only
+# variable-derived values, module.worker_scripts reads its queue names back out,
+# and the consumer is passed the deployed Worker's name.
 #
 # Downstream deployments pin an immutable tag instead of the local path - review root readme.md for more info:
 #   source = "git::https://github.com/yourorg/CloudflareLandingZone//modules/workers_kv_namespace?ref=v1.0.0"
@@ -22,6 +31,30 @@ module "kv_namespaces" {
   # A ceiling on what Terraform will own, not on what the namespace may hold.
   # Bulk data is loaded from the pipeline against the namespace_id below.
   max_managed_pairs = each.value.max_managed_pairs
+}
+
+module "d1_databases" {
+  source                = "../../../modules/d1_database"
+  for_each              = local.d1_databases
+  account_id            = var.cloudflare_account_id
+  name                  = each.value.name
+  jurisdiction          = each.value.jurisdiction
+  primary_location_hint = each.value.primary_location_hint
+  read_replication_mode = each.value.read_replication_mode
+}
+
+module "queues" {
+  source = "../../../modules/queue"
+
+  for_each = local.queues
+
+  account_id = var.cloudflare_account_id
+
+  queue_name = each.value.name
+  settings   = each.value.settings
+
+  # The consumer is resolved separately from the queue itself - see locals.tf
+  consumer = try(local.queue_consumers[each.key], null)
 }
 
 module "worker_scripts" {
@@ -48,8 +81,9 @@ module "worker_scripts" {
   observability       = each.value.observability
   tail_consumers      = each.value.tail_consumers
 
-  # kv_namespace_key -> namespace ID and worker_key -> Worker name are resolved
-  # in locals.tf; everything else is passed through as written.
+  # kv_namespace_key -> namespace ID, d1_database_key -> database UUID,
+  # queue_key -> queue name and worker_key -> Worker name are resolved in
+  # locals.tf; everything else is passed through as written.
   bindings = each.value.bindings
 
   # zone_key -> zone ID, resolved by name in zone_lookup.tf.

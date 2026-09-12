@@ -973,7 +973,8 @@ variable "resource_tags" {
     - `allowed_values` - (Optional) Tag key => the only values it may take, so
                          "prod" and "production" cannot split one filter.
     - `zones`, `access_applications`, `r2_buckets`, `kv_namespaces`,
-      `worker_scripts` - (Optional) One per resource type, each with:
+      `d1_databases`, `queues`, `worker_scripts`
+                       - (Optional) One per resource type, each with:
                            `defaults`  - tags for every resource of the type
                            `resources` - logical key => tags for one resource,
                                          keyed as in that type's own tfvars
@@ -1006,6 +1007,14 @@ variable "resource_tags" {
       resources = optional(map(map(string)), {})
     }), {})
     kv_namespaces = optional(object({
+      defaults  = optional(map(string), {})
+      resources = optional(map(map(string)), {})
+    }), {})
+    d1_databases = optional(object({
+      defaults  = optional(map(string), {})
+      resources = optional(map(map(string)), {})
+    }), {})
+    queues = optional(object({
       defaults  = optional(map(string), {})
       resources = optional(map(map(string)), {})
     }), {})

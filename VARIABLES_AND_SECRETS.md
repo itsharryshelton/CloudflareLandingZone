@@ -99,7 +99,7 @@ the CSV once they are all uploaded.
 | `<account>-tunnels-apply` | `tunnels` | `terraform-tunnels-apply` | `Cloudflare Tunnel:Edit`; `Zone:Read` + `DNS:Edit` if a hostname is published |
 | `<account>-waf-apply` | `waf` | `terraform-waf-apply` | `Zone WAF:Edit`, `Zone:Read` |
 | `<account>-wan-apply` | `wan` | `terraform-wan-apply` | `Magic Transit:Edit` |
-| `<account>-workers-apply` | `workers` | `terraform-workers-apply` | `Workers Scripts:Edit`, `Workers KV Storage:Edit`, `Zone:Read`; `Workers Routes:Edit` if routes are declared; `DNS:Edit` for a custom domain |
+| `<account>-workers-apply` | `workers` | `terraform-workers-apply` | `Workers Scripts:Edit`, `Workers KV Storage:Edit`, `Zone:Read`; `D1:Edit` if databases are declared; `Queues:Edit` if queues are declared; `Workers Routes:Edit` if routes are declared; `DNS:Edit` for a custom domain. `D1:Edit` also carries query execution over the D1 REST API, so it can read and rewrite the contents of every database in the account |
 | `<account>-zerotrust-apply` | `zerotrust` | `terraform-zerotrust-apply` | `Access: Organizations, Identity Providers, and Groups:Edit`, `Access: Apps and Policies:Edit`, `Access: Service Tokens:Edit` |
 | `<account>-zones-apply` | `zones` | `terraform-zone-apply` | `Zone:Edit`, `DNS:Edit`, `Zone Settings:Edit` |
 
