@@ -538,12 +538,44 @@ jobs:
           retention-days: ${{ inputs.plan_retention_days }}
           if-no-files-found: error
 
-      # Bulk KV data is loaded after apply if used
+      # D1 migrations and bulk KV data are both applied after apply, if used,
+      # and both go through wrangler
       - name: Setup Node for wrangler
         if: inputs.mode == 'apply' && inputs.layer == 'workers'
         uses: actions/setup-node@v6
         with:
           node-version: '22'
+
+      # Schema, not state: the layer creates the database, this applies the
+      # migrations that have not run yet. It has to be here rather than in a job
+      # of its own because only this job can read the state, and the state is
+      # the only thing that knows the database IDs.
+      #
+      # Ahead of the KV load and after the tag export, on the same reasoning:
+      # a failure here should not cost the run its tags, and a database with a
+      # missing table is a worse thing to leave behind than a stale dataset.
+      - name: Apply D1 migrations
+        if: inputs.mode == 'apply' && inputs.layer == 'workers'
+        run: |
+          set -euo pipefail
+          # Same derivation the token check above uses - the account ID is a fact
+          # of the account tree, not a secret, and wrangler reads it from the
+          # environment. CLOUDFLARE_API_TOKEN is already job-level env.
+          CLOUDFLARE_ACCOUNT_ID="$(grep -oE '[0-9a-f]{32}' "$ACCOUNT_DIR/account.tfvars" | head -n1)"
+          export CLOUDFLARE_ACCOUNT_ID
+
+          # Unlike the KV load below, this goes through the rate limiter.
+          # wrangler applies one migration per request against the same
+          # credential Terraform has just spent its budget on, and it runs
+          # immediately after the apply - the worst moment to be at the front of
+          # a 429 backoff. CLOUDFLARE_API_BASE_URL is wrangler's equivalent of
+          # the provider's CLOUDFLARE_BASE_URL.
+          if [[ -f "$CF_THROTTLE_PID" ]]; then
+            export CLOUDFLARE_API_BASE_URL="http://127.0.0.1:${CF_THROTTLE_PORT}/client/v4"
+            echo "wrangler base URL: $CLOUDFLARE_API_BASE_URL (rate limited to ${CF_THROTTLE_RPS} req/s)"
+          fi
+
+          bash .github/scripts/d1-migrations.sh "$LAYER_DIR"
 
       - name: Load KV datasets
         if: inputs.mode == 'apply' && inputs.layer == 'workers'
@@ -562,7 +594,8 @@ jobs:
           echo "### Applied \`${{ inputs.account }}\` / \`${{ inputs.layer }}\` — ${{ job.status }}" \
             >>"$GITHUB_STEP_SUMMARY"
 
-      # Runs after the KV load, which talks to Cloudflare through wrangler
+      # Runs after the D1 migrations and the KV load, both of which talk to
+      # Cloudflare through wrangler
       - name: Stop the rate limiter and report what it absorbed
         if: always()
         run: |
@@ -603,4 +636,7 @@ jobs:
           rm -f "$LAYER_DIR/backend.generated.tf" "$LAYER_DIR/tfplan" \
                 "$LAYER_DIR/tfplan.json" varfiles.txt comment.md \
                 "$CF_THROTTLE_PID" "$CF_THROTTLE_LOG"
+          # d1-migrations.sh writes one wrangler config per database and removes
+          # it on the way out; this catches a job killed between the two.
+          rm -f "$LAYER_DIR"/.d1-migrations-*.json
           rm -rf resource-tags

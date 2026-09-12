@@ -27,10 +27,11 @@ kv_namespaces = {
 # ---------------------------------------------------------------------------
 # D1 databases
 # ---------------------------------------------------------------------------
-# Terraform owns the database and the binding. The schema inside it is applied by
-# `wrangler d1 migrations apply` from the pipeline, against the database_id this
-# layer outputs - a migration is an ordered one-way change, which is not what a
-# plan reconciling desired state does.
+# Terraform owns the database and the binding. The schema inside it comes from
+# layers/workers/migrations/<key>/ - so this database's tables are in
+# migrations/telemetry/ - applied after every apply by
+# .github/scripts/d1-migrations.sh. A migration is an ordered one-way change,
+# which is not what a plan reconciling desired state does.
 d1_databases = {
   telemetry = {
     name                  = "account-a-telemetry"

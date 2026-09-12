@@ -184,6 +184,13 @@ post-apply `kv-bulk-load.sh` (which uses `wrangler`, and moves 15,000 keys in a
 handful of bulk calls), and `resource-tags.sh`, which runs in a job of its own
 with a token of its own - a separate 1200-request budget - and paces itself.
 
+The post-apply [`d1-migrations.sh`](../scripts/d1-migrations.sh) *does*: it runs
+on the same credential the apply has just spent its budget on, at the worst
+moment to be at the front of a 429 backoff, and one request per migration is not
+a volume the limiter costs anything. The workers job sets
+`CLOUDFLARE_API_BASE_URL` for that step, which is wrangler's equivalent of the
+provider's `CLOUDFLARE_BASE_URL`.
+
 ### Credential handling
 
 Every proxied request carries the Cloudflare bearer token, so the limiter handles
@@ -321,7 +328,7 @@ one needs.
 | `account_a-dns-apply`                | **required** | `DNS:Edit`, `Zone:Read` |
 | `account_a-lists-apply`              | **required** | `Account Filter Lists:Edit` at account scope |
 | `account_a-rules-apply`              | **required** | Not yet documented in the layer's `providers.tf`. Needs edit on the zone-level cache, late transform and origin ruleset phases, and `Zone:Read` |
-| `account_a-workers-apply`            | **required** | `Workers Scripts:Edit`, `Workers KV Storage:Edit` at account scope, and `Zone:Read`; plus `Workers Routes:Edit` only if a Worker declares routes, and `DNS:Edit` only for a custom domain |
+| `account_a-workers-apply`            | **required** | `Workers Scripts:Edit`, `Workers KV Storage:Edit` at account scope, and `Zone:Read`; plus `D1:Edit` and `Queues:Edit` where the layer declares databases or queues, `Workers Routes:Edit` only if a Worker declares routes, and `DNS:Edit` only for a custom domain. `D1:Edit` is the widest of these: it carries query execution over the D1 REST API, which is what the post-apply migrations step uses and also what lets the token read or rewrite any database in the account |
 | `account_a-tags-apply`               | none         | Resource Tagging write at account scope, plus zone scope for zone tags, and nothing else. Used by the `resource tags` job, not by a layer. The groups are in beta and not in Cloudflare's published list, so `bootstrap-account-tokens.sh` finds them by name - and never takes `Access: Tags`, a different feature |
 
 …and the same for `account_b`. Each token is scoped to **one account and one
