@@ -63,7 +63,7 @@ Terraform source, so adding an account, a layer or a module needs no edit here:
   |---|---|---|
   | 1 | `account_governance` | Account-wide permissions and resource-group scope. Every later tier's token is evaluated against what this applies, so it goes out on its own and first. |
   | 2 | `zones`, `bulk_redirects`, `device_posture`, `gateway`, `lists`, `wan` | `zones` *creates* zones. The rest touch no zone at all, so nothing waits on them - they ride along in this tier rather than being ordered against each other. `lists` must land before `waf`, and `device_posture` before `zerotrust`, whose Access policies name its rules; both do by being a tier earlier. |
-  | 3 | `dns`, `load_balancing`, `logpush`, `r2`, `rules`, `tunnels`, `waf`, `workers`, `zerotrust` | Resolve a zone with `data "cloudflare_zone"`, which fails at plan time until tier 2 has created it. `r2` is here because a bucket can be served from a custom domain, even where no bucket currently is; `tunnels` for the same reason, since a tunnel's public hostname needs a CNAME in its zone; `logpush` because a zone-scoped job is created against its zone, even on an account whose jobs are all account-scoped. `zerotrust` is here by `POST_ZONE_LAYERS` instead: Access applications are addressed by hostname, so they need the zone to exist even though the layer never reads one. |
+  | 3 | `dns`, `load_balancing`, `logpush`, `origin_pulls`, `r2`, `rules`, `tunnels`, `waf`, `workers`, `zerotrust` | Resolve a zone with `data "cloudflare_zone"`, which fails at plan time until tier 2 has created it. `r2` is here because a bucket can be served from a custom domain, even where no bucket currently is; `tunnels` for the same reason, since a tunnel's public hostname needs a CNAME in its zone; `logpush` because a zone-scoped job is created against its zone, even on an account whose jobs are all account-scoped; `origin_pulls` because Authenticated Origin Pulls is configured on a zone, and only means anything once that zone's SSL mode is `full` or `strict`. `zerotrust` is here by `POST_ZONE_LAYERS` instead: Access applications are addressed by hostname, so they need the zone to exist even though the layer never reads one. |
 
   Tier 2 and 3 membership is **derived from the Terraform source** - `zone_base`
   call versus `data "cloudflare_zone"` block - so a new layer classifies itself.
@@ -313,6 +313,7 @@ one needs.
 | `account_a-device_posture-apply`     | **required** | `Zero Trust:Edit` at account scope, and nothing else. The same grant as `gateway`: Cloudflare has no narrower permission group for posture rules and service provider integrations |
 | `account_a-tunnels-apply`            | **required** | `Cloudflare Tunnel:Edit` at account scope; plus `Zone:Read` and `DNS:Edit` only if an ingress rule publishes a hostname, for its proxied CNAME                                                                   |
 | `account_a-logpush-apply`            | **required** | `Logs:Edit` at account and zone scope, and `Zone:Read`; plus `Zero Trust: PII Read` at account scope only if a job pushes an Access, Gateway or DEX dataset |
+| `account_a-origin_pulls-apply`       | **required** | `SSL and Certificates:Edit` and `Zone:Read` at zone scope, and nothing at account scope. Notably *not* `Zone:Edit` and *not* `DNS:Edit` |
 | `account_a-gateway-apply`            | **required** | `Zero Trust:Edit` at account scope, and nothing else. The API refers to the same grant as Zero Trust Write; it covers both the Gateway policy APIs and the category and application catalogues the layer resolves names against |
 | `account_a-wan-apply`                | **required** | `Magic Transit:Edit` at account scope, and nothing else. The permission group is named after the older product and covers the Cloudflare WAN tunnel and route APIs                                                              |
 | `account_a-bulk_redirects-apply`     | **required** | `Account Filter Lists:Edit`, `Account Rulesets:Edit` at account scope, and nothing at zone scope. Can redirect any hostname the account serves |
@@ -391,6 +392,15 @@ exfiltration and blinding in one grant. Jobs on Access, Gateway and DEX datasets
 also need `Zero Trust: PII Read`, without which Cloudflare will not create,
 change or delete them. It changes no traffic, but give it the same reviewer list
 as `gateway` and `zerotrust`.
+
+The `origin_pulls` token holds `SSL and Certificates:Edit` at zone scope, which
+is what uploads a client certificate and switches Authenticated Origin Pulls on.
+It is deliberately not given `Zone:Edit` or `DNS:Edit`. Either grant on its own
+is survivable; together with this one they are not, because a holder who can
+both repoint a hostname and decide which certificate the edge presents can stand
+up an origin of their own and have Cloudflare authenticate to it. Give it the
+same reviewer list as `zones`, and remember the private keys live in its state
+rather than in its token - see the layer secret below.
 
 The `device_posture` token holds `Zero Trust:Edit`, the same grant as `gateway`,
 because Cloudflare offers nothing narrower for posture. So the split this layer
@@ -487,6 +497,24 @@ Most types take `client_secret`; Uptycs takes `client_key` and `client_secret`,
 and a custom integration `access_client_secret`. Each one reads device inventory
 out of an MDM or EDR, lands in the saved plan and in `device_posture` state in
 plain text, and should be scoped read-only at the provider with an expiry.
+
+The `origin_pulls` layer takes one secret, wired in the same way and held in the
+**`<account>-plan`** environment for the same reason:
+**`TF_VAR_ORIGIN_PULL_CERTIFICATES`**, a JSON object of client certificates and
+their private keys, keyed by the `certificate_key` the account tree refers to.
+
+```
+TF_VAR_ORIGIN_PULL_CERTIFICATES = {"api_origin":{"certificate":"-----BEGIN CERTIFICATE-----\n...","private_key":"-----BEGIN PRIVATE KEY-----\n..."}}
+```
+
+Only needed where a zone uploads a certificate of its own; one running on the
+certificate Cloudflare presents by default needs nothing here. PEM is
+line-structured and a value flattened to one line is rejected by Cloudflare, so
+build it with `jq -n --rawfile cert x.crt --rawfile key x.key` rather than
+pasting. Each private key is an identity the origin has been told to trust, and
+it lands in the saved plan and in `origin_pulls` state in plain text - so a leak
+of either is a leak of the certificate, and the fix is to upload a replacement
+and only then drop the old one from the origin's trust store.
 
 On the apply environments, also set **Deployment branches** to `main` only, so a
 branch cannot reach a write token.

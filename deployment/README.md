@@ -14,6 +14,7 @@ Everything you edit lives here. The modules under [../modules/](../modules/) sta
 │   ├── lists/                         # own state: account-level IP, ASN and hostname lists
 │   ├── load_balancing/                # own state: monitors, pools, zone load balancers
 │   ├── logpush/                       # own state: Logpush jobs, account and zone log streams
+│   ├── origin_pulls/                  # own state: Authenticated Origin Pulls, client certificates, per-hostname edge-to-origin mTLS
 │   ├── r2/                            # own state: buckets, CORS, lifecycle, retention, domains
 │   ├── rules/                         # own state: cache rules, transform rules, origin rules
 │   ├── tunnels/                       # own state: Cloudflare Tunnels, public hostnames, private network routes
@@ -33,6 +34,7 @@ Everything you edit lives here. The modules under [../modules/](../modules/) sta
     │   ├── lists.tfvars               # shared lists     -> lists
     │   ├── load_balancing.tfvars      # load balancers   -> load_balancing
     │   ├── logpush.tfvars             # log streams      -> logpush
+    │   ├── origin_pulls.tfvars        # origin mTLS      -> origin_pulls
     │   ├── r2.tfvars                  # object storage   -> r2
     │   ├── rules.tfvars               # traffic rules    -> rules
     │   ├── tags.tfvars                # resource tags    -> zones, zerotrust, r2, workers
@@ -42,7 +44,7 @@ Everything you edit lives here. The modules under [../modules/](../modules/) sta
     │   ├── workers.tfvars             # edge compute     -> workers
     │   ├── zerotrust.tfvars           # Access posture   -> zerotrust
     │   ├── zone_config.tfvars         # zone settings    -> zones
-    │   └── zones.tfvars               # zone inventory   -> zones, bulk_redirects, dns, waf, lb, logpush, r2, rules, tunnels, workers
+    │   └── zones.tfvars               # zone inventory   -> zones, bulk_redirects, dns, waf, lb, logpush, origin_pulls, r2, rules, tunnels, workers
     └── account_b/
         └── ...
 ```
@@ -71,6 +73,7 @@ Tier 3: Zone-Dependent & Consumer Layers
 ├── dns                                (resolves zone IDs via data source; creates DNS records)
 ├── load_balancing                     (resolves zone IDs; provisions origin pools and health monitors)
 ├── logpush                            (resolves zone IDs for zone-scoped jobs; pushes logs to a SIEM or storage)
+├── origin_pulls                       (resolves zone IDs; enables Authenticated Origin Pulls and uploads client certificates)
 ├── r2                                 (provisions buckets; binds custom domains to existing zones)
 ├── rules                              (resolves zone IDs; manages cache, transform, and origin rules)
 ├── tunnels                            (resolves zone IDs; publishes tunnel hostnames as proxied CNAMEs)
@@ -82,7 +85,7 @@ Tier 3: Zone-Dependent & Consumer Layers
 Tier membership is derived directly from the Terraform source code:
 - **Tier 1 (`account_governance`):** Account-wide permissions and resource-group scopes. Every downstream token is evaluated against what this layer applies, so it runs on its own first.
 - **Tier 2 (`zones`, `bulk_redirects`, `device_posture`, `gateway`, `lists`, `wan`):** `zones` creates the zone containers at Cloudflare. The remaining layers touch no zones, so nothing waits on them. `lists` is deliberately placed in Tier 2 so that named lists exist before `waf` references them, and `device_posture` so that a posture rule exists before a `zerotrust` Access policy requires it.
-- **Tier 3 (`dns`, `load_balancing`, `logpush`, `r2`, `rules`, `tunnels`, `waf`, `workers`, `zerotrust`):** These layers resolve zones dynamically via `data "cloudflare_zone"`, which fails at plan time until Tier 2 has created the zone. `tunnels` resolves one for the proxied CNAME behind each public hostname, and `logpush` one for each zone-scoped job. `zerotrust` is included here because Access applications are addressed by hostname and require the corresponding zone and DNS record to exist.
+- **Tier 3 (`dns`, `load_balancing`, `logpush`, `origin_pulls`, `r2`, `rules`, `tunnels`, `waf`, `workers`, `zerotrust`):** These layers resolve zones dynamically via `data "cloudflare_zone"`, which fails at plan time until Tier 2 has created the zone. `tunnels` resolves one for the proxied CNAME behind each public hostname, and `logpush` one for each zone-scoped job. `origin_pulls` resolves one per zone it configures, and belongs behind `zones` for a second reason: the zone's SSL mode has to be `full` or `strict` before authenticating to the origin means anything. `zerotrust` is included here because Access applications are addressed by hostname and require the corresponding zone and DNS record to exist.
 
 ## Why split this way
 
@@ -96,9 +99,9 @@ Tier membership is derived directly from the Terraform source code:
 
 ## Layers do not read each other's state
 
-The `dns`, `waf`, `load_balancing`, `logpush`, `r2`, `rules`, `tunnels`, and `workers` layers resolve a zone key to a zone ID using `data "cloudflare_zone"` filtered by name and account ID, rather than reading `terraform_remote_state`. State files remain completely decoupled: any layer can be applied, re-initialised, or migrated without affecting the others.
+The `dns`, `waf`, `load_balancing`, `logpush`, `origin_pulls`, `r2`, `rules`, `tunnels`, and `workers` layers resolve a zone key to a zone ID using `data "cloudflare_zone"` filtered by name and account ID, rather than reading `terraform_remote_state`. State files remain completely decoupled: any layer can be applied, re-initialised, or migrated without affecting the others.
 
-This design requires the Cloudflare API to be accessible at plan time for consumer layers, and plans will fail if the zone does not yet exist. Apply `zones` first; `dns`, `waf`, `load_balancing`, `logpush`, `r2`, `rules`, `tunnels`, and `workers` can then plan and apply concurrently.
+This design requires the Cloudflare API to be accessible at plan time for consumer layers, and plans will fail if the zone does not yet exist. Apply `zones` first; `dns`, `waf`, `load_balancing`, `logpush`, `origin_pulls`, `r2`, `rules`, `tunnels`, and `workers` can then plan and apply concurrently.
 
 `account_governance` queries the API to resolve role, permission group, and resource group names to IDs. `zerotrust` queries the account's existing Zero Trust organisation to adopt the configured team name. `gateway` dynamically resolves Cloudflare's content categories, security categories, and application catalogues so that configuration files reference human-readable names like `"Microsoft 365"` rather than arbitrary IDs like `606`.
 
@@ -128,6 +131,7 @@ export TF_VAR_identity_provider_secrets='{"entra_id":"<oauth_client_secret>"}'
 export TF_VAR_wan_ipsec_tunnel_psks='{"london_primary":"<pre_shared_key>"}'
 export TF_VAR_logpush_destination_secrets='{"audit_archive":"r2://<bucket>/audit/{DATE}?account-id=<id>&access-key-id=<key_id>&secret-access-key=<secret>"}'
 export TF_VAR_device_posture_integration_secrets='{"intune":{"client_secret":"<entra_app_client_secret>"}}'
+export TF_VAR_origin_pull_certificates='{"api_origin":{"certificate":"<client_certificate_pem>","private_key":"<private_key_pem>"}}'
 ```
 
 `.gitignore` enforces default-deny rules for `*.tfvars`, with explicit whitelisting for `layers/*/defaults.auto.tfvars` and `accounts/*/*.tfvars`. It explicitly re-denies `**/terraform.tfvars`, `**/local.auto.tfvars`, and `**/*.local.tfvars`.
@@ -157,6 +161,7 @@ The pipeline maps variable files to layers dynamically. The table below lists th
 | `lists`              | `account.tfvars`, `lists.tfvars`                          | None                                                                                                                |
 | `load_balancing`     | `account.tfvars`, `zones.tfvars`, `load_balancing.tfvars` | None                                                                                                                |
 | `logpush`            | `account.tfvars`, `zones.tfvars`, `logpush.tfvars`        | `TF_VAR_logpush_destination_secrets`, `TF_VAR_logpush_ownership_challenges` (from the `<account>-plan` environment) |
+| `origin_pulls`       | `account.tfvars`, `zones.tfvars`, `origin_pulls.tfvars`   | `TF_VAR_origin_pull_certificates` (from the `<account>-plan` environment; only where a zone uploads a certificate of its own) |
 | `r2`                 | `account.tfvars`, `zones.tfvars`, `r2.tfvars`, `tags.tfvars` | None                                                                                                                |
 | `rules`              | `account.tfvars`, `zones.tfvars`, `rules.tfvars`          | None                                                                                                                |
 | `tunnels`            | `account.tfvars`, `zones.tfvars`, `tunnels.tfvars`        | None (no tunnel secret is sent and no connector token is read)                                                      |
@@ -1010,6 +1015,99 @@ load_balancers = {
 ```
 
 Monitors and origin pools operate at account scope, whilst the load balancer hostname binding is scoped to the target zone. Hostnames must reside within the apex domain of the referenced `zone_key`.
+
+---
+
+## Authenticated Origin Pulls
+
+Authenticated Origin Pulls (AOP) is mutual TLS between the Cloudflare edge and the origin. The edge presents a client certificate on the origin connection, and an origin configured to verify it stops serving anything that did not arrive through Cloudflare - closing the hole that a WAF rule cannot, where an attacker who has learned the origin IP address connects to it directly and bypasses every edge control.
+
+Managed by the `origin_pulls` layer, which calls [`modules/authenticated_origin_pulls`](../modules/authenticated_origin_pulls/) once per zone. It is split from `zones` for two reasons. Its state holds private keys, and putting them in the state that also owns every zone would make the most sensitive state in the repository the one most people need to plan against. And its token needs `SSL and Certificates:Edit` but must hold neither `Zone:Edit` nor `DNS:Edit` - an identity the origin trusts, combined with the ability to repoint a hostname, is a materially bigger prize than either alone.
+
+### Two scopes
+
+| Scope | Resource | What it covers |
+|---|---|---|
+| Zone-level | `cloudflare_authenticated_origin_pulls_settings`, `cloudflare_authenticated_origin_pulls_certificate` | Every hostname in the zone, on one certificate |
+| Per-hostname | `cloudflare_authenticated_origin_pulls`, `cloudflare_authenticated_origin_pulls_hostname_certificate` | One hostname, on a certificate of its own |
+
+Where both cover a hostname, Cloudflare applies the per-hostname association. That is what lets `api.example.com` hold a dedicated certificate its origin alone trusts, while the rest of the zone keeps the zone-level posture.
+
+```hcl
+origin_pulls = {
+  primary = {
+    enabled         = true
+    certificate_key = "edge_client" # zone-wide; omit to use Cloudflare's default certificate
+
+    hostnames = [
+      { hostname = "api", certificate_key = "api_origin" },
+      { hostname = "legacy", certificate_key = "api_origin", enabled = false },
+      { hostname = "partner", certificate_id = "2458ce5a-0c35-4c7f-82c7-8e9487d3ff60" },
+    ]
+  }
+}
+```
+
+A hostname is qualified against its zone, and one belonging to another zone fails the plan rather than being silently turned into `api.other.com.example.com`. `enabled = false` parks an association without deleting it, which is the reversible way to take a hostname out.
+
+### Cloudflare's default certificate identifies Cloudflare, not you
+
+A zone that turns AOP on without uploading a certificate runs on the certificate the Cloudflare edge presents for **every** customer on the platform. An origin that trusts it therefore accepts anything proxied through any Cloudflare account, not only this one.
+
+That is still a real filter in front of an origin that would otherwise accept traffic from anywhere, so it is allowed and a `check` warns on each zone using it. Where the origin is relied on to identify the tenant - a shared origin, a cardholder-data environment - upload a certificate of your own and set `certificate_key`. Setting `allow_shared_cloudflare_certificate = false` turns that warning into a failed plan for the whole account.
+
+### Exporting the trust bundle to the origin
+
+The layer's `origin_trust_bundles` output is the deliverable for whoever configures the origin: per zone, the PEM the origin's client-certificate trust store has to hold. It carries Cloudflare's Origin Pull CA for a zone running on the default certificate, and the uploaded certificates for a zone running on its own. Certificates only - no private key is ever output.
+
+```bash
+terraform -chdir=layers/origin_pulls output -json origin_trust_bundles \
+  | jq -r '.primary' >cloudflare-client-ca.pem
+```
+
+```nginx
+# NGINX, and the NGINX ingress controller's server-snippet
+ssl_client_certificate /etc/nginx/cloudflare-client-ca.pem;
+ssl_verify_client on;
+```
+
+For Azure Application Gateway, upload the same file as a Trusted Client Certificate on an SSL profile and attach that profile to the listener. Both verify the chain only; neither checks *which* certificate was presented, so a bundle holding more than one accepts any of them.
+
+### Order of operations
+
+Applying this layer changes what Cloudflare **sends**. It does not make the origin ask for anything, and nothing in this state can see whether the origin has been changed.
+
+1. Apply `origin_pulls`.
+2. Take the bundle out of `origin_trust_bundles` and install it at the origin.
+3. Switch the origin to require a client certificate.
+
+Doing 3 before 1 fails every request in between. Removing a certificate runs the same sequence backwards: stop requiring it at the origin first.
+
+### Secrets Injection
+
+Certificate material never goes in `.tfvars`. It is supplied at plan time, keyed by certificate, from the `<account>-plan` environment's `TF_VAR_ORIGIN_PULL_CERTIFICATES`:
+
+```bash
+export TF_VAR_origin_pull_certificates="$(jq -n \
+  --rawfile cert api.crt --rawfile key api.key \
+  '{api_origin: {certificate: $cert, private_key: $key}}')"
+```
+
+PEM is line-structured and a value flattened to one line is rejected by Cloudflare, which is why the keys are read with `--rawfile` rather than pasted. The plan fails for a `certificate_key` naming material that was not supplied, and for supplied material nothing refers to - an unused private key in state is one nobody rotates and nobody misses.
+
+Self-signed is normal here: the origin is told to trust this certificate itself, so there is nothing for a public CA to add. Cloudflare does not renew an uploaded certificate, and an expired one fails every origin connection it covers, so watch `expires_on` in the `certificates` output.
+
+### Governing defaults
+
+| Setting | Default | Effect |
+|---|---|---|
+| `default_zone_level_enabled` | `false` | Zone-level AOP is opt-in per zone rather than inherited. |
+| `allow_shared_cloudflare_certificate` | `true` | Permits a zone to run on Cloudflare's default certificate, with a `check` warning per zone. `false` fails the plan instead. |
+| `cloudflare_origin_pull_ca_certificate` | `null` | Uses the copy vendored at `layers/origin_pulls/ca/`. See that directory's README to refresh it. |
+
+### Out of Scope
+
+Edge mTLS in the other direction - client certificates presented *by visitors to Cloudflare*, through API Shield or an Access mTLS policy - is a different resource family (`cloudflare_mtls_certificate`, `cloudflare_zero_trust_access_mtls_certificate`) and is not managed here. The zone's SSL mode, which has to be `full` or `strict` for any of this to apply, belongs to the `zones` layer.
 
 ---
 

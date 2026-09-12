@@ -385,7 +385,7 @@ jobs:
           # other. load_balancing is deliberately not in the list: its tfvars is
           # currently a commented-out example, and a file that assigns nothing
           # selects every layer for that account by design.
-          for layer in account_governance bulk_redirects device_posture dns gateway lists logpush r2 rules tunnels waf wan workers zerotrust; do
+          for layer in account_governance bulk_redirects device_posture dns gateway lists logpush origin_pulls r2 rules tunnels waf wan workers zerotrust; do
             if [[ ! -f "deployment/accounts/$acct/$layer.tfvars" ]]; then
               echo "::notice::$acct has no $layer.tfvars - assertion skipped"
               continue
@@ -405,7 +405,8 @@ jobs:
           assert_matrix "the zone inventory reaches only the layers that declare it" \
             "deployment/accounts/$acct/zones.tfvars" \
             "$(expect "$acct:bulk_redirects" "$acct:dns" "$acct:load_balancing" "$acct:logpush" \
-                      "$acct:r2" "$acct:rules" "$acct:tunnels" "$acct:waf" "$acct:workers" "$acct:zones")" || rc=1
+                      "$acct:origin_pulls" "$acct:r2" "$acct:rules" "$acct:tunnels" "$acct:waf" \
+                      "$acct:workers" "$acct:zones")" || rc=1
 
           # zone_config.tfvars was dns.tfvars until DNS moved to its own layer.
           # It owns var.zone_config - zone settings and TLS posture - and must
@@ -484,8 +485,8 @@ jobs:
           if ! jq -e '.[1] | index("zones") != null' <<<"$order" >/dev/null; then
             echo "::error::apply tier 2 must contain 'zones', got '$tier2' (full order: $order)"
             rc=1
-          elif [[ "$tier3" != "dns,load_balancing,logpush,r2,rules,tunnels,waf,workers,zerotrust" ]]; then
-            echo "::error::apply tier 3 should be 'dns,load_balancing,logpush,r2,rules,tunnels,waf,workers,zerotrust', got '$tier3' (full order: $order)"
+          elif [[ "$tier3" != "dns,load_balancing,logpush,origin_pulls,r2,rules,tunnels,waf,workers,zerotrust" ]]; then
+            echo "::error::apply tier 3 should be 'dns,load_balancing,logpush,origin_pulls,r2,rules,tunnels,waf,workers,zerotrust', got '$tier3' (full order: $order)"
             rc=1
           else
             echo "ok: zones applies in tier 2, ahead of the layers that look a zone up ($order)"

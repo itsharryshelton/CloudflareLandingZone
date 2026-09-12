@@ -596,6 +596,28 @@ TOKEN_SPECS["terraform-deviceposture-apply"]="$(cat <<JSON
 JSON
 )"
 
+# 9e. terraform-originpulls-apply
+ORIGIN_PULLS_ZONE_PERMS="$(build_perm_array "zone" \
+  "SSL and Certificates:Edit|SSL and Certificates Write" \
+  "Zone:Read|Zone Read")"
+TOKEN_SPECS["terraform-originpulls-apply"]="$(cat <<JSON
+{
+  "name": "terraform-originpulls-apply",
+  "policies": [
+    {
+      "effect": "allow",
+      "permission_groups": $ORIGIN_PULLS_ZONE_PERMS,
+      "resources": {
+        "$ACCOUNT_RESOURCE": {
+          "$ZONE_RESOURCE": "*"
+        }
+      }
+    }
+  ]
+}
+JSON
+)"
+
 # 10. terraform-zone-apply
 ZONE_PERMS="$(build_perm_array "zone" \
   "DNS:Edit|DNS Write" \
@@ -650,6 +672,7 @@ TOKEN_NAMES=(
   "terraform-gateway-apply"
   "terraform-loadbalancing-apply"
   "terraform-logpush-apply"
+  "terraform-originpulls-apply"
   "terraform-r2-apply"
   "terraform-tags-apply"
   "terraform-tunnels-apply"
@@ -770,6 +793,7 @@ SECURITY WARNING & NEXT STEPS:
    gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-gateway-apply
    gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-load_balancing-apply
    gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-logpush-apply
+   gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-origin_pulls-apply
    gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-r2-apply
    gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-tags-apply   (terraform-tags-apply)
    gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-tunnels-apply
