@@ -1,0 +1,1048 @@
+<!doctype html>
+<html lang="en" data-theme="luxury">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CFLZ — Architectural Overview</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/daisyui@5.5.19/daisyui.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/daisyui@5.5.19/themes.css">
+<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.2.4/dist/index.global.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; }
+  :where(.grid, .flex) > * { min-width: 0; }
+  :where(p, h1, h2, h3, h4, li, dd, td, th, .badge) { overflow-wrap: anywhere; }
+  :where(img, svg, video, canvas) { max-width: 100%; height: auto; }
+
+  /* Figure palette - resolves against the active DaisyUI theme so diagrams
+     follow the page in light and dark. */
+  .fig {
+    --ink: var(--color-base-content);
+    --surface: var(--color-base-100);
+    --panel: var(--color-base-200);
+    --edge: color-mix(in oklch, var(--color-base-content) 22%, transparent);
+    --muted: color-mix(in oklch, var(--color-base-content) 58%, transparent);
+    width: 100%; height: auto; display: block;
+  }
+  .fig text { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+  .fig .t   { fill: var(--ink); }
+  .fig .tm  { fill: var(--muted); }
+  .fig .box { fill: var(--panel); stroke: var(--edge); stroke-width: 1.25; }
+  .fig .chip{ fill: var(--surface); stroke: var(--edge); stroke-width: 1.25; }
+  .fig .ln  { stroke: var(--muted); stroke-width: 1.75; fill: none; }
+  .fig .hl-p{ stroke: var(--color-primary); }
+  .fig .hl-w{ stroke: var(--color-warning); }
+  .fig .hl-e{ stroke: var(--color-error); }
+  .fig .fp  { fill: color-mix(in oklch, var(--color-primary) 16%, transparent); }
+  .fig .fw  { fill: color-mix(in oklch, var(--color-warning) 16%, transparent); }
+  .fig .fe  { fill: color-mix(in oklch, var(--color-error) 14%, transparent); }
+  .fig .fs  { fill: color-mix(in oklch, var(--color-success) 14%, transparent); }
+  .fig .fi  { fill: color-mix(in oklch, var(--color-info) 14%, transparent); }
+  .mono { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; }
+  .lead { font-size: 1.05rem; line-height: 1.75; }
+  .anchor { scroll-margin-top: 1.5rem; }
+</style>
+</head>
+<body class="bg-base-200 text-base-content">
+
+<!-- ======================================================================= -->
+<header class="border-b border-base-content/10 bg-base-100">
+  <div class="mx-auto max-w-6xl px-6 py-10 lg:py-14">
+    <div class="flex flex-wrap items-center gap-2 mb-5">
+      <span class="badge badge-primary badge-soft">Terraform</span>
+      <span class="badge badge-soft">Cloudflare</span>
+      <span class="badge badge-soft">GitHub Actions</span>
+      <span class="badge badge-soft">Apache-2.0</span>
+    </div>
+    <h1 class="text-4xl lg:text-5xl font-bold tracking-tight">Cloudflare Landing Zones</h1>
+    <p class="mt-4 lead max-w-3xl text-base-content/80">
+      A framework for running a multi-account, multi-zone Cloudflare estate as code. It is not a
+      collection of Terraform examples — it is an opinionated <strong>operating model</strong>:
+      where configuration lives, how state is partitioned, which credential is allowed to touch
+      what, and what a human has to approve before anything changes at the edge.
+    </p>
+    <p class="mt-4 text-sm text-base-content/60 max-w-3xl">
+      A read-first orientation for someone who has just opened the repository. Every claim below
+      cites the file it came from.
+    </p>
+  </div>
+</header>
+
+<!-- ======================================================================= -->
+<section class="mx-auto max-w-6xl px-6">
+  <div class="stats stats-vertical sm:stats-horizontal w-full bg-base-100 border-x border-b border-base-content/10 sm:rounded-b-box">
+    <div class="stat">
+      <div class="stat-title">Deployment layers</div>
+      <div class="stat-value text-primary">17</div>
+      <div class="stat-desc">one Terraform state each</div>
+    </div>
+    <div class="stat">
+      <div class="stat-title">Reusable modules</div>
+      <div class="stat-value">24</div>
+      <div class="stat-desc">+ 1 <span class="mono">_TEMPLATE</span></div>
+    </div>
+    <div class="stat">
+      <div class="stat-title">HCL</div>
+      <div class="stat-value">~25.6k</div>
+      <div class="stat-desc">lines across 266 <span class="mono">.tf</span> files</div>
+    </div>
+    <div class="stat">
+      <div class="stat-title">Workflows</div>
+      <div class="stat-value">7</div>
+      <div class="stat-desc">one can change infrastructure</div>
+    </div>
+  </div>
+</section>
+
+<!-- ======================================================================= -->
+<nav class="mx-auto max-w-6xl px-6 pt-10">
+  <ul class="menu menu-horizontal flex-wrap gap-1 bg-base-100 rounded-box border border-base-content/10 text-sm">
+    <li><a href="#model">Mental model</a></li>
+    <li><a href="#shape">Repo shape</a></li>
+    <li><a href="#state">State &amp; blast radius</a></li>
+    <li><a href="#order">Execution order</a></li>
+    <li><a href="#pipeline">Pipeline</a></li>
+    <li><a href="#creds">Credentials</a></li>
+    <li><a href="#decisions">Design decisions</a></li>
+    <li><a href="#change">Making a change</a></li>
+  </ul>
+</nav>
+
+<!-- ===================== 1. MENTAL MODEL ================================= -->
+<section id="model" class="anchor mx-auto max-w-6xl px-6 py-12">
+  <h2 class="text-2xl font-bold mb-2">1 · The mental model</h2>
+  <p class="text-base-content/70 max-w-3xl mb-8">
+    A landing zone is the agreed baseline an environment lands in <em>before</em> any workload
+    arrives — identity, topology, security posture and guardrails decided once and enforced
+    everywhere. CFLZ borrows the structure of Azure Landing Zones and the Microsoft Cloud Adoption
+    Framework and applies it to Cloudflare's edge. Three ideas carry the whole design.
+  </p>
+
+  <div class="grid gap-5 md:grid-cols-3">
+    <div class="card card-border bg-base-100">
+      <div class="card-body">
+        <div class="badge badge-primary badge-soft badge-sm">01</div>
+        <h3 class="card-title text-lg">GitOps over click-ops</h3>
+        <p class="text-sm text-base-content/75">
+          Terraform never runs on a workstation. Credentials and state keys live only in GitHub
+          Environments. The dashboard becomes a read surface; the repository is the source of truth,
+          and anything created by hand is detectable because managed resources carry a
+          <span class="mono">managed-by</span> tag.
+        </p>
+      </div>
+    </div>
+    <div class="card card-border bg-base-100">
+      <div class="card-body">
+        <div class="badge badge-primary badge-soft badge-sm">02</div>
+        <h3 class="card-title text-lg">Logic separated from configuration</h3>
+        <p class="text-sm text-base-content/75">
+          <span class="mono">.tf</span> files are customer-agnostic and identical across every
+          tenant. Everything tenant-specific — account IDs, domains, IP ranges, rules — is data in
+          <span class="mono">.tfvars</span>. Onboarding a zone is a config edit, not a code change.
+        </p>
+      </div>
+    </div>
+    <div class="card card-border bg-base-100">
+      <div class="card-body">
+        <div class="badge badge-primary badge-soft badge-sm">03</div>
+        <h3 class="card-title text-lg">Decoupled state per layer</h3>
+        <p class="text-sm text-base-content/75">
+          Each Cloudflare product area is its own root module with its own state file and its own
+          scoped API token. A WAF apply cannot propose destroying a zone, because zones are not in
+          its state and its token cannot edit them.
+        </p>
+      </div>
+    </div>
+  </div>
+
+  <div class="mt-8 grid gap-5 lg:grid-cols-2">
+    <div class="card card-border bg-base-100">
+      <div class="card-body">
+        <h3 class="card-title text-base">Platform Landing Zone</h3>
+        <p class="text-sm text-base-content/75">
+          Account-level foundation: RBAC and audit, Zero Trust identity, device posture, egress
+          filtering, tunnels, Magic WAN, and central Logpush streams to a SIEM or R2. It also owns
+          the <em>vending</em> process — the repeatable way a new domain is onboarded already
+          inheriting the security baseline.
+        </p>
+      </div>
+    </div>
+    <div class="card card-border bg-base-100">
+      <div class="card-body">
+        <h3 class="card-title text-base">Application Landing Zone</h3>
+        <p class="text-sm text-base-content/75">
+          Per-zone and per-workload scope: DNS records, WAF custom rules and rate limiting, cache and
+          transform rules, load balancing, Authenticated Origin Pulls, R2 buckets, and Workers with
+          their KV, D1 and queues. Teams get domain autonomy inside platform guardrails.
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ===================== 2. REPO SHAPE =================================== -->
+<section id="shape" class="anchor bg-base-100 border-y border-base-content/10">
+<div class="mx-auto max-w-6xl px-6 py-12">
+  <h2 class="text-2xl font-bold mb-2">2 · How the repository is shaped</h2>
+  <p class="text-base-content/70 max-w-3xl mb-8">
+    Three directories, three different jobs. The question this figure answers:
+    <strong>if I am onboarding a customer, which files do I touch?</strong>
+  </p>
+
+  <figure class="rounded-box border border-base-content/10 bg-base-200 p-4 sm:p-6">
+  <svg class="fig" viewBox="0 0 920 400" role="img" aria-labelledby="fig1-title fig1-desc">
+    <title id="fig1-title">The three-directory model</title>
+    <desc id="fig1-desc">Modules are sourced by layers; account tfvars are passed into layers at run time; only the accounts directory is customer-specific.</desc>
+
+    <defs>
+      <marker id="a1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+        <path d="M0 0 L10 5 L0 10 z" fill="var(--color-primary)"/>
+      </marker>
+      <marker id="a2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+        <path d="M0 0 L10 5 L0 10 z" fill="var(--color-warning)"/>
+      </marker>
+    </defs>
+
+    <g id="fig1-modules">
+      <title>modules/ — agnostic building blocks</title>
+      <rect class="box" x="24" y="60" width="256" height="248" rx="14"/>
+      <text class="t" x="28" y="44" font-size="15" font-weight="700">modules/</text>
+      <text class="tm" x="44" y="88" font-size="12">Agnostic building blocks</text>
+      <text class="tm" x="44" y="106" font-size="12">Flat arguments, real IDs</text>
+      <rect class="chip fp" x="44" y="124" width="216" height="30" rx="8"/>
+      <text class="t mono" x="58" y="144" font-size="12">zone_base</text>
+      <rect class="chip fp" x="44" y="162" width="216" height="30" rx="8"/>
+      <text class="t mono" x="58" y="182" font-size="12">dns_records</text>
+      <rect class="chip fp" x="44" y="200" width="216" height="30" rx="8"/>
+      <text class="t mono" x="58" y="220" font-size="11">waf · worker_script · r2_bucket</text>
+      <rect class="chip" x="44" y="238" width="216" height="30" rx="8"/>
+      <text class="tm mono" x="58" y="258" font-size="11">… 24 in total</text>
+      <text class="tm" x="44" y="288" font-size="11">Knows nothing about accounts</text>
+    </g>
+
+    <g id="fig1-layers">
+      <title>deployment/layers/ — root modules, one state each</title>
+      <rect class="box" x="332" y="60" width="256" height="248" rx="14"/>
+      <text class="t" x="336" y="44" font-size="15" font-weight="700">deployment/layers/</text>
+      <text class="tm" x="352" y="88" font-size="12">Root modules — one per product</text>
+      <text class="tm" x="352" y="106" font-size="12">One Terraform state each</text>
+      <rect class="chip fi" x="352" y="124" width="216" height="30" rx="8"/>
+      <text class="t mono" x="366" y="144" font-size="11">zones · dns · waf · r2</text>
+      <rect class="chip fi" x="352" y="162" width="216" height="30" rx="8"/>
+      <text class="t mono" x="366" y="182" font-size="11">zerotrust · gateway · tunnels</text>
+      <rect class="chip fi" x="352" y="200" width="216" height="30" rx="8"/>
+      <text class="t mono" x="366" y="220" font-size="11">workers · logpush · wan …</text>
+      <rect class="chip" x="352" y="238" width="216" height="30" rx="8"/>
+      <text class="tm mono" x="366" y="258" font-size="11">17 layers, shared by all accounts</text>
+      <text class="tm" x="352" y="288" font-size="11">Identical in every tenant repo</text>
+    </g>
+
+    <g id="fig1-accounts">
+      <title>deployment/accounts/ — the only directory operators edit</title>
+      <rect class="box fw" x="640" y="60" width="256" height="248" rx="14"/>
+      <text class="t" x="644" y="44" font-size="15" font-weight="700">deployment/accounts/</text>
+      <text class="tm" x="660" y="88" font-size="12">Configuration as data</text>
+      <text class="tm" x="660" y="106" font-size="12">One tree per Cloudflare account</text>
+      <rect class="chip" x="660" y="124" width="216" height="30" rx="8"/>
+      <text class="t mono" x="674" y="144" font-size="11">account_a/zones.tfvars</text>
+      <rect class="chip" x="660" y="162" width="216" height="30" rx="8"/>
+      <text class="t mono" x="674" y="182" font-size="11">account_a/dns.tfvars</text>
+      <rect class="chip" x="660" y="200" width="216" height="30" rx="8"/>
+      <text class="t mono" x="674" y="220" font-size="11">account_a/waf.tfvars …</text>
+      <rect class="chip" x="660" y="238" width="216" height="30" rx="8"/>
+      <text class="t mono" x="674" y="258" font-size="11">account_b/…</text>
+      <text class="t" x="660" y="288" font-size="11" font-weight="700">The only files you edit</text>
+    </g>
+
+    <g id="fig1-edge-source">
+      <title>Layers source modules by immutable tag</title>
+      <path class="ln hl-p" d="M284 184 L326 184" marker-end="url(#a1)"/>
+      <text class="tm mono" x="305" y="170" font-size="10" text-anchor="middle">?ref=v1.2.0</text>
+    </g>
+    <g id="fig1-edge-vars">
+      <title>Account tfvars are passed with -var-file at run time</title>
+      <path class="ln hl-w" d="M636 184 L594 184" marker-end="url(#a2)"/>
+      <text class="tm mono" x="615" y="170" font-size="10" text-anchor="middle">-var-file</text>
+    </g>
+
+    <text class="tm" x="460" y="348" font-size="12" text-anchor="middle">Zones are map keys inside tfvars — never directories. Adding a zone touches three config files, no code.</text>
+    <text class="tm" x="460" y="372" font-size="11" text-anchor="middle">Source: deployment/README.md · deployment/layers/dns/dns.tf</text>
+  </svg>
+  </figure>
+
+  <div class="mt-8 grid gap-5 lg:grid-cols-2">
+    <div>
+      <h3 class="font-semibold mb-2">Upstream template, downstream tenants</h3>
+      <p class="text-sm text-base-content/75">
+        This repository is the <strong>upstream template</strong>. A production deployment is a fork
+        into the customer's own GitHub organisation, with their own R2 state bucket and their own
+        scoped tokens. Modules live here for development convenience, but a real tenant points each
+        layer at a tagged external module repository, so a commit on <span class="mono">main</span>
+        cannot reach live infrastructure until someone bumps a version deliberately.
+      </p>
+    </div>
+    <div>
+      <h3 class="font-semibold mb-2">Config precedence</h3>
+      <ol class="text-sm text-base-content/75 list-decimal ml-5 space-y-1">
+        <li><span class="mono">layers/&lt;layer&gt;/defaults.auto.tfvars</span> — platform baseline, auto-loaded, customer-agnostic.</li>
+        <li><span class="mono">accounts/&lt;account&gt;/*.tfvars</span> — passed with <span class="mono">-var-file</span>, overrides defaults.</li>
+        <li><span class="mono">local.auto.tfvars</span> — operator experiments, gitignored.</li>
+      </ol>
+      <div role="alert" class="alert alert-warning alert-soft mt-4 text-sm">
+        <span><span class="mono">-var-file</span> does not merge maps — the last file defining a variable wins wholesale. So account config is partitioned <em>by variable</em>: no two files in an account tree assign the same top-level variable. <span class="mono">tf-varfiles.sh</span> relies on that to work out which files a layer takes.</span>
+      </div>
+    </div>
+  </div>
+
+  <h3 class="font-semibold mt-12 mb-1">The same idea in four files</h3>
+  <p class="text-sm text-base-content/70 mb-6 max-w-3xl">
+    Follow one DNS record from configuration through to the Cloudflare resource. Nothing
+    customer-specific appears outside the first two files.
+  </p>
+
+  <div class="space-y-6">
+    <div>
+      <div class="flex flex-wrap items-baseline gap-2 mb-2">
+        <span class="badge badge-warning badge-soft badge-sm">config</span>
+        <code class="text-sm">deployment/accounts/account_a/zones.tfvars</code>
+        <span class="text-xs text-base-content/60">— identity only: logical key → domain. Passed to every layer.</span>
+      </div>
+      <div id="code-zones-tfvars"></div>
+    </div>
+    <div>
+      <div class="flex flex-wrap items-baseline gap-2 mb-2">
+        <span class="badge badge-warning badge-soft badge-sm">config</span>
+        <code class="text-sm">deployment/accounts/account_a/dns.tfvars</code>
+        <span class="text-xs text-base-content/60">— records keyed by the same logical keys.</span>
+      </div>
+      <div id="code-dns-tfvars"></div>
+    </div>
+    <div>
+      <div class="flex flex-wrap items-baseline gap-2 mb-2">
+        <span class="badge badge-info badge-soft badge-sm">layer</span>
+        <code class="text-sm">deployment/layers/dns/zone_lookup.tf + dns.tf</code>
+        <span class="text-xs text-base-content/60">— resolves the zone by name at plan time, then fans out over the module.</span>
+      </div>
+      <div id="code-layer-dns"></div>
+    </div>
+    <div>
+      <div class="flex flex-wrap items-baseline gap-2 mb-2">
+        <span class="badge badge-primary badge-soft badge-sm">module</span>
+        <code class="text-sm">modules/dns_records/main.tf</code>
+        <span class="text-xs text-base-content/60">— takes a <span class="mono">zone_id</span>, not a domain, so it never owns the zone.</span>
+      </div>
+      <div id="code-module-dns"></div>
+    </div>
+  </div>
+
+  <div role="alert" class="alert alert-info alert-soft mt-6 text-sm">
+    <span>
+      Note the <span class="mono">lifecycle { precondition }</span> block. Every layer carries a
+      <span class="mono">preflight.tf</span> and every module validates its own inputs, so a config
+      mistake — an orphaned key, a duplicate record, an out-of-range tag value — fails at
+      <em>plan</em> time with a sentence explaining it, rather than applying cleanly against nothing.
+    </span>
+  </div>
+</div>
+</section>
+
+<!-- ===================== 3. STATE / BLAST RADIUS ========================= -->
+<section id="state" class="anchor mx-auto max-w-6xl px-6 py-12">
+  <h2 class="text-2xl font-bold mb-2">3 · State segmentation and blast radius</h2>
+  <p class="text-base-content/70 max-w-3xl mb-8">
+    The question this figure answers: <strong>what is the worst a single bad apply can do?</strong>
+    In Cloudflare the answer matters more than in most clouds, because deleting a zone takes every
+    DNS record in it.
+  </p>
+
+  <figure class="rounded-box border border-base-content/10 bg-base-100 p-4 sm:p-6">
+  <svg class="fig" viewBox="0 0 920 420" role="img" aria-labelledby="fig2-title fig2-desc">
+    <title id="fig2-title">Monolithic state versus state per account and layer</title>
+    <desc id="fig2-desc">On the left one state holds every product, so any apply can reach the zones. On the right each account-layer pair has its own state and token, containing failure to one cell.</desc>
+
+    <defs>
+      <marker id="a3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+        <path d="M0 0 L10 5 L0 10 z" fill="var(--color-error)"/>
+      </marker>
+      <marker id="a4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+        <path d="M0 0 L10 5 L0 10 z" fill="var(--color-warning)"/>
+      </marker>
+    </defs>
+
+    <g id="fig2-monolith">
+      <title>What CFLZ avoids: a single state for the whole account</title>
+      <text class="t" x="24" y="32" font-size="14" font-weight="700">Single state (avoided)</text>
+      <rect class="box fe hl-e" x="24" y="48" width="392" height="296" rx="14" stroke-dasharray="6 5"/>
+      <rect class="chip" x="52" y="82" width="160" height="44" rx="9"/>
+      <text class="t mono" x="70" y="109" font-size="12">zones</text>
+      <rect class="chip" x="228" y="82" width="160" height="44" rx="9"/>
+      <text class="t mono" x="246" y="109" font-size="12">dns</text>
+      <rect class="chip" x="52" y="140" width="160" height="44" rx="9"/>
+      <text class="t mono" x="70" y="167" font-size="12">waf</text>
+      <rect class="chip" x="228" y="140" width="160" height="44" rx="9"/>
+      <text class="t mono" x="246" y="167" font-size="11">r2 · workers · …</text>
+      <path class="ln hl-e" d="M132 196 L132 240" marker-end="url(#a3)"/>
+      <text class="t" x="220" y="272" font-size="12" text-anchor="middle" font-weight="600">one token, one plan</text>
+      <text class="tm" x="220" y="294" font-size="11.5" text-anchor="middle">a routine WAF change can propose</text>
+      <text class="tm" x="220" y="312" font-size="11.5" text-anchor="middle">destroying the zone it reads</text>
+    </g>
+
+    <g id="fig2-segmented">
+      <title>CFLZ: one state key and one scoped token per account and layer pair</title>
+      <text class="t" x="494" y="32" font-size="14" font-weight="700">CFLZ: state per account × layer</text>
+      <rect class="box" x="494" y="48" width="402" height="296" rx="14"/>
+
+      <text class="tm mono" x="512" y="80" font-size="11">account_a/</text>
+      <rect class="chip fs" x="512" y="90" width="86" height="38" rx="8"/>
+      <text class="t mono" x="526" y="114" font-size="10.5">zones</text>
+      <rect class="chip fs" x="606" y="90" width="86" height="38" rx="8"/>
+      <text class="t mono" x="620" y="114" font-size="10.5">dns</text>
+      <rect class="chip fw hl-w" x="700" y="90" width="86" height="38" rx="8" stroke-width="2"/>
+      <text class="t mono" x="714" y="114" font-size="10.5">waf</text>
+      <rect class="chip fs" x="794" y="90" width="86" height="38" rx="8"/>
+      <text class="t mono" x="808" y="114" font-size="10.5">r2 …</text>
+
+      <text class="tm mono" x="512" y="164" font-size="11">account_b/</text>
+      <rect class="chip fs" x="512" y="174" width="86" height="38" rx="8"/>
+      <text class="t mono" x="526" y="198" font-size="10.5">zones</text>
+      <rect class="chip fs" x="606" y="174" width="86" height="38" rx="8"/>
+      <text class="t mono" x="620" y="198" font-size="10.5">dns</text>
+      <rect class="chip fs" x="700" y="174" width="86" height="38" rx="8"/>
+      <text class="t mono" x="714" y="198" font-size="10.5">waf</text>
+      <rect class="chip fs" x="794" y="174" width="86" height="38" rx="8"/>
+      <text class="t mono" x="808" y="198" font-size="10.5">r2 …</text>
+
+      <path class="ln hl-w" d="M743 132 L743 238" marker-end="url(#a4)"/>
+      <text class="t" x="695" y="264" font-size="12" text-anchor="middle" font-weight="600">failure stops here</text>
+      <text class="tm" x="695" y="286" font-size="11.5" text-anchor="middle">its token holds Zone WAF:Edit + Zone:Read,</text>
+      <text class="tm" x="695" y="304" font-size="11.5" text-anchor="middle">so it cannot edit DNS or the zone at all</text>
+      <text class="tm mono" x="512" y="330" font-size="10.5">17 layers × N accounts state keys in R2</text>
+    </g>
+
+    <text class="tm" x="460" y="380" font-size="11.5" text-anchor="middle">State lives in Cloudflare R2 via the S3-compatible backend, one key per account per layer, locked with use_lockfile = true.</text>
+    <text class="tm" x="460" y="402" font-size="11" text-anchor="middle">Source: deployment/README.md · deployment/layers/*/terraform.tf · VARIABLES_AND_SECRETS.md</text>
+  </svg>
+  </figure>
+
+  <div class="grid gap-5 md:grid-cols-3 mt-8">
+    <div class="card card-border bg-base-100"><div class="card-body">
+      <h3 class="card-title text-base">No cross-state reads</h3>
+      <p class="text-sm text-base-content/75">
+        Consumer layers never use <span class="mono">terraform_remote_state</span>. They resolve a
+        zone key to a zone ID with <span class="mono">data "cloudflare_zone"</span> filtered by name
+        and account. States stay fully decoupled, so any layer can be re-initialised or migrated
+        alone — the trade is that consumer layers need the Cloudflare API reachable at plan time.
+      </p>
+    </div></div>
+    <div class="card card-border bg-base-100"><div class="card-body">
+      <h3 class="card-title text-base">Locking without DynamoDB</h3>
+      <p class="text-sm text-base-content/75">
+        R2 has no lock-table equivalent, so concurrent applies on one key could corrupt it.
+        <span class="mono">use_lockfile = true</span> uses S3 conditional writes, which R2 supports.
+        That is why every layer pins <span class="mono">required_version &gt;= 1.11.0</span>: on older
+        Terraform the argument is not understood, and the failure mode is an <em>unlocked apply</em>
+        rather than an error. Pipeline concurrency groups serialise per state key as a second
+        defence.
+      </p>
+    </div></div>
+    <div class="card card-border bg-base-100"><div class="card-body">
+      <h3 class="card-title text-base">Backend committed commented-out</h3>
+      <p class="text-sm text-base-content/75">
+        The <span class="mono">backend "s3"</span> block ships commented out so CI can run
+        <span class="mono">terraform init -backend=false</span> offline with no credentials. The
+        runner injects bucket, key and endpoint at init time, so nothing account-specific is ever
+        committed.
+      </p>
+    </div></div>
+  </div>
+
+  <h3 class="font-semibold mt-12 mb-3">The 17 layers</h3>
+  <p class="text-sm text-base-content/70 mb-4 max-w-3xl">
+    Tier is <em>derived from the Terraform source</em>, not from directory names — see the next
+    section. Token scope is the minimum that layer's apply environment holds.
+  </p>
+  <div class="overflow-x-auto rounded-box border border-base-content/10 bg-base-100">
+    <table class="table table-zebra table-sm">
+      <thead>
+        <tr><th>Layer</th><th>Tier</th><th>Scope</th><th>Owns</th><th>Apply token</th></tr>
+      </thead>
+      <tbody class="align-top">
+        <tr><td class="mono font-semibold">account_governance</td><td><span class="badge badge-error badge-soft badge-sm">1</span></td><td>Account</td><td>Members, user groups, RBAC, resource groups</td><td class="mono text-xs">Account Settings:Edit</td></tr>
+        <tr><td class="mono font-semibold">zones</td><td><span class="badge badge-warning badge-soft badge-sm">2</span></td><td>Zone</td><td>Zone lifecycle, rate plan, TLS posture, settings, bot management</td><td class="mono text-xs">Zone:Edit, DNS:Edit, Zone Settings:Edit</td></tr>
+        <tr><td class="mono font-semibold">bulk_redirects</td><td><span class="badge badge-warning badge-soft badge-sm">2</span></td><td>Account</td><td>URL redirect lists + execution ruleset</td><td class="mono text-xs">Account Filter Lists:Edit, Account Rulesets:Edit</td></tr>
+        <tr><td class="mono font-semibold">device_posture</td><td><span class="badge badge-warning badge-soft badge-sm">2</span></td><td>Account</td><td>Posture checks, MDM/EDR integrations (Intune, CrowdStrike)</td><td class="mono text-xs">Zero Trust:Edit</td></tr>
+        <tr><td class="mono font-semibold">gateway</td><td><span class="badge badge-warning badge-soft badge-sm">2</span></td><td>Account</td><td>SWG DNS/network/HTTP policies, TLS inspection, root CA</td><td class="mono text-xs">Zero Trust:Edit</td></tr>
+        <tr><td class="mono font-semibold">lists</td><td><span class="badge badge-warning badge-soft badge-sm">2</span></td><td>Account</td><td>IP, ASN and hostname lists consumed by WAF</td><td class="mono text-xs">Account Filter Lists:Edit</td></tr>
+        <tr><td class="mono font-semibold">wan</td><td><span class="badge badge-warning badge-soft badge-sm">2</span></td><td>Account</td><td>Magic WAN IPsec/GRE tunnels, static routes</td><td class="mono text-xs">Magic Transit:Edit</td></tr>
+        <tr><td class="mono font-semibold">dns</td><td><span class="badge badge-info badge-soft badge-sm">3</span></td><td>Zone</td><td>Per-zone DNS records, split from zone lifecycle</td><td class="mono text-xs">DNS:Edit, Zone:Read</td></tr>
+        <tr><td class="mono font-semibold">waf</td><td><span class="badge badge-info badge-soft badge-sm">3</span></td><td>Zone</td><td>Custom firewall rules, rate limiting</td><td class="mono text-xs">Zone WAF:Edit, Zone:Read</td></tr>
+        <tr><td class="mono font-semibold">rules</td><td><span class="badge badge-info badge-soft badge-sm">3</span></td><td>Zone</td><td>Cache, transform and origin rules</td><td class="mono text-xs">zone ruleset phases, Zone:Read</td></tr>
+        <tr><td class="mono font-semibold">load_balancing</td><td><span class="badge badge-info badge-soft badge-sm">3</span></td><td>Zone</td><td>Health monitors, origin pools, failover</td><td class="mono text-xs">Account + Zone Load Balancers:Edit, Zone:Read</td></tr>
+        <tr><td class="mono font-semibold">origin_pulls</td><td><span class="badge badge-info badge-soft badge-sm">3</span></td><td>Zone</td><td>Authenticated Origin Pulls, edge-to-origin mTLS, per hostname</td><td class="mono text-xs">SSL and Certificates:Edit, Zone:Read <em>(not Zone:Edit)</em></td></tr>
+        <tr><td class="mono font-semibold">tunnels</td><td><span class="badge badge-info badge-soft badge-sm">3</span></td><td>Both</td><td>Cloudflare Tunnels, public hostnames, private network routes</td><td class="mono text-xs">Cloudflare Tunnel:Edit (+ DNS:Edit if publishing)</td></tr>
+        <tr><td class="mono font-semibold">workers</td><td><span class="badge badge-info badge-soft badge-sm">3</span></td><td>Both</td><td>Worker scripts, routes, crons, KV, D1, queues</td><td class="mono text-xs">Workers Scripts + KV:Edit (+ D1, Queues, Routes as declared)</td></tr>
+        <tr><td class="mono font-semibold">zerotrust</td><td><span class="badge badge-info badge-soft badge-sm">3</span></td><td>Account</td><td>Access apps and policies, service tokens, IdPs</td><td class="mono text-xs">Access: Orgs/IdPs/Groups, Apps and Policies, Service Tokens:Edit</td></tr>
+        <tr><td class="mono font-semibold">r2</td><td><span class="badge badge-info badge-soft badge-sm">3</span></td><td>Both</td><td>Buckets, CORS, lifecycle, retention, custom domains</td><td class="mono text-xs">Workers R2 Storage:Edit (+ Zone:Read, DNS:Edit for domains)</td></tr>
+        <tr><td class="mono font-semibold">logpush</td><td><span class="badge badge-info badge-soft badge-sm">3</span></td><td>Both</td><td>Logpush jobs — audit, Gateway and zone logs to SIEM or R2</td><td class="mono text-xs">Logs:Edit, Zone:Read (+ PII Read for Access/Gateway/DEX)</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="text-xs text-base-content/55 mt-2">Source: <code>deployment/README.md</code>, <code>VARIABLES_AND_SECRETS.md §4</code>, each layer's <code>providers.tf</code> header.</p>
+</section>
+
+<!-- ===================== 4. EXECUTION ORDER ============================== -->
+<section id="order" class="anchor bg-base-100 border-y border-base-content/10">
+<div class="mx-auto max-w-6xl px-6 py-12">
+  <h2 class="text-2xl font-bold mb-2">4 · Execution order is derived, not declared</h2>
+  <p class="text-base-content/70 max-w-3xl mb-8">
+    Layer directories carry no numeric prefixes. Order comes from real infrastructure dependencies,
+    and <span class="mono">tf-matrix.sh</span> reads those out of the Terraform source. The question
+    this figure answers: <strong>why does adding a layer not require editing the pipeline?</strong>
+  </p>
+
+  <figure class="rounded-box border border-base-content/10 bg-base-200 p-4 sm:p-6">
+  <svg class="fig" viewBox="0 0 920 510" role="img" aria-labelledby="fig3-title fig3-desc">
+    <title id="fig3-title">Three sequential apply tiers</title>
+    <desc id="fig3-desc">Tier 1 is account governance, tier 2 creates zones and account-scoped services, tier 3 holds every layer that resolves a zone by data source. Membership is derived from the source code.</desc>
+
+    <defs>
+      <marker id="a5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+        <path d="M0 0 L10 5 L0 10 z" fill="var(--color-primary)"/>
+      </marker>
+    </defs>
+
+    <g id="fig3-tier1">
+      <title>Tier 1 — account authorisation, applied alone and first</title>
+      <rect class="box fe" x="24" y="36" width="608" height="76" rx="12"/>
+      <text class="t" x="44" y="62" font-size="13" font-weight="700">Tier 1 · Platform authorisation</text>
+      <rect class="chip" x="44" y="72" width="190" height="30" rx="8"/>
+      <text class="t mono" x="56" y="92" font-size="11.5">account_governance</text>
+      <text class="tm" x="248" y="92" font-size="11">RBAC and resource-group scope every later token is judged against</text>
+      <rect class="chip" x="656" y="48" width="240" height="52" rx="10"/>
+      <text class="tm" x="670" y="68" font-size="11">derived from: nothing —</text>
+      <text class="t mono" x="670" y="88" font-size="11">PREREQ_LAYERS list</text>
+    </g>
+
+    <path class="ln hl-p" d="M120 114 L120 142" marker-end="url(#a5)"/>
+    <text class="tm" x="138" y="134" font-size="11">applied, not merely planned, before the next tier starts</text>
+
+    <g id="fig3-tier2">
+      <title>Tier 2 — zone creation and account-scoped services</title>
+      <rect class="box fw" x="24" y="148" width="608" height="122" rx="12"/>
+      <text class="t" x="44" y="174" font-size="13" font-weight="700">Tier 2 · Foundational zones &amp; account services</text>
+      <rect class="chip hl-w" x="44" y="184" width="118" height="30" rx="8" stroke-width="2"/>
+      <text class="t mono" x="56" y="204" font-size="11.5">zones</text>
+      <rect class="chip" x="170" y="184" width="142" height="30" rx="8"/>
+      <text class="t mono" x="182" y="204" font-size="11.5">bulk_redirects</text>
+      <rect class="chip" x="320" y="184" width="142" height="30" rx="8"/>
+      <text class="t mono" x="332" y="204" font-size="11.5">device_posture</text>
+      <rect class="chip" x="470" y="184" width="142" height="30" rx="8"/>
+      <text class="t mono" x="482" y="204" font-size="11.5">gateway</text>
+      <rect class="chip" x="44" y="222" width="118" height="30" rx="8"/>
+      <text class="t mono" x="56" y="242" font-size="11.5">lists</text>
+      <rect class="chip" x="170" y="222" width="142" height="30" rx="8"/>
+      <text class="t mono" x="182" y="242" font-size="11.5">wan</text>
+      <text class="tm" x="324" y="242" font-size="11">only zones creates zones; the rest simply never need one</text>
+      <rect class="chip" x="656" y="170" width="240" height="72" rx="10"/>
+      <text class="tm" x="670" y="190" font-size="11">derived from: layer calls the</text>
+      <text class="t mono" x="670" y="210" font-size="11">zone_base</text>
+      <text class="tm" x="670" y="230" font-size="11">module (exactly one may)</text>
+    </g>
+
+    <path class="ln hl-p" d="M120 272 L120 306" marker-end="url(#a5)"/>
+    <text class="tm" x="138" y="296" font-size="11">tier 3 plans fail until the zone exists at Cloudflare</text>
+
+    <g id="fig3-tier3">
+      <title>Tier 3 — layers that resolve a zone at plan time</title>
+      <rect class="box fi" x="24" y="312" width="608" height="122" rx="12"/>
+      <text class="t" x="44" y="338" font-size="13" font-weight="700">Tier 3 · Zone-dependent &amp; consumer layers</text>
+      <rect class="chip" x="44" y="350" width="104" height="28" rx="8"/><text class="t mono" x="56" y="369" font-size="11">dns</text>
+      <rect class="chip" x="156" y="350" width="104" height="28" rx="8"/><text class="t mono" x="168" y="369" font-size="11">waf</text>
+      <rect class="chip" x="268" y="350" width="104" height="28" rx="8"/><text class="t mono" x="280" y="369" font-size="11">rules</text>
+      <rect class="chip" x="380" y="350" width="118" height="28" rx="8"/><text class="t mono" x="392" y="369" font-size="10.5">load_balancing</text>
+      <rect class="chip" x="506" y="350" width="106" height="28" rx="8"/><text class="t mono" x="518" y="369" font-size="11">logpush</text>
+      <rect class="chip" x="44" y="386" width="104" height="28" rx="8"/><text class="t mono" x="56" y="405" font-size="11">r2</text>
+      <rect class="chip" x="156" y="386" width="104" height="28" rx="8"/><text class="t mono" x="168" y="405" font-size="11">tunnels</text>
+      <rect class="chip" x="268" y="386" width="104" height="28" rx="8"/><text class="t mono" x="280" y="405" font-size="11">workers</text>
+      <rect class="chip" x="380" y="386" width="118" height="28" rx="8"/><text class="t mono" x="392" y="405" font-size="10.5">origin_pulls</text>
+      <rect class="chip hl-p" x="506" y="386" width="106" height="28" rx="8" stroke-width="2"/><text class="t mono" x="518" y="405" font-size="11">zerotrust</text>
+      <rect class="chip" x="656" y="326" width="240" height="94" rx="10"/>
+      <text class="tm" x="670" y="346" font-size="11">derived from: layer contains</text>
+      <text class="t mono" x="670" y="366" font-size="10.5">data "cloudflare_zone"</text>
+      <text class="tm" x="670" y="390" font-size="11">except zerotrust, forced here</text>
+      <text class="tm mono" x="670" y="408" font-size="10.5">by POST_ZONE_LAYERS</text>
+    </g>
+
+    <text class="tm" x="460" y="468" font-size="11.5" text-anchor="middle">Everything inside one tier runs concurrently. ci.yml asserts all three derivations, so a regression fails a PR rather than silently skipping a layer.</text>
+    <text class="tm" x="460" y="490" font-size="11" text-anchor="middle">Source: .github/scripts/tf-matrix.sh lines 50–53, 108–120, 247–300 · .github/workflows/README.md</text>
+  </svg>
+  </figure>
+
+  <div class="mt-8 grid gap-5 md:grid-cols-2">
+    <div role="alert" class="alert alert-success alert-soft text-sm">
+      <span><strong>Why zerotrust is an exception.</strong> Access applications are addressed by
+      hostname, so the zone and its DNS record must exist — but the layer never reads a zone data
+      source, so nothing in the Terraform expresses the dependency. It is listed explicitly, and the
+      script refuses to start if that list names a directory that does not exist, or a layer that
+      also calls <span class="mono">zone_base</span>.</span>
+    </div>
+    <div role="alert" class="alert alert-info alert-soft text-sm">
+      <span><strong>What the script emits.</strong> <span class="mono">matrix</span> (one job per
+      account-layer pair), <span class="mono">by_layer</span>,
+      <span class="mono">apply_order</span> as a list of tiers, and per-tier subsets with
+      <span class="mono">tierN_any</span> flags. On a PR it narrows by changed files — touching
+      <span class="mono">modules/zone_base/</span> selects every layer that calls it, for every
+      account.</span>
+    </div>
+  </div>
+</div>
+</section>
+
+<!-- ===================== 5. PIPELINE ===================================== -->
+<section id="pipeline" class="anchor mx-auto max-w-6xl px-6 py-12">
+  <h2 class="text-2xl font-bold mb-2">5 · The pipeline</h2>
+  <p class="text-base-content/70 max-w-3xl mb-8">
+    Terraform runs only inside GitHub Actions. The question this figure answers:
+    <strong>which credential is in play at each step, and where does a human stand in the way?</strong>
+  </p>
+
+  <figure class="rounded-box border border-base-content/10 bg-base-100 p-4 sm:p-6">
+  <svg class="fig" viewBox="0 0 920 650" role="img" aria-labelledby="fig4-title fig4-desc">
+    <title id="fig4-title">Plan and apply flow with credential boundaries</title>
+    <desc id="fig4-desc">A manual dispatch expands into account-layer pairs, plans with a read-only token, saves an immutable plan artifact, waits for a reviewer in a per-layer environment, then applies that exact plan with a scoped write token, followed by a tagging job with a tag-only token.</desc>
+
+    <defs>
+      <marker id="a6" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+        <path d="M0 0 L10 5 L0 10 z" fill="var(--color-base-content)" opacity="0.55"/>
+      </marker>
+      <marker id="a7" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+        <path d="M0 0 L10 5 L0 10 z" fill="var(--color-error)"/>
+      </marker>
+    </defs>
+
+    <text class="tm" x="24" y="26" font-size="11" font-weight="700">STEP</text>
+    <text class="tm" x="608" y="26" font-size="11" font-weight="700">CREDENTIAL IN PLAY</text>
+
+    <g id="fig4-dispatch">
+      <title>workflow_dispatch — manual only</title>
+      <rect class="box" x="24" y="40" width="560" height="52" rx="10"/>
+      <text class="t" x="44" y="62" font-size="12.5" font-weight="700">workflow_dispatch</text>
+      <text class="tm" x="44" y="80" font-size="11">Actions tab. Inputs: account, layer, api_rps, parallelism. No push trigger.</text>
+    </g>
+    <path class="ln" d="M120 92 L120 110" marker-end="url(#a6)"/>
+
+    <g id="fig4-matrix">
+      <title>tf-matrix.sh and tf-varfiles.sh resolve the work</title>
+      <rect class="box" x="24" y="112" width="560" height="62" rx="10"/>
+      <text class="t mono" x="44" y="134" font-size="12">tf-matrix.sh → tf-varfiles.sh</text>
+      <text class="tm" x="44" y="152" font-size="11">Selects every {account, layer} pair the inputs allow and sorts them into 3 tiers;</text>
+      <text class="tm" x="44" y="168" font-size="11">resolves the exact -var-file arguments each layer declares.</text>
+    </g>
+    <path class="ln" d="M120 174 L120 192" marker-end="url(#a6)"/>
+
+    <g id="fig4-init">
+      <title>init with backend config injected at run time</title>
+      <rect class="box" x="24" y="194" width="560" height="58" rx="10"/>
+      <text class="t mono" x="44" y="216" font-size="12">terraform init -reconfigure</text>
+      <text class="tm" x="44" y="234" font-size="11">Bucket, key and endpoint injected as -backend-config. Modules pulled with a</text>
+      <text class="tm" x="44" y="248" font-size="11">short-lived GitHub App token.</text>
+      <rect class="chip fs" x="608" y="196" width="288" height="54" rx="9"/>
+      <text class="t" x="622" y="216" font-size="11" font-weight="600">R2 state keys (repo secrets)</text>
+      <text class="tm" x="622" y="234" font-size="10.5">Object Read &amp; Write, state bucket only</text>
+    </g>
+    <path class="ln" d="M120 252 L120 270" marker-end="url(#a6)"/>
+
+    <g id="fig4-throttle">
+      <title>Loopback rate limiter in front of the Cloudflare API</title>
+      <rect class="box fw" x="24" y="272" width="560" height="64" rx="10"/>
+      <text class="t mono" x="44" y="294" font-size="12">cf-api-throttle.py  →  CLOUDFLARE_BASE_URL</text>
+      <text class="tm" x="44" y="312" font-size="11">Token bucket at 3.5 rps (the limit is 1200 / 5 min = 4.0/s) and retries any 429,</text>
+      <text class="tm" x="44" y="328" font-size="11">honouring Retry-After. Binds 127.0.0.1 only. Provider 5.x paces nothing itself.</text>
+    </g>
+    <path class="ln" d="M120 336 L120 354" marker-end="url(#a6)"/>
+
+    <g id="fig4-plan">
+      <title>Plan runs with a read-only token</title>
+      <rect class="box fi" x="24" y="356" width="560" height="62" rx="10"/>
+      <text class="t mono" x="44" y="378" font-size="12">terraform plan -out=plan.tfplan</text>
+      <text class="tm" x="44" y="396" font-size="11">Saved as an immutable artifact. A value-free summary of resource addresses and</text>
+      <text class="tm" x="44" y="412" font-size="11">actions goes to the job summary.</text>
+      <rect class="chip fi" x="608" y="356" width="288" height="60" rx="9"/>
+      <text class="t mono" x="622" y="376" font-size="11">&lt;account&gt;-plan</text>
+      <text class="tm" x="622" y="394" font-size="10.5">Read-only token, account + zone scope.</text>
+      <text class="tm" x="622" y="410" font-size="10.5">No reviewer; runs from any branch.</text>
+    </g>
+    <path class="ln hl-e" d="M120 418 L120 440" marker-end="url(#a7)"/>
+
+    <g id="fig4-gate">
+      <title>Human approval gate</title>
+      <rect class="box fe hl-e" x="24" y="442" width="560" height="54" rx="10" stroke-width="2"/>
+      <text class="t" x="44" y="466" font-size="12.5" font-weight="700">PAUSE · a required reviewer approves that specific plan</text>
+      <text class="tm" x="44" y="484" font-size="11">No -auto-approve anywhere in the repository. No destroy path anywhere either.</text>
+    </g>
+    <path class="ln" d="M120 496 L120 514" marker-end="url(#a6)"/>
+
+    <g id="fig4-apply">
+      <title>Apply consumes the exact approved plan file</title>
+      <rect class="box fp" x="24" y="516" width="560" height="58" rx="10"/>
+      <text class="t mono" x="44" y="538" font-size="12">terraform apply plan.tfplan</text>
+      <text class="tm" x="44" y="556" font-size="11">Terraform refuses a saved plan whose state has moved, so an apply cannot quietly</text>
+      <text class="tm" x="44" y="570" font-size="11">diverge from what was reviewed.</text>
+      <rect class="chip fp" x="608" y="514" width="288" height="62" rx="9"/>
+      <text class="t mono" x="622" y="534" font-size="11">&lt;account&gt;-&lt;layer&gt;-apply</text>
+      <text class="tm" x="622" y="552" font-size="10.5">That one layer's write token.</text>
+      <text class="tm" x="622" y="568" font-size="10.5">Reviewer required; main branch only.</text>
+    </g>
+    <path class="ln" d="M120 574 L120 592" marker-end="url(#a6)"/>
+
+    <g id="fig4-tags">
+      <title>Post-apply tagging job</title>
+      <rect class="box" x="24" y="594" width="560" height="46" rx="10"/>
+      <text class="t mono" x="44" y="616" font-size="12">resource-tags.sh</text>
+      <text class="tm" x="44" y="632" font-size="11">Runs once per account after the last tier; writes only the tags that differ.</text>
+      <rect class="chip" x="608" y="592" width="288" height="50" rx="9"/>
+      <text class="t mono" x="622" y="612" font-size="11">&lt;account&gt;-tags-apply</text>
+      <text class="tm" x="622" y="630" font-size="10.5">Tag-only token. No reviewer, main only.</text>
+    </g>
+  </svg>
+  <figcaption class="text-xs text-base-content/55 mt-3">Source: <code>.github/workflows/_terraform-run.yml</code>, <code>terraform-apply.yml</code>, <code>.github/workflows/README.md</code>, <code>VARIABLES_AND_SECRETS.md</code>.</figcaption>
+  </figure>
+
+  <h3 class="font-semibold mt-10 mb-3">Seven workflows, and what each is allowed to do</h3>
+  <div class="overflow-x-auto rounded-box border border-base-content/10 bg-base-100">
+    <table class="table table-zebra table-sm">
+      <thead><tr><th>Workflow</th><th>Trigger</th><th>Touches Cloudflare</th><th>Can change anything</th><th>What it is for</th></tr></thead>
+      <tbody class="align-top">
+        <tr><td class="mono">ci.yml</td><td>every PR, push to main</td><td><span class="badge badge-sm badge-success badge-soft">no</span></td><td>no</td><td><span class="mono">fmt -check</span>, tflint, <span class="mono">validate</span> per layer, and an <em>offline plan</em> for layers that can be planned with no credential</td></tr>
+        <tr><td class="mono">secret-scanning.yml</td><td>every PR, push, manual</td><td><span class="badge badge-sm badge-success badge-soft">no</span></td><td>no</td><td><span class="mono">betterleaks</span> credential leak detection</td></tr>
+        <tr><td class="mono">terraform-plan.yml</td><td>manual only</td><td>reads</td><td>no</td><td>Fleet or narrowed plan; publishes the plan artifact and summary</td></tr>
+        <tr><td class="mono">terraform-apply.yml</td><td>manual only</td><td>reads + writes</td><td><span class="badge badge-sm badge-error badge-soft">yes, after approval</span></td><td>Plans, waits for a reviewer, applies that exact plan, then tags</td></tr>
+        <tr><td class="mono">state-forget.yml</td><td>manual only</td><td>no</td><td>state only</td><td>Hand a resource between layers' states without deleting it at Cloudflare</td></tr>
+        <tr><td class="mono">state-unlock.yml</td><td>manual only</td><td>no</td><td>the lock only</td><td>Release an R2 lockfile left by a cancelled run (<span class="mono">PreconditionFailed</span>)</td></tr>
+        <tr><td class="mono">_terraform-run.yml</td><td>reusable</td><td>per caller</td><td>per caller</td><td>The shared init → throttle → plan/apply body</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="grid gap-5 lg:grid-cols-2 mt-8">
+    <div class="card card-border bg-base-100"><div class="card-body">
+      <h3 class="card-title text-base">Rate limiting is load-bearing, not a nicety</h3>
+      <p class="text-sm text-base-content/75">
+        The Cloudflare provider paced itself in 4.x via <span class="mono">rps</span>,
+        <span class="mono">retries</span> and backoff arguments. The 5.x rewrite dropped all four and
+        never replaced them, so a 5.x provider has <em>no</em> rate limiting and no 429 retry
+        (<a class="link" href="https://github.com/cloudflare/terraform-provider-cloudflare/issues/5505">provider issue #5505</a>).
+        At a few hundred zones a single plan is thousands of GETs, and unpaced it dies partway
+        through with <span class="mono">429 code 971</span>. Plans on <span class="mono">zones</span>
+        are therefore <strong>slow by design</strong>: a refresh of <em>n</em> resources cannot
+        finish faster than <span class="mono">n / api_rps</span> seconds. Raising
+        <span class="mono">api_rps</span> above 4.0 does not speed it up, it makes it fail.
+      </p>
+    </div></div>
+    <div class="card card-border bg-base-100"><div class="card-body">
+      <h3 class="card-title text-base">Tagging, until the provider catches up</h3>
+      <p class="text-sm text-base-content/75">
+        Cloudflare's Tagging API is in public beta and the provider has no tagging resource (none as
+        of 5.24.0), so Terraform <em>decides</em> the tags and a script <em>writes</em> them. Four
+        layers — <span class="mono">zones</span>, <span class="mono">zerotrust</span>,
+        <span class="mono">r2</span>, <span class="mono">workers</span> — validate
+        <span class="mono">tags.tfvars</span> at plan time and output the full tag set with IDs; the
+        apply job uploads that as a manifest, and a separate tag-only job reconciles it. Every
+        managed resource carries <span class="mono">managed-by</span> and
+        <span class="mono">layer</span>, which tfvars cannot override — so filtering on
+        <span class="mono">tag=!managed-by</span> finds anything created by hand. DNS records are
+        deliberately untagged: the beta caps an account at 10,000 tags.
+      </p>
+    </div></div>
+  </div>
+</section>
+
+<!-- ===================== 6. CREDENTIALS =================================== -->
+<section id="creds" class="anchor bg-base-100 border-y border-base-content/10">
+<div class="mx-auto max-w-6xl px-6 py-12">
+  <h2 class="text-2xl font-bold mb-2">6 · Credentials and environments</h2>
+  <p class="text-base-content/70 max-w-3xl mb-6">
+    The access model <em>is</em> the architecture. One GitHub Environment per account per layer means
+    a credential that can rewrite WAF rules is physically unable to touch DNS, and only
+    <span class="mono">account_governance</span> can grant administrative access.
+  </p>
+
+  <div class="grid gap-5 md:grid-cols-3">
+    <div class="card card-border bg-base-200"><div class="card-body">
+      <h3 class="card-title text-sm mono">&lt;account&gt;-plan</h3>
+      <p class="text-sm text-base-content/75">One per account. Read-only Cloudflare token plus any
+      <span class="mono">TF_VAR_*</span> secrets a plan needs. No reviewer, any branch — a plan
+      cannot change anything.</p>
+    </div></div>
+    <div class="card card-border bg-base-200"><div class="card-body">
+      <h3 class="card-title text-sm mono">&lt;account&gt;-&lt;layer&gt;-apply</h3>
+      <p class="text-sm text-base-content/75">One per layer. Holds that layer's write token behind a
+      <strong>required reviewer</strong>, restricted to <span class="mono">main</span>. Created by
+      <span class="mono">bootstrap-environments.sh</span>.</p>
+    </div></div>
+    <div class="card card-border bg-base-200"><div class="card-body">
+      <h3 class="card-title text-sm mono">&lt;account&gt;-tags-apply</h3>
+      <p class="text-sm text-base-content/75">Tag-only token. No reviewer by design: it writes only
+      what an already-approved apply output, and has no plan of its own to show. Still
+      <span class="mono">main</span>-only.</p>
+    </div></div>
+  </div>
+
+  <div class="grid gap-5 lg:grid-cols-2 mt-8">
+    <div>
+      <h3 class="font-semibold mb-2">What is committed, and what never is</h3>
+      <p class="text-sm text-base-content/75 mb-3">
+        Account IDs, domain names, IP ranges and routing topologies live in
+        <span class="mono">.tfvars</span> — operational configuration, not secret material, protected
+        by private-repo access control. <span class="mono">.gitignore</span> is default-deny for
+        <span class="mono">*.tfvars</span> with explicit allow-listing, and re-denies
+        <span class="mono">terraform.tfvars</span>, <span class="mono">local.auto.tfvars</span> and
+        <span class="mono">*.local.tfvars</span>.
+      </p>
+      <p class="text-sm text-base-content/75">
+        Secrets arrive only as environment variables: the Cloudflare token, the R2 state keys, and a
+        handful of <span class="mono">TF_VAR_*</span> maps — IdP client secrets, Magic WAN pre-shared
+        keys, Logpush destinations, device-posture integration secrets, origin-pull private keys.
+      </p>
+    </div>
+    <div>
+      <h3 class="font-semibold mb-2">Private modules without a PAT</h3>
+      <p class="text-sm text-base-content/75">
+        <span class="mono">GITHUB_TOKEN</span> is scoped to this repository alone, so
+        <span class="mono">terraform init</span> against a private modules repo would fall through to
+        interactive git auth. The <span class="mono">modules-auth</span> composite action mints a
+        GitHub App installation token per run: roughly one hour, read-only, scoped to that one
+        repository, revoked in a post step. Nothing is tied to a leaver and nothing expires silently.
+        It even shape-checks the PEM, because a malformed key otherwise fails deep inside Node's
+        WebCrypto with no hint that the secret is the problem.
+      </p>
+    </div>
+  </div>
+</div>
+</section>
+
+<!-- ===================== 7. DECISIONS ==================================== -->
+<section id="decisions" class="anchor mx-auto max-w-6xl px-6 py-12">
+  <h2 class="text-2xl font-bold mb-2">7 · Where CFLZ departs from Cloudflare's own guidance</h2>
+  <p class="text-base-content/70 max-w-3xl mb-8">
+    Cloudflare's Terraform best-practice guidance recommends organising by
+    <span class="mono">account / zone / product</span> directories and advises teams to
+    <em>"avoid modules (or use them sparingly)"</em>. CFLZ deliberately does neither — worth
+    understanding before you judge the layout.
+  </p>
+
+  <div class="overflow-x-auto rounded-box border border-base-content/10 bg-base-100">
+    <table class="table table-sm">
+      <thead><tr><th class="w-1/6">Question</th><th class="w-2/5">Cloudflare guidance</th><th class="w-2/5">CFLZ, and why</th></tr></thead>
+      <tbody class="align-top">
+        <tr>
+          <td class="font-semibold">Modules</td>
+          <td class="text-sm text-base-content/75">Avoid, or use sparingly — shared monolithic modules hide security behaviour behind ternaries and unpinned local paths, and an internal change can unexpectedly recreate dependent resources.</td>
+          <td class="text-sm text-base-content/75">Use them, but one repository per module with immutable SemVer tags. A breaking input change cannot reach a tenant without an explicit tag bump, and each product area gets its own commit history for audit.</td>
+        </tr>
+        <tr>
+          <td class="font-semibold">Zone layout</td>
+          <td class="text-sm text-base-content/75">One directory per zone, each with its own duplicated <span class="mono">.tf</span> files.</td>
+          <td class="text-sm text-base-content/75">Code lives once per product layer; zones are <span class="mono">for_each</span> entries in tfvars. At 50+ zones the directory model means a provider bump edits hundreds of files.</td>
+        </tr>
+        <tr>
+          <td class="font-semibold">State</td>
+          <td class="text-sm text-base-content/75">Implicitly one state per zone directory.</td>
+          <td class="text-sm text-base-content/75">One state per account × layer. Zone deletion — the most destructive Cloudflare failure mode — is isolated to the <span class="mono">zones</span> layer alone.</td>
+        </tr>
+        <tr>
+          <td class="font-semibold">Cross-layer references</td>
+          <td class="text-sm text-base-content/75">Not addressed.</td>
+          <td class="text-sm text-base-content/75">Never <span class="mono">terraform_remote_state</span>; always a plan-time data-source lookup. No inter-state coupling, no pipeline locking, layers migrate independently.</td>
+        </tr>
+        <tr>
+          <td class="font-semibold">Multiple accounts</td>
+          <td class="text-sm text-base-content/75">Not addressed.</td>
+          <td class="text-sm text-base-content/75">One run per account, never a <span class="mono">for_each</span> over accounts — a provider block carries one token and Terraform cannot take a dynamic provider alias in a <span class="mono">for_each</span> module. That constraint is turned into the isolation guarantee.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div role="alert" class="alert alert-warning alert-soft mt-6 text-sm">
+    <span>
+      <strong>Limitation, stated by the project itself.</strong> Coverage is not exhaustive — a given
+      deployment may need new variables or resources added to the <span class="mono">.tf</span>
+      files. Before a commit the maintainer formats and validates the Terraform and runs the offline
+      guardrail tests, and tests deployment where possible, but not every edge case or provider
+      update is covered. There is no feature timeline; contributions go through
+      <code>CONTRIBUTING.md</code>.
+    </span>
+  </div>
+</section>
+
+<!-- ===================== 8. MAKING A CHANGE ============================== -->
+<section id="change" class="anchor bg-base-100 border-y border-base-content/10">
+<div class="mx-auto max-w-6xl px-6 py-12">
+  <h2 class="text-2xl font-bold mb-2">8 · Making a change</h2>
+
+  <div class="grid gap-8 lg:grid-cols-2">
+    <div>
+      <h3 class="font-semibold mb-3">Adding a zone — config only</h3>
+      <ul class="steps steps-vertical">
+        <li class="step step-primary"><div class="text-left text-sm"><strong>Branch.</strong> Never commit to <span class="mono">main</span>.</div></li>
+        <li class="step step-primary"><div class="text-left text-sm">Add the logical key → domain to <span class="mono">accounts/&lt;account&gt;/zones.tfvars</span>.</div></li>
+        <li class="step step-primary"><div class="text-left text-sm">Add its settings to <span class="mono">zone_config.tfvars</span> and its records to <span class="mono">dns.tfvars</span>, under the same key.</div></li>
+        <li class="step step-primary"><div class="text-left text-sm">Open a PR. <span class="mono">ci.yml</span> narrows to the affected layers and runs fmt, lint, validate and an offline plan.</div></li>
+        <li class="step step-primary"><div class="text-left text-sm">Merge, then dispatch <span class="mono">terraform-apply</span>. Tier 2 creates the zone; tier 3 fills it.</div></li>
+      </ul>
+      <p class="text-xs text-base-content/60 mt-3">
+        Logical keys are permanent identity. Renaming one destroys and recreates the resource. Keys
+        are scoped per account: <span class="mono">primary</span> in <span class="mono">account_a</span>
+        is unrelated to <span class="mono">primary</span> in <span class="mono">account_b</span>.
+      </p>
+    </div>
+    <div>
+      <h3 class="font-semibold mb-3">House rules for changing the Terraform</h3>
+      <div class="space-y-3 text-sm text-base-content/75">
+        <div class="flex gap-3"><span class="badge badge-sm badge-soft mt-0.5">1</span><span>Keep <span class="mono">.tf</span> files customer-agnostic. Never hardcode tenant values outside <span class="mono">.tfvars</span>.</span></div>
+        <div class="flex gap-3"><span class="badge badge-sm badge-soft mt-0.5">2</span><span>Change <span class="mono">.tf</span> upstream first, then propagate downstream to tenant repos — not the other way round.</span></div>
+        <div class="flex gap-3"><span class="badge badge-sm badge-soft mt-0.5">3</span><span>Never run <span class="mono">terraform init</span> locally; state is remote and pipeline-managed.</span></div>
+        <div class="flex gap-3"><span class="badge badge-sm badge-soft mt-0.5">4</span><span>A new module means updating the workflows in <span class="mono">.github/workflows</span>.</span></div>
+        <div class="flex gap-3"><span class="badge badge-sm badge-soft mt-0.5">5</span><span>Comments explain the <em>why</em>, not the what. Everything conforms to <span class="mono">terraform fmt</span>.</span></div>
+        <div class="flex gap-3"><span class="badge badge-sm badge-soft mt-0.5">6</span><span>Conventional Commits, aligned to SemVer: <span class="mono">fix:</span> → patch, <span class="mono">feat:</span> → minor, <span class="mono">feat!:</span> or <span class="mono">BREAKING CHANGE:</span> → major.</span></div>
+      </div>
+      <p class="text-xs text-base-content/60 mt-4">Source: <code>AGENTS.md</code>, <code>CONTRIBUTING.md</code>, <code>deployment/README.md</code>.</p>
+    </div>
+  </div>
+
+  <h3 class="font-semibold mt-12 mb-3">Where to read next</h3>
+  <div class="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+    <div class="card card-border bg-base-200"><div class="card-body p-4">
+      <h4 class="font-semibold text-sm mono">README.md</h4><p class="text-xs text-base-content/70">The rationale and the CAF mapping.</p></div></div>
+    <div class="card card-border bg-base-200"><div class="card-body p-4">
+      <h4 class="font-semibold text-sm mono">deployment/README.md</h4><p class="text-xs text-base-content/70">Layers, accounts, tiers, var-file mapping.</p></div></div>
+    <div class="card card-border bg-base-200"><div class="card-body p-4">
+      <h4 class="font-semibold text-sm mono">.github/workflows/README.md</h4><p class="text-xs text-base-content/70">Pipeline, tiers, tagging, rate limiting, runbooks.</p></div></div>
+    <div class="card card-border bg-base-200"><div class="card-body p-4">
+      <h4 class="font-semibold text-sm mono">VARIABLES_AND_SECRETS.md</h4><p class="text-xs text-base-content/70">Every variable, secret, environment and token scope.</p></div></div>
+  </div>
+</div>
+</section>
+
+<footer class="mx-auto max-w-6xl px-6 py-10 text-xs text-base-content/50">
+  Generated from the repository at <span class="mono">main</span>. Counts taken from the working tree:
+  <span class="mono">17</span> layer directories, <span class="mono">25</span> module directories
+  including <span class="mono">_TEMPLATE</span>, <span class="mono">266</span> <span class="mono">.tf</span>
+  files excluding <span class="mono">.terraform/</span>. Licensed Apache-2.0; compatible with OpenTofu.
+</footer>
+
+<script type="module">
+  import { File } from "https://esm.sh/@pierre/diffs@1.2.10?bundle";
+
+  const options = {
+    theme: { light: "github-light", dark: "github-dark" },
+    themeType: "dark",
+    overflow: "wrap",
+  };
+
+  const zonesTfvars = [
+    '# Identity only: logical key => domain name. Passed to EVERY layer, so you only',
+    '# reference "primary" instead of your domain. Keys are permanent - renaming one',
+    '# destroys and recreates the zone.',
+    '',
+    'zones = {',
+    '  primary = {',
+    '    domain_name = "example.com"',
+    '    zone_tier   = "business"',
+    '  }',
+    '',
+    '  mail = {',
+    '    domain_name = "example.org"',
+    '    # No zone_tier, so this zone falls back to default_zone_tier ("free").',
+    '  }',
+    '}',
+    '',
+  ].join('\n');
+
+  const dnsTfvars = [
+    '# Consumed by the dns layer only. Keys must match zones.tfvars.',
+    '#',
+    '# Reminder: proxied = true needs ttl = 1 and only works on A/AAAA/CNAME.',
+    '',
+    'dns_config = {',
+    '  primary = {',
+    '    dns_records = [',
+    '      { name = "@",   type = "A",     content = "203.0.113.10", ttl = 1, proxied = true },',
+    '      { name = "www", type = "CNAME", content = "example.com",  ttl = 1, proxied = true },',
+    '      { name = "@",   type = "MX",    content = "mx.example.net", ttl = 3600, priority = 10 },',
+    '      { name = "@",   type = "TXT",   content = "v=spf1 include:example.net -all", ttl = 3600 },',
+    '    ]',
+    '  }',
+    '}',
+    '',
+  ].join('\n');
+
+  const layerDns = [
+    '# zone_lookup.tf - zone key -> zone ID, without reading the zones layer\'s state.',
+    'data "cloudflare_zone" "this" {',
+    '  for_each = local.zones_with_records',
+    '',
+    '  filter = {',
+    '    name    = each.value.domain_name',
+    '    account = { id = var.cloudflare_account_id }',
+    '  }',
+    '}',
+    '',
+    '# dns.tf - downstream deployments pin an immutable tag instead of a local path.',
+    'module "dns" {',
+    '  source = "git::https://github.com/Your-Org/cloudflare-platform-modules//dns_records"',
+    '',
+    '  for_each = local.zones_with_records',
+    '',
+    '  zone_id     = data.cloudflare_zone.this[each.key].zone_id',
+    '  domain_name = each.value.domain_name',
+    '',
+    '  records = each.value.dns_records',
+    '}',
+    '',
+  ].join('\n');
+
+  const moduleDns = [
+    '# DNS records for a zone this module does not own.',
+    '#',
+    '# Splitting DNS into its own layer and state means a DNS change refreshes DNS',
+    '# and nothing else, and a zone-settings change refreshes settings and nothing',
+    '# else. This is why this module takes zone_id rather than a domain to create.',
+    'resource "cloudflare_dns_record" "this" {',
+    '  for_each = local.records',
+    '',
+    '  zone_id  = var.zone_id',
+    '  name     = each.value.name',
+    '  type     = each.value.type',
+    '  content  = each.value.content',
+    '  ttl      = each.value.ttl',
+    '  proxied  = each.value.proxied',
+    '  priority = each.value.priority',
+    '  comment  = each.value.comment',
+    '  tags     = each.value.tags',
+    '',
+    '  lifecycle {',
+    '    precondition {',
+    '      condition     = length(local.duplicate_keys) == 0',
+    '      error_message = "records contains duplicate type/name/content combinations. Names are compared fully-qualified, so \\"www\\" and \\"www.<domain>\\" collide - each record must be unique."',
+    '    }',
+    '  }',
+    '}',
+    '',
+  ].join('\n');
+
+  const files = [
+    ["#code-zones-tfvars", "deployment/accounts/account_a/zones.tfvars", zonesTfvars],
+    ["#code-dns-tfvars", "deployment/accounts/account_a/dns.tfvars", dnsTfvars],
+    ["#code-layer-dns", "deployment/layers/dns/zone_lookup.tf + dns.tf", layerDns],
+    ["#code-module-dns", "modules/dns_records/main.tf", moduleDns],
+  ];
+
+  for (const [sel, name, contents] of files) {
+    const host = document.querySelector(sel);
+    if (!host) continue;
+    new File(options).render({ containerWrapper: host, file: { name, contents } });
+  }
+</script>
+</body>
+</html>
