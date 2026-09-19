@@ -63,13 +63,25 @@ Terraform source, so adding an account, a layer or a module needs no edit here:
   |---|---|---|
   | 1 | `account_governance` | Account-wide permissions and resource-group scope. Every later tier's token is evaluated against what this applies, so it goes out on its own and first. |
   | 2 | `zones`, `bulk_redirects`, `device_posture`, `gateway`, `lists`, `turnstile`, `wan` | `zones` *creates* zones. The rest touch no zone at all, so nothing waits on them - they ride along in this tier rather than being ordered against each other. `lists` must land before `waf`, and `device_posture` before `zerotrust`, whose Access policies name its rules; both do by being a tier earlier. |
-  | 3 | `dns`, `load_balancing`, `logpush`, `origin_pulls`, `r2`, `rules`, `tunnels`, `waf`, `workers`, `zerotrust` | Resolve a zone with `data "cloudflare_zone"`, which fails at plan time until tier 2 has created it. `r2` is here because a bucket can be served from a custom domain, even where no bucket currently is; `tunnels` for the same reason, since a tunnel's public hostname needs a CNAME in its zone; `logpush` because a zone-scoped job is created against its zone, even on an account whose jobs are all account-scoped; `origin_pulls` because Authenticated Origin Pulls is configured on a zone, and only means anything once that zone's SSL mode is `full` or `strict`. `zerotrust` is here by `POST_ZONE_LAYERS` instead: Access applications are addressed by hostname, so they need the zone to exist even though the layer never reads one. |
+  | 3 | `dns`, `load_balancing`, `logpush`, `origin_pulls`, `r2`, `rules`, `tunnels`, `waf`, `workers`, `zerotrust` | Resolve a zone with `data "cloudflare_zone"`, which fails at plan time until tier 2 has created it. `r2` is here because a bucket can be served from a custom domain, even where no bucket currently is; `tunnels` for the same reason, since a tunnel's public hostname needs a CNAME in its zone; `logpush` because a zone-scoped job is created against its zone, even on an account whose jobs are all account-scoped; `origin_pulls` because Authenticated Origin Pulls is configured on a zone, and only means anything once that zone's SSL mode is `full` or `strict`. `zerotrust` is here by its own `tier.tf` instead: Access applications are addressed by hostname, so they need the zone to exist even though the layer never reads one. |
 
   Tier 2 and 3 membership is **derived from the Terraform source** - `zone_base`
   call versus `data "cloudflare_zone"` block - so a new layer classifies itself.
-  Tier 1 is the exception: no Terraform reference expresses "authz must land
-  first", so it is the `PREREQ_LAYERS` list in
-  [`tf-matrix.sh`](../scripts/tf-matrix.sh). Keep that list short.
+
+  Where that derivation cannot reach, the layer **declares its own tier**, in an
+  `apply_tier` local in its own `tier.tf`. Two do. `account_governance` takes
+  tier 1 because no Terraform reference expresses "authz must land first" - the
+  dependency is on the API's authorisation decision, not on an attribute - and
+  `zerotrust` takes tier 3 because it addresses Access applications by hostname
+  without ever reading the zone. A declaration wins over the derivation, so keep
+  them to cases the source genuinely cannot express, and say why in the file.
+
+  The declaration lives with the layer rather than in a list in
+  [`tf-matrix.sh`](../scripts/tf-matrix.sh) so that renaming or retiring a layer
+  cannot leave a stale entry behind. It is validated before it is used: the tier
+  must be 1 to 3, `apply_tier` set in any file but `tier.tf` is an error rather
+  than a silent no-op, and a layer that calls `zone_base` cannot declare itself
+  into the tier that waits for zones, which would be waiting for itself.
 
 `ci.yml` asserts all three, so a regression in the derivation fails a PR rather
 than silently causing a merged change never to be planned.

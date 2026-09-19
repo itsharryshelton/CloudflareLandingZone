@@ -27,11 +27,11 @@
 # `by_layer` + `apply_order` drive apply.yml. Layer directories are NOT numbered,
 # so order is never taken from their names
 #
-# The one ordering that is NOT derivable from the source is the prerequisite tier
-# below. Account-level permissions and resource-group scoping are what every
-# later layer's token is evaluated against, so they go out first even though no
-# Terraform reference expresses that - the dependency is on the API's authz
-# decision, not on an attribute.
+# The one ordering that is NOT derivable from the source - account-level
+# permissions and resource-group scoping going out ahead of everything that is
+# evaluated against them - is declared by the layer itself, as an `apply_tier`
+# local in its own tier.tf. Keeping it there rather than in a list here means a
+# renamed or retired layer cannot leave a stale entry behind in this script.
 #
 # apply_order is a list of tiers. Walk tiers in order; everything inside one tier
 # is independent and may run concurrently.
@@ -46,11 +46,12 @@ set -euo pipefail
 LAYERS_DIR="deployment/layers"
 ACCOUNTS_DIR="deployment/accounts"
 
-# Layers that must apply before any other, in this order
-PREREQ_LAYERS=(account_governance)
-
-# Layers forced into the post-zone tier even though nothing in their source says so
-POST_ZONE_LAYERS=(zerotrust)
+# The tier numbers a layer's tier.tf may declare. These are the 1-based numbers
+# the READMEs and the apply workflow's job names use, not the 0-based indices
+# apply_order is emitted with. MAX_TIER must stay equal to the number of
+# plan/apply stage pairs terraform-apply.yml defines.
+MIN_TIER=1
+MAX_TIER=3
 
 BASE_SHA="${BASE_SHA:-}"
 HEAD_SHA="${HEAD_SHA:-HEAD}"
@@ -115,6 +116,19 @@ layer_creates_zones() {
 # read fails at plan time until the zone exists, which is the whole dependency.
 layer_looks_up_zones() {
   grep -rhqE '^[[:space:]]*data[[:space:]]+"cloudflare_zone"' "$LAYERS_DIR/$1"/*.tf 2>/dev/null
+}
+
+# A layer's self-declared apply tier
+layer_declared_tier() {
+  local f="$LAYERS_DIR/$1/tier.tf" n
+  [[ -f "$f" ]] || return 0
+  # `|| true` because a tier.tf with no parseable assignment is a real case that
+  # the validation below reports properly; under `set -o pipefail` an empty grep
+  # would otherwise abort the script here with nothing said about why.
+  n="$(grep -oE '^[[:space:]]*apply_tier[[:space:]]*=[[:space:]]*[0-9]+' "$f" \
+    | grep -oE '[0-9]+$' | head -n1 || true)"
+  [[ -n "$n" ]] || return 0
+  echo "$((10#$n))"
 }
 
 tfvars_assignments() {
@@ -244,21 +258,65 @@ by_layer="$(jq -c -n --argjson m "$matrix" --argjson ls "$layers_json" \
 # ---------------------------------------------------------------------------
 # Apply order, derived from the source rather than from directory names.
 # ---------------------------------------------------------------------------
-# Tier 0: PREREQ_LAYERS - account-wide permission and scoping changes that every
-#         later layer's token is evaluated against.
-# Tier 1: layers with no upstream dependency - they create zones, or touch no
+# Tier 1: account-wide permission and scoping changes that every later layer's
+#         token is evaluated against. Declared, never derived - nothing in the
+#         Terraform graph expresses an authorisation dependency.
+# Tier 2: layers with no upstream dependency - they create zones, or touch no
 #         zone at all.
-# Tier 2: layers that resolve a zone through a data source, so they cannot plan
-#         until a tier-1 layer has created it, plus POST_ZONE_LAYERS.
+# Tier 3: layers that resolve a zone through a data source, so they cannot plan
+#         until a tier-2 layer has created it.
 #
-# A layer that both creates and looks up zones is tier 1: it satisfies its own
+# A layer that both creates and looks up zones is tier 2: it satisfies its own
 # dependency within one state.
+#
+# A layer the derivation cannot place declares its own tier in tier.tf, and that
+# declaration wins. Every declaration is validated first, before any of them is
+# used, so a bad one fails the run loudly instead of quietly reordering the fleet.
+for layer in "${ALL_LAYERS[@]}"; do
+  # `apply_tier` set anywhere but tier.tf is the worst kind of mistake here: it
+  # reads to a human as a layer that has declared its tier, while the layer goes
+  # on being classified by derivation.
+  stray="$(grep -lE '^[[:space:]]*apply_tier[[:space:]]*=' "$LAYERS_DIR/$layer"/*.tf 2>/dev/null \
+    | grep -v '/tier\.tf$' || true)"
+  [[ -z "$stray" ]] || {
+    echo "ERROR: '$layer' sets apply_tier in $stray." >&2
+    echo "       Only $LAYERS_DIR/$layer/tier.tf is read. Move the local there." >&2
+    exit 1
+  }
+
+  [[ -f "$LAYERS_DIR/$layer/tier.tf" ]] || continue
+
+  declared="$(layer_declared_tier "$layer")"
+  [[ -n "$declared" ]] || {
+    echo "ERROR: $LAYERS_DIR/$layer/tier.tf declares no 'apply_tier = <n>'." >&2
+    echo "       Give it one, or delete the file and let the tier be derived." >&2
+    exit 1
+  }
+
+  if (( declared < MIN_TIER || declared > MAX_TIER )); then
+    echo "ERROR: $LAYERS_DIR/$layer/tier.tf sets apply_tier = $declared." >&2
+    echo "       Valid tiers are $MIN_TIER to $MAX_TIER; terraform-apply.yml defines no others." >&2
+    exit 1
+  fi
+
+  # A layer that creates zones cannot be put behind the tier that waits for
+  # zones to exist, because it would be waiting for itself.
+  if (( declared > 2 )) && layer_creates_zones "$layer"; then
+    echo "ERROR: $LAYERS_DIR/$layer/tier.tf puts '$layer' in tier $declared, but that layer" >&2
+    echo "       calls the zone_base module - it creates the zones that tier waits for." >&2
+    exit 1
+  fi
+done
+
 TIER0=(); TIER1=(); TIER2=()
 for layer in "${ALL_LAYERS[@]}"; do
-  if in_list "$layer" "${PREREQ_LAYERS[@]}"; then
-    TIER0+=("$layer")
-  elif in_list "$layer" "${POST_ZONE_LAYERS[@]}"; then
-    TIER2+=("$layer")
+  declared="$(layer_declared_tier "$layer")"
+  if [[ -n "$declared" ]]; then
+    case "$declared" in
+      1) TIER0+=("$layer") ;;
+      2) TIER1+=("$layer") ;;
+      3) TIER2+=("$layer") ;;
+    esac
   elif layer_creates_zones "$layer"; then
     TIER1+=("$layer")
   elif layer_looks_up_zones "$layer"; then
@@ -269,37 +327,10 @@ for layer in "${ALL_LAYERS[@]}"; do
 done
 
 if [[ ${#TIER2[@]} -gt 0 && ${#TIER1[@]} -eq 0 ]]; then
-  echo "ERROR: layers resolve a zone by lookup (${TIER2[*]}) but no layer creates one." >&2
+  echo "ERROR: layers are in apply tier 3 (${TIER2[*]}) but no layer creates a zone." >&2
   echo "       Expected exactly one layer to call the zone_base module." >&2
   exit 1
 fi
-
-# A named prerequisite that is not a real layer directory is a typo, and a silent
-# one: the layer would quietly apply in tier 1 alongside everything else.
-for layer in "${PREREQ_LAYERS[@]}"; do
-  in_list "$layer" "${ALL_LAYERS[@]}" || {
-    echo "ERROR: PREREQ_LAYERS names '$layer', which is not a directory under $LAYERS_DIR." >&2
-    exit 1
-  }
-done
-
-# Same silent-typo problem for the post-zone list. Additionally, a layer that
-# creates zones cannot be demoted behind itself.
-for layer in "${POST_ZONE_LAYERS[@]}"; do
-  in_list "$layer" "${ALL_LAYERS[@]}" || {
-    echo "ERROR: POST_ZONE_LAYERS names '$layer', which is not a directory under $LAYERS_DIR." >&2
-    exit 1
-  }
-  in_list "$layer" "${PREREQ_LAYERS[@]}" && {
-    echo "ERROR: '$layer' is in both PREREQ_LAYERS and POST_ZONE_LAYERS." >&2
-    exit 1
-  }
-  layer_creates_zones "$layer" && {
-    echo "ERROR: POST_ZONE_LAYERS names '$layer', but that layer calls the zone_base" >&2
-    echo "       module - it creates the zones the tier is meant to wait for." >&2
-    exit 1
-  }
-done
 
 tier_json() { # <items...> -> JSON array, empty-safe
   [[ $# -eq 0 ]] && { echo '[]'; return; }

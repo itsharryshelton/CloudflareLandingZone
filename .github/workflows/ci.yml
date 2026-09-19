@@ -461,7 +461,10 @@ jobs:
 
           # Tier 1 is the account-wide prerequisite tier: permissions and
           # resource-group scope go out before anything is evaluated against them.
-          # Nothing in the Terraform graph enforces that, so it is asserted here.
+          # Nothing in the Terraform graph enforces that - account_governance
+          # claims the tier in its own tier.tf - so it is asserted here. A
+          # deleted or edited tier.tf turns this red rather than quietly letting
+          # the authz change apply alongside what it authorises.
           if [[ "$tier1" != "account_governance" ]]; then
             echo "::error::apply tier 1 should be exactly 'account_governance', got '$tier1' (full order: $order)"
             rc=1
@@ -477,7 +480,7 @@ jobs:
           # zone at all - gateway, for one - has no upstream dependency and
           # correctly belongs there too.
           #
-          # zerotrust is in tier 3 by POST_ZONE_LAYERS rather than by a data
+          # zerotrust is in tier 3 by its own tier.tf rather than by a data
           # source: Access applications are addressed by hostname, so they need
           # the zone to exist even though the layer never reads one. tunnels is
           # there by its data source, for the CNAME behind each public hostname,
