@@ -68,6 +68,7 @@ Platform Layer (Central Governance)
 ├── tunnels              (Cloudflare Tunnels, public hostnames, private network routes)
 ├── gateway              (SWG egress filtering: DNS, network, and HTTP)
 ├── logpush              (Log streams: audit, Gateway and zone logs to a SIEM or R2 - Enterprise)
+├── turnstile            (Turnstile widgets: the CAPTCHA replacement embedded in a form)
 └── wan                  (Magic WAN tunnels, interconnects, static routes)
 
 Application Layer (Zone & Workload Scope)

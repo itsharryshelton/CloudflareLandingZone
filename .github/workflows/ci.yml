@@ -385,7 +385,7 @@ jobs:
           # other. load_balancing is deliberately not in the list: its tfvars is
           # currently a commented-out example, and a file that assigns nothing
           # selects every layer for that account by design.
-          for layer in account_governance bulk_redirects device_posture dns gateway lists logpush origin_pulls r2 rules tunnels waf wan workers zerotrust; do
+          for layer in account_governance bulk_redirects device_posture dns gateway lists logpush origin_pulls r2 rules tunnels turnstile waf wan workers zerotrust; do
             if [[ ! -f "deployment/accounts/$acct/$layer.tfvars" ]]; then
               echo "::notice::$acct has no $layer.tfvars - assertion skipped"
               continue

@@ -18,6 +18,7 @@ Everything you edit lives here. The modules under [../modules/](../modules/) sta
 │   ├── r2/                            # own state: buckets, CORS, lifecycle, retention, domains
 │   ├── rules/                         # own state: cache rules, transform rules, origin rules
 │   ├── tunnels/                       # own state: Cloudflare Tunnels, public hostnames, private network routes
+│   ├── turnstile/                     # own state: Turnstile widgets, the sitekey and secret a form is protected by
 │   ├── waf/                           # own state: firewall custom rules, rate limiting
 │   ├── wan/                           # own state: Magic WAN IPsec and GRE tunnels, static routes
 │   ├── workers/                       # own state: Worker scripts, KV namespaces, D1 databases, queues, routes, crons
@@ -39,6 +40,7 @@ Everything you edit lives here. The modules under [../modules/](../modules/) sta
     │   ├── rules.tfvars               # traffic rules    -> rules
     │   ├── tags.tfvars                # resource tags    -> zones, zerotrust, r2, workers
     │   ├── tunnels.tfvars             # Cloudflare Tunnel -> tunnels
+    │   ├── turnstile.tfvars           # Turnstile widgets -> turnstile
     │   ├── waf.tfvars                 # firewall rules   -> waf
     │   ├── wan.tfvars                 # site tunnels     -> wan
     │   ├── workers.tfvars             # edge compute, KV, D1, queues -> workers
@@ -67,6 +69,7 @@ Tier 2: Foundational Zones & Account Services
 ├── device_posture                     (account-scoped posture checks and MDM/EDR integrations; required before zerotrust)
 ├── gateway                            (account-scoped SWG policies, TLS decryption settings, root CA)
 ├── lists                              (account-scoped IP, ASN, and hostname lists; required before WAF)
+├── turnstile                          (account-scoped widgets; attached to no zone, so nothing waits on it)
 └── wan                                (account-scoped Magic WAN tunnels and static routes)
 
 Tier 3: Zone-Dependent & Consumer Layers
@@ -84,7 +87,7 @@ Tier 3: Zone-Dependent & Consumer Layers
 
 Tier membership is derived directly from the Terraform source code:
 - **Tier 1 (`account_governance`):** Account-wide permissions and resource-group scopes. Every downstream token is evaluated against what this layer applies, so it runs on its own first.
-- **Tier 2 (`zones`, `bulk_redirects`, `device_posture`, `gateway`, `lists`, `wan`):** `zones` creates the zone containers at Cloudflare. The remaining layers touch no zones, so nothing waits on them. `lists` is deliberately placed in Tier 2 so that named lists exist before `waf` references them, and `device_posture` so that a posture rule exists before a `zerotrust` Access policy requires it.
+- **Tier 2 (`zones`, `bulk_redirects`, `device_posture`, `gateway`, `lists`, `turnstile`, `wan`):** `zones` creates the zone containers at Cloudflare. The remaining layers touch no zones, so nothing waits on them. `lists` is deliberately placed in Tier 2 so that named lists exist before `waf` references them, and `device_posture` so that a posture rule exists before a `zerotrust` Access policy requires it.
 - **Tier 3 (`dns`, `load_balancing`, `logpush`, `origin_pulls`, `r2`, `rules`, `tunnels`, `waf`, `workers`, `zerotrust`):** These layers resolve zones dynamically via `data "cloudflare_zone"`, which fails at plan time until Tier 2 has created the zone. `tunnels` resolves one for the proxied CNAME behind each public hostname, and `logpush` one for each zone-scoped job. `origin_pulls` resolves one per zone it configures, and belongs behind `zones` for a second reason: the zone's SSL mode has to be `full` or `strict` before authenticating to the origin means anything. `zerotrust` is included here because Access applications are addressed by hostname and require the corresponding zone and DNS record to exist.
 
 ## Why split this way
@@ -105,7 +108,7 @@ This design requires the Cloudflare API to be accessible at plan time for consum
 
 `account_governance` queries the API to resolve role, permission group, and resource group names to IDs. `zerotrust` queries the account's existing Zero Trust organisation to adopt the configured team name. `gateway` dynamically resolves Cloudflare's content categories, security categories, and application catalogues so that configuration files reference human-readable names like `"Microsoft 365"` rather than arbitrary IDs like `606`.
 
-`wan`, `bulk_redirects`, `lists`, and `device_posture` are completely account-scoped and contain no zone data sources.
+`wan`, `bulk_redirects`, `lists`, `turnstile`, and `device_posture` are completely account-scoped and contain no zone data sources.
 
 ## Config precedence
 
@@ -151,25 +154,26 @@ Plans and applies are dispatched by hand from the Actions tab. When one runs:
 
 The pipeline maps variable files to layers dynamically. The table below lists the configuration files and sensitive environment variables consumed by each layer during automated execution:
 
-| Layer                | Required `-var-file` Arguments                            | Sensitive Environment Variables                                                                                     |
-| ----------------------| -----------------------------------------------------------| ---------------------------------------------------------------------------------------------------------------------|
-| `account_governance` | `account.tfvars`, `account_governance.tfvars`             | None                                                                                                                |
-| `bulk_redirects`     | `account.tfvars`, `zones.tfvars`, `bulk_redirects.tfvars` | None                                                                                                                |
-| `device_posture`     | `account.tfvars`, `device_posture.tfvars`                 | `TF_VAR_device_posture_integration_secrets` (from the `<account>-plan` environment)                                 |
-| `dns`                | `account.tfvars`, `zones.tfvars`, `dns.tfvars`            | None                                                                                                                |
-| `gateway`            | `account.tfvars`, `gateway.tfvars`                        | None                                                                                                                |
-| `lists`              | `account.tfvars`, `lists.tfvars`                          | None                                                                                                                |
-| `load_balancing`     | `account.tfvars`, `zones.tfvars`, `load_balancing.tfvars` | None                                                                                                                |
-| `logpush`            | `account.tfvars`, `zones.tfvars`, `logpush.tfvars`        | `TF_VAR_logpush_destination_secrets`, `TF_VAR_logpush_ownership_challenges` (from the `<account>-plan` environment) |
-| `origin_pulls`       | `account.tfvars`, `zones.tfvars`, `origin_pulls.tfvars`   | `TF_VAR_origin_pull_certificates` (from the `<account>-plan` environment; only where a zone uploads a certificate of its own) |
-| `r2`                 | `account.tfvars`, `zones.tfvars`, `r2.tfvars`, `tags.tfvars` | None                                                                                                                |
-| `rules`              | `account.tfvars`, `zones.tfvars`, `rules.tfvars`          | None                                                                                                                |
-| `tunnels`            | `account.tfvars`, `zones.tfvars`, `tunnels.tfvars`        | None (no tunnel secret is sent and no connector token is read)                                                      |
-| `waf`                | `account.tfvars`, `zones.tfvars`, `waf.tfvars`            | None                                                                                                                |
-| `wan`                | `account.tfvars`, `wan.tfvars`                            | `TF_VAR_wan_ipsec_tunnel_psks`, `TF_VAR_wan_bgp_md5_keys` (not yet exported by the pipeline)                                                           |
-| `workers`            | `account.tfvars`, `zones.tfvars`, `workers.tfvars`, `tags.tfvars` | None (Worker secrets use Secrets Store)                                                                             |
-| `zerotrust`          | `account.tfvars`, `zerotrust.tfvars`, `tags.tfvars`       | `TF_VAR_identity_provider_secrets` (from the `<account>-plan` environment; must be set, `{}` if none)                                                                                  |
-| `zones`              | `account.tfvars`, `zones.tfvars`, `zone_config.tfvars`, `tags.tfvars` | None                                                                                                                |
+| Layer                | Required `-var-file` Arguments                                        | Sensitive Environment Variables                                                                                               |
+| ----------------------| -----------------------------------------------------------------------| -------------------------------------------------------------------------------------------------------------------------------|
+| `account_governance` | `account.tfvars`, `account_governance.tfvars`                         | None                                                                                                                          |
+| `bulk_redirects`     | `account.tfvars`, `zones.tfvars`, `bulk_redirects.tfvars`             | None                                                                                                                          |
+| `device_posture`     | `account.tfvars`, `device_posture.tfvars`                             | `TF_VAR_device_posture_integration_secrets` (from the `<account>-plan` environment)                                           |
+| `dns`                | `account.tfvars`, `zones.tfvars`, `dns.tfvars`                        | None                                                                                                                          |
+| `gateway`            | `account.tfvars`, `gateway.tfvars`                                    | None                                                                                                                          |
+| `lists`              | `account.tfvars`, `lists.tfvars`                                      | None                                                                                                                          |
+| `load_balancing`     | `account.tfvars`, `zones.tfvars`, `load_balancing.tfvars`             | None                                                                                                                          |
+| `logpush`            | `account.tfvars`, `zones.tfvars`, `logpush.tfvars`                    | `TF_VAR_logpush_destination_secrets`, `TF_VAR_logpush_ownership_challenges` (from the `<account>-plan` environment)           |
+| `origin_pulls`       | `account.tfvars`, `zones.tfvars`, `origin_pulls.tfvars`               | `TF_VAR_origin_pull_certificates` (from the `<account>-plan` environment; only where a zone uploads a certificate of its own) |
+| `r2`                 | `account.tfvars`, `zones.tfvars`, `r2.tfvars`, `tags.tfvars`          | None                                                                                                                          |
+| `rules`              | `account.tfvars`, `zones.tfvars`, `rules.tfvars`                      | None                                                                                                                          |
+| `tunnels`            | `account.tfvars`, `zones.tfvars`, `tunnels.tfvars`                    | None (no tunnel secret is sent and no connector token is read)                                                                |
+| `turnstile`          | `account.tfvars`, `turnstile.tfvars`                                  | None (Cloudflare issues the widget secret, and it lands in this layer's state)                                                |
+| `waf`                | `account.tfvars`, `zones.tfvars`, `waf.tfvars`                        | None                                                                                                                          |
+| `wan`                | `account.tfvars`, `wan.tfvars`                                        | `TF_VAR_wan_ipsec_tunnel_psks`, `TF_VAR_wan_bgp_md5_keys` (not yet exported by the pipeline)                                  |
+| `workers`            | `account.tfvars`, `zones.tfvars`, `workers.tfvars`, `tags.tfvars`     | None (Worker secrets use Secrets Store)                                                                                       |
+| `zerotrust`          | `account.tfvars`, `zerotrust.tfvars`, `tags.tfvars`                   | `TF_VAR_identity_provider_secrets` (from the `<account>-plan` environment; must be set, `{}` if none)                         |
+| `zones`              | `account.tfvars`, `zones.tfvars`, `zone_config.tfvars`, `tags.tfvars` | None                                                                                                                          |
 
 Like `zones.tfvars`, `tags.tfvars` reaches several layers: it assigns `resource_tags`, which `zones`, `zerotrust`, `r2` and `workers` each declare and each read their own section of. The layers resolve and output the tags; a pipeline job writes them after apply, because the provider has no tagging resource yet. See [Resource tags](../.github/workflows/README.md#resource-tags).
 
@@ -1184,6 +1188,55 @@ Edge mTLS in the other direction - client certificates presented *by visitors to
 
 ---
 
+## Turnstile
+
+The `turnstile` layer manages Cloudflare Turnstile widgets: the CAPTCHA replacement a form embeds, and the secret its backend validates the resulting token with. A widget is account-scoped and attached to no zone - the hostname list is free text, so a widget may legitimately name a domain this account does not hold, and Cloudflare will not warn when a hostname is wrong. The widget simply refuses to render on the page that embeds it.
+
+```hcl
+# accounts/account_a/turnstile.tfvars
+turnstile_widgets = {
+  primary = {
+    name = "Primary site (example.com)"
+    domains = [
+      "example.com",
+    ]
+    mode = "managed"
+  }
+}
+```
+
+A hostname covers itself and every subdomain, so `example.com` also serves `www.example.com` - and listing `www.example.com` does *not* serve the apex.
+
+### The sitekey is the handover, and Terraform cannot complete it
+
+A widget is two keys. The sitekey is public and belongs in the page; the secret is sent by the backend to `/siteverify`. This layer creates the widget and holds both, but it does not manage the page or the backend, so nothing here can tell whether a widget protects anything at all. Read `turnstile_sitekeys` after an apply and hand each value to whoever owns the page.
+
+That asymmetry is also why a replacement is an outage rather than a diff. Updating a widget in place - hostnames, mode, branding - keeps the sitekey and live pages keep working. Replacing one issues a *new* sitekey while every page still carries the old one, and every challenge fails until those pages are redeployed. A `region` change, a key rename and an apply against an empty state all replace. Read any plan on this layer for "must be replaced" before approving it.
+
+### Adopting widgets that already exist
+
+If widgets are already in the account - and for Turnstile they usually are, because a widget is created in the dashboard the moment somebody protects a form - adopt them rather than letting this layer create duplicates. `layers/turnstile/imports.tf` carries the dashboard query and a commented `import` block; the import id is `<account_id>/<sitekey>`. See that file before the first apply.
+
+### Secrets
+
+Nothing is injected into this layer: Cloudflare issues the secret, and Terraform records what the API returned, so **this layer's state holds every widget's secret key in plain text**. Anyone holding it can forge a passing `/siteverify` response for any form the widget protects, and it cannot be rotated in place - a new secret means a new widget, and a new widget means a new sitekey. The secret is deliberately not re-exported as a root output; read one from state when handing it over. Treat a leak of this state, or of a saved plan of this layer, as a compromise of every protected form.
+
+### Governing defaults
+
+| Setting | Default | Effect |
+|---|---|---|
+| `default_widget_mode` | `"managed"` | Cloudflare decides, and asks for a click only when it needs one. The mode that fails visibly. |
+| `default_widget_region` | `"world"` | `"china"` is a separate widget network and is fixed at creation, so it is never a silent default. |
+| `max_domains_per_widget` | `200` | Cloudflare's Enterprise ceiling, enforced before the API sees the widget (10 on every other plan). |
+| `allow_offlabel_widgets` | `false` | Removing Cloudflare branding is a contractual and design decision, so it takes a pull request that says why. |
+| `invisible_mode_privacy_addendum_accepted` | `false` | Invisible mode tells the visitor nothing, which is why Cloudflare requires its privacy addendum first. |
+
+### Out of Scope
+
+Embedding the sitekey, calling `/siteverify`, and storing the secret in the backend all happen outside this repository. Pre-clearance interacts with the WAF challenge that the issued `cf_clearance` cookie satisfies, but the rule itself belongs to the `waf` layer.
+
+---
+
 ## Adding a new account
 
 In enterprise and MSP environments, onboarding an account or tenant should follow isolated per-customer repository patterns rather than co-locating multiple clients in a single repository.
@@ -1213,7 +1266,7 @@ The Release Manager automates:
 Within your customer's dedicated deployment repository, you can manage multiple administrative accounts (for example: `production`, `staging`, `development`):
 
 1. Create a directory `accounts/<account_name>/`.
-2. Copy all nineteen template `.tfvars` files from `accounts/account_a/`:
+2. Copy all twenty-one template `.tfvars` files from `accounts/account_a/`:
    - `account.tfvars`
    - `account_governance.tfvars`
    - `bulk_redirects.tfvars`
@@ -1223,10 +1276,12 @@ Within your customer's dedicated deployment repository, you can manage multiple 
    - `lists.tfvars`
    - `load_balancing.tfvars`
    - `logpush.tfvars`
+   - `origin_pulls.tfvars`
    - `r2.tfvars`
    - `rules.tfvars`
    - `tags.tfvars`
    - `tunnels.tfvars`
+   - `turnstile.tfvars`
    - `waf.tfvars`
    - `wan.tfvars`
    - `workers.tfvars`
