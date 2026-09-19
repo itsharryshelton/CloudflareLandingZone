@@ -97,6 +97,7 @@ the CSV once they are all uploaded.
 | `<account>-rules-apply` | `rules` | *not created - make by hand* | Not yet documented in the layer's `providers.tf`. Needs edit on the zone-level cache, late transform and origin ruleset phases, and `Zone:Read` |
 | `<account>-tags-apply` | none - the resource tags job | `terraform-tags-apply` | Resource Tagging write at account scope, plus zone scope for zone tags. Beta groups, found by name - never `Access: Tags` |
 | `<account>-tunnels-apply` | `tunnels` | `terraform-tunnels-apply` | `Cloudflare Tunnel:Edit`; `Zone:Read` + `DNS:Edit` if a hostname is published |
+| `<account>-turnstile-apply` | `turnstile` | `terraform-turnstile-apply` | `Turnstile:Edit` (the API names the same grant Turnstile Sites Write). Reaches widgets and nothing else - but reading a widget returns its secret key, so it is not a low-value credential |
 | `<account>-waf-apply` | `waf` | `terraform-waf-apply` | `Zone WAF:Edit`, `Zone:Read` |
 | `<account>-wan-apply` | `wan` | `terraform-wan-apply` | `Magic Transit:Edit` |
 | `<account>-workers-apply` | `workers` | `terraform-workers-apply` | `Workers Scripts:Edit`, `Workers KV Storage:Edit`, `Zone:Read`; `D1:Edit` if databases are declared; `Queues:Edit` if queues are declared; `Workers Routes:Edit` if routes are declared; `DNS:Edit` for a custom domain. `D1:Edit` also carries query execution over the D1 REST API, so it can read and rewrite the contents of every database in the account |

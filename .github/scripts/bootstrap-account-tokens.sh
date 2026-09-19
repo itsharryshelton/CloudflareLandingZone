@@ -620,6 +620,24 @@ TOKEN_SPECS["terraform-originpulls-apply"]="$(cat <<JSON
 JSON
 )"
 
+# 9f. terraform-turnstile-apply
+TURNSTILE_ACCT_PERMS="$(build_perm_array "account" "Turnstile:Edit|Turnstile Sites Write|Turnstile Write")"
+TOKEN_SPECS["terraform-turnstile-apply"]="$(cat <<JSON
+{
+  "name": "terraform-turnstile-apply",
+  "policies": [
+    {
+      "effect": "allow",
+      "permission_groups": $TURNSTILE_ACCT_PERMS,
+      "resources": {
+        "$ACCOUNT_RESOURCE": "*"
+      }
+    }
+  ]
+}
+JSON
+)"
+
 # 10. terraform-zone-apply
 ZONE_PERMS="$(build_perm_array "zone" \
   "DNS:Edit|DNS Write" \
@@ -678,6 +696,7 @@ TOKEN_NAMES=(
   "terraform-r2-apply"
   "terraform-tags-apply"
   "terraform-tunnels-apply"
+  "terraform-turnstile-apply"
   "terraform-waf-apply"
   "terraform-wan-apply"
   "terraform-workers-apply"
@@ -799,6 +818,7 @@ SECURITY WARNING & NEXT STEPS:
    gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-r2-apply
    gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-tags-apply   (terraform-tags-apply)
    gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-tunnels-apply
+   gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-turnstile-apply
    gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-waf-apply
    gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-wan-apply
    gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-workers-apply
