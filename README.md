@@ -183,6 +183,7 @@ CFLZ uses GitHub Actions driven strictly by GitOps workflows. Terraform is execu
 | [deployment/README.md](deployment/README.md)               | How layers and accounts fit together, and each layer's inputs and guardrails    |
 | [.github/workflows/README.md](.github/workflows/README.md) | Pipeline, environments, token scopes, security notes                             |
 | [CONTRIBUTING.md](CONTRIBUTING.md)                         | Changing the Terraform rather than the configuration                             |
+| [modules/README.md](modules/README.md)                     | What the modules are, the rules for calling and writing one, and how they are published |
 | [deployment/layers/workers/migrations/README.md](deployment/layers/workers/migrations/README.md) | D1 schema migrations: naming, and how the pipeline applies them |
 | [deployment/layers/workers/data/kv/README.md](deployment/layers/workers/data/kv/README.md) | KV data: what Terraform owns, and bulk datasets loaded after apply |
 | [deployment/layers/origin_pulls/ca/README.md](deployment/layers/origin_pulls/ca/README.md) | The vendored Cloudflare Origin Pull CA, and refreshing it |
