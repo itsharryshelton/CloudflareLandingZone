@@ -157,11 +157,12 @@ variable "tunnels" {
     error_message = "Each tunnels[*].ingress[*].service must be a URL using http, https, tcp, ssh, rdp, smb, unix or unix+tls - e.g. \"http://localhost:8080\" - or http_status:<code>."
   }
 
+  # Lowercase Unicode letters, not just ASCII
   validation {
     condition = alltrue(flatten([
       for tunnel in var.tunnels : [
         for rule in tunnel.ingress :
-        can(regex("^(\\*\\.)?([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,}$", lower(trimspace(rule.hostname))))
+        can(regex("^(\\*\\.)?([0-9\\p{Ll}\\p{Lo}\\p{M}]([0-9\\p{Ll}\\p{Lo}\\p{M}-]{0,61}[0-9\\p{Ll}\\p{Lo}\\p{M}])?\\.)+[\\p{Ll}\\p{Lo}]{2,}$", lower(trimspace(rule.hostname))))
       ]
     ]))
     error_message = "Each tunnels[*].ingress[*].hostname must be a fully-qualified hostname such as \"app.example.com\", optionally starting \"*.\". No scheme, no port, no path - a path belongs in `path`."

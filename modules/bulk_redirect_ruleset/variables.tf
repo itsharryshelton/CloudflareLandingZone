@@ -68,6 +68,10 @@ variable "rules" {
     error_message = "Two rules reference the same list. Cloudflare stops at the first rule that redirects, so the second could only ever fire for traffic the first did not match - which for the same list is nothing."
   }
 
+  # Deliberately still ASCII-only, unlike a zone name: this is substituted into
+  # an http.host expression, and http.host carries the punycode A-label a browser
+  # puts in the Host header. A Unicode IDN here would compile to a rule that never
+  # matches - a silent miss, which is worse than being rejected.
   validation {
     condition = alltrue(flatten([
       for rule in var.rules : [
@@ -75,9 +79,13 @@ variable "rules" {
         can(regex("^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,}$", lower(hostname)))
       ]
     ]))
-    error_message = "Each rules[*].scope_hostnames entry must be a fully-qualified, lowercase hostname (e.g. www.example.com) with no scheme, port or path."
+    error_message = "Each rules[*].scope_hostnames entry must be a fully-qualified, lowercase hostname (e.g. www.example.com) with no scheme, port or path. An IDN must be given in punycode (xn--...), not the Unicode form used for a zone name, because the rule matches http.host."
   }
 
+  # Deliberately still ASCII-only, unlike a zone name: this is substituted into
+  # an http.host expression, and http.host carries the punycode A-label a browser
+  # puts in the Host header. A Unicode IDN here would compile to a rule that never
+  # matches - a silent miss, which is worse than being rejected.
   validation {
     condition = alltrue(flatten([
       for rule in var.rules : [
@@ -85,7 +93,7 @@ variable "rules" {
         can(regex("^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,}$", lower(domain)))
       ]
     ]))
-    error_message = "Each rules[*].scope_domains entry must be a bare domain name (e.g. example.com), with no scheme, wildcard or path. The module expands it to the apex and its subdomains."
+    error_message = "Each rules[*].scope_domains entry must be a bare domain name (e.g. example.com), with no scheme, wildcard or path. The module expands it to the apex and its subdomains. An IDN must be given in punycode (xn--...), not the Unicode form used for a zone name, because the rule matches http.host."
   }
 
   validation {

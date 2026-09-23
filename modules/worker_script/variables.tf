@@ -543,10 +543,11 @@ variable "custom_domains" {
     Cloudflare writes that record itself, and two owners means a fight per apply.
   EOT
 
+  # Lowercase Unicode letters, not just ASCII
   validation {
     condition = alltrue([
       for domain in var.custom_domains :
-      can(regex("^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,}$", lower(domain.hostname)))
+      can(regex("^([0-9\\p{Ll}\\p{Lo}\\p{M}]([0-9\\p{Ll}\\p{Lo}\\p{M}-]{0,61}[0-9\\p{Ll}\\p{Lo}\\p{M}])?\\.)+[\\p{Ll}\\p{Lo}]{2,}$", lower(domain.hostname)))
     ])
     error_message = "Each custom_domains[*].hostname must be a fully-qualified, lowercase hostname (e.g. api.example.com) with no scheme, port or path."
   }

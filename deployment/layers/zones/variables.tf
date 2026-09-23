@@ -35,7 +35,12 @@ variable "zones" {
     The key is permanent identity. Renaming it destroys and recreates the zone,
     which takes every DNS record with it.
 
-    - `domain_name` - The apex domain (e.g. example.com).
+    - `domain_name` - The apex domain (e.g. example.com). An IDN goes in its
+                      Unicode form (e.g. café-example.fr), never punycode:
+                      Cloudflare returns the Unicode name, so a punycode value
+                      shows drift on every plan and forces the zone - and its
+                      DNS records - to be replaced. The key may keep a
+                      punycode-derived spelling; only the value has to change.
     - `zone_tier`   - (Optional) The zone's Cloudflare rate plan. Defaults to
                       var.default_zone_tier.
 

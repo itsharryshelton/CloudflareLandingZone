@@ -19,9 +19,18 @@ variable "zone_name" {
     and show drift on every plan.
   EOT
 
+  # Labels accept lowercase Unicode letters, not just ASCII
   validation {
-    condition     = can(regex("^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,}$", var.zone_name))
+    condition     = can(regex("^([0-9\\p{Ll}\\p{Lo}\\p{M}]([0-9\\p{Ll}\\p{Lo}\\p{M}-]{0,61}[0-9\\p{Ll}\\p{Lo}\\p{M}])?\\.)+[\\p{Ll}\\p{Lo}]{2,}$", var.zone_name))
     error_message = "zone_name must be a valid apex domain (e.g. example.com), lowercase, no scheme or path."
+  }
+
+  # Cloudflare normalises IDN zone names to Unicode on read, so a punycode name
+  # never matches what the API returns, and every plan then shows drift on the
+  # records this qualifies.
+  validation {
+    condition     = !can(regex("(^|\\.)xn--", var.zone_name))
+    error_message = "zone_name must use the Unicode form of an IDN (e.g. café-example.fr), not punycode - Cloudflare returns the Unicode name, so a punycode value shows drift on every plan."
   }
 }
 
