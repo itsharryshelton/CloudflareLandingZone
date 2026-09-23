@@ -668,6 +668,24 @@ TOKEN_SPECS["terraform-pages-apply"]="$(cat <<JSON
 JSON
 )"
 
+# 9h. terraform-aigateway-apply
+AI_GATEWAY_ACCT_PERMS="$(build_perm_array "account" "AI Gateway:Edit|AI Gateway Write")"
+TOKEN_SPECS["terraform-aigateway-apply"]="$(cat <<JSON
+{
+  "name": "terraform-aigateway-apply",
+  "policies": [
+    {
+      "effect": "allow",
+      "permission_groups": $AI_GATEWAY_ACCT_PERMS,
+      "resources": {
+        "$ACCOUNT_RESOURCE": "*"
+      }
+    }
+  ]
+}
+JSON
+)"
+
 # 10. terraform-zone-apply
 ZONE_PERMS="$(build_perm_array "zone" \
   "DNS:Edit|DNS Write" \
@@ -717,6 +735,7 @@ fi
 TOKEN_NAMES=(
   "terraform-plan"
   "terraform-accountgovernance-apply"
+  "terraform-aigateway-apply"
   "terraform-deviceposture-apply"
   "terraform-dns-apply"
   "terraform-gateway-apply"
@@ -840,6 +859,7 @@ SECURITY WARNING & NEXT STEPS:
 
    gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-plan
    gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-account_governance-apply
+   gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-ai_gateway-apply
    gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-device_posture-apply
    gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-dns-apply
    gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-gateway-apply

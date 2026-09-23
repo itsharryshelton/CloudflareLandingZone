@@ -85,6 +85,7 @@ the CSV once they are all uploaded.
 |---|---|---|---|
 | `<account>-plan` | all (plan only) | `terraform-plan` | Read-only, account and zone scope |
 | `<account>-account_governance-apply` | `account_governance` | `terraform-accountgovernance-apply` | `Account Settings:Edit` |
+| `<account>-ai_gateway-apply` | `ai_gateway` | `terraform-aigateway-apply` | `AI Gateway:Edit` (the API names the same grant AI Gateway Write). Not `AI Gateway Run`. Can read and delete every gateway's logs - prompts and responses - as can the plan token's `AI Gateway:Read` |
 | `<account>-bulk_redirects-apply` | `bulk_redirects` | *not created - make by hand* | `Account Filter Lists:Edit`, `Account Rulesets:Edit` |
 | `<account>-device_posture-apply` | `device_posture` | `terraform-deviceposture-apply` | `Zero Trust:Edit` |
 | `<account>-dns-apply` | `dns` | `terraform-dns-apply` | `DNS:Edit`, `Zone:Read` |
@@ -172,7 +173,7 @@ Notes:
 
 ### Layers with nothing extra
 
-`account_governance`, `bulk_redirects`, `dns`, `gateway`, `lists`,
+`account_governance`, `ai_gateway`, `bulk_redirects`, `dns`, `gateway`, `lists`,
 `load_balancing`, `r2`, `rules`, `tunnels`, `waf`, `workers` and `zones` need
 only their `CLOUDFLARE_API_TOKEN`. So does `origin_pulls`, unless a zone in it
 uploads a certificate of its own, and `pages`, unless a project lists
