@@ -196,7 +196,7 @@ terraform init -reconfigure \
 
 **State Locking:** Because R2 does not provide a DynamoDB lock table alternative, concurrent applies against the same state key can cause state corruption. Setting `use_lockfile = true` enables native S3 conditional writes, which R2 supports.
 
-This feature requires Terraform 1.11.0 or newer. Every layer enforces `required_version = ">= 1.11.0"`. This constraint prevents older Terraform versions from executing unlocked applies silently. The CI/CD pipeline pins Terraform 1.14.6.
+This feature requires Terraform 1.11.0 or newer. Every layer enforces `required_version = ">= 1.12.0"`, which covers it: the floor is 1.12 because the modules rely on `||` and `&&` short-circuiting. Either way, an older Terraform cannot silently run an unlocked apply. The CI/CD pipeline pins Terraform 1.14.6.
 
 Pipeline concurrency groups serialise runs per state key as an additional safeguard.
 

@@ -1,10 +1,9 @@
 terraform {
-  # 1.11 is the floor because state locking on R2 depends on `use_lockfile`, which
-  # was added in 1.11. See the LOCKING note below. The configuration itself would
-  # run on 1.5, and the modules under ../../../modules keep that lower floor so
-  # they stay reusable, but a root module here cannot safely be initialised by a
-  # Terraform that would silently ignore the lock.
-  required_version = ">= 1.11.0"
+  # 1.12 is the floor. State locking on R2 depends on `use_lockfile`, added in
+  # 1.11 (see the LOCKING note below), and the modules this layer calls rely on
+  # `||` and `&&` short-circuiting, which Terraform only does from 1.12. Below
+  # that, module validations fail on the null inputs they were written to skip.
+  required_version = ">= 1.12.0"
 
   required_providers {
     cloudflare = {
@@ -33,10 +32,9 @@ terraform {
   #
   # LOCKING: R2 has no DynamoDB equivalent, so two concurrent applies against one
   # state key can corrupt it. `use_lockfile = true` locks using S3 conditional
-  # writes, which R2 supports. That is the protection, and it is why
-  # required_version above is 1.11 rather than 1.5: on an older Terraform the
-  # argument is not understood, and the failure mode is an unlocked apply rather
-  # than an error.
+  # writes, which R2 supports. That is the protection, and it needs Terraform
+  # 1.11 or newer: on an older Terraform the argument is not understood, and the
+  # failure mode is an unlocked apply rather than an error.
   #
   # The pipeline additionally serialises runs per state key with a concurrency
   # group, as a second line of defence. See .github/workflows/_terraform-run.yml.

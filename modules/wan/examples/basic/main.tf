@@ -5,7 +5,7 @@
 # account; keep them that way so the example stays customer-agnostic.
 
 terraform {
-  required_version = ">= 1.5.0"
+  required_version = ">= 1.12.0"
 
   required_providers {
     cloudflare = {
@@ -33,8 +33,7 @@ module "wan" {
       customer_endpoint   = "203.0.113.10"
       interface_address   = "10.252.0.0/31"
 
-      # Every health_check field is set, because the module's validations
-      # currently error on any that is left null.
+      # Every health_check field is set, so each of its validations is exercised.
       health_check = {
         enabled   = true
         direction = "bidirectional"

@@ -1,10 +1,9 @@
 terraform {
-  # Deliberately lower than the deployment layers, which require 1.11 because
-  # their R2 backend needs `use_lockfile`. A module owns no backend and uses
-  # nothing newer than 1.5, so keeping the floor here lets the module be
-  # consumed by a root module on an older Terraform. Do not raise it to match
-  # the layers.
-  required_version = ">= 1.5.0"
+  # 1.12 is the floor because guards in this module rely on `||` and `&&`
+  # short-circuiting, which Terraform only does from 1.12. On anything older, a
+  # check such as `x == null || contains(list, x)` still evaluates the right-hand
+  # side and fails on the very null it was written to skip.
+  required_version = ">= 1.12.0"
 
   required_providers {
     cloudflare = {

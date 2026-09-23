@@ -106,8 +106,6 @@ variable "items" {
   }
 
   validation {
-    # regex rather than strcontains: this module keeps a >= 1.5.0 floor so it stays
-    # usable from an older root module, and strcontains arrived in Terraform 1.7.
     condition     = alltrue([for item in var.items : !can(regex("\\?", item.source_url))])
     error_message = "A source_url contains a query string. Cloudflare matches Bulk Redirect sources on the URL up to the \"?\" only, so such a row can never fire. Use preserve_query_string to carry the query through, or a Single Redirect if the query is what you need to match on."
   }
