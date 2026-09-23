@@ -15,6 +15,7 @@ Everything you edit lives here. The modules under [../modules/](../modules/) sta
 │   ├── load_balancing/                # own state: monitors, pools, zone load balancers
 │   ├── logpush/                       # own state: Logpush jobs, account and zone log streams
 │   ├── origin_pulls/                  # own state: Authenticated Origin Pulls, client certificates, per-hostname edge-to-origin mTLS
+│   ├── pages/                         # own state: Pages projects, branch deployment rules, bindings, custom domains
 │   ├── r2/                            # own state: buckets, CORS, lifecycle, retention, domains
 │   ├── rules/                         # own state: cache rules, transform rules, origin rules
 │   ├── tunnels/                       # own state: Cloudflare Tunnels, public hostnames, private network routes
@@ -36,6 +37,7 @@ Everything you edit lives here. The modules under [../modules/](../modules/) sta
     │   ├── load_balancing.tfvars      # load balancers   -> load_balancing
     │   ├── logpush.tfvars             # log streams      -> logpush
     │   ├── origin_pulls.tfvars        # origin mTLS      -> origin_pulls
+    │   ├── pages.tfvars               # Jamstack sites   -> pages
     │   ├── r2.tfvars                  # object storage   -> r2
     │   ├── rules.tfvars               # traffic rules    -> rules
     │   ├── tags.tfvars                # resource tags    -> zones, zerotrust, r2, workers
@@ -46,7 +48,7 @@ Everything you edit lives here. The modules under [../modules/](../modules/) sta
     │   ├── workers.tfvars             # edge compute, KV, D1, queues -> workers
     │   ├── zerotrust.tfvars           # Access posture   -> zerotrust
     │   ├── zone_config.tfvars         # zone settings    -> zones
-    │   └── zones.tfvars               # zone inventory   -> zones, bulk_redirects, dns, waf, lb, logpush, origin_pulls, r2, rules, tunnels, workers
+    │   └── zones.tfvars               # zone inventory   -> zones, bulk_redirects, dns, waf, lb, logpush, origin_pulls, pages, r2, rules, tunnels, workers
     └── account_b/
         └── ...
 ```
@@ -77,6 +79,7 @@ Tier 3: Zone-Dependent & Consumer Layers
 ├── load_balancing                     (resolves zone IDs; provisions origin pools and health monitors)
 ├── logpush                            (resolves zone IDs for zone-scoped jobs; pushes logs to a SIEM or storage)
 ├── origin_pulls                       (resolves zone IDs; enables Authenticated Origin Pulls and uploads client certificates)
+├── pages                              (resolves zone IDs; writes the proxied CNAME behind each custom domain)
 ├── r2                                 (provisions buckets; binds custom domains to existing zones)
 ├── rules                              (resolves zone IDs; manages cache, transform, and origin rules)
 ├── tunnels                            (resolves zone IDs; publishes tunnel hostnames as proxied CNAMEs)
@@ -88,7 +91,7 @@ Tier 3: Zone-Dependent & Consumer Layers
 Tier membership is derived directly from the Terraform source code - calling the `zone_base` module means Tier 2, resolving a zone with `data "cloudflare_zone"` means Tier 3 - except where the source cannot express the dependency at all. Those two layers declare their own tier in a `tier.tf` holding `locals { apply_tier = <n> }`, which `tf-matrix.sh` reads in preference to the derivation:
 - **Tier 1 (`account_governance`):** Account-wide permissions and resource-group scopes. Every downstream token is evaluated against what this layer applies, so it runs on its own first. Declared in `tier.tf`, because the dependency is on Cloudflare's authorisation decision rather than on any Terraform attribute.
 - **Tier 2 (`zones`, `bulk_redirects`, `device_posture`, `gateway`, `lists`, `turnstile`, `wan`):** `zones` creates the zone containers at Cloudflare. The remaining layers touch no zones, so nothing waits on them. `lists` is deliberately placed in Tier 2 so that named lists exist before `waf` references them, and `device_posture` so that a posture rule exists before a `zerotrust` Access policy requires it.
-- **Tier 3 (`dns`, `load_balancing`, `logpush`, `origin_pulls`, `r2`, `rules`, `tunnels`, `waf`, `workers`, `zerotrust`):** These layers resolve zones dynamically via `data "cloudflare_zone"`, which fails at plan time until Tier 2 has created the zone. `tunnels` resolves one for the proxied CNAME behind each public hostname, and `logpush` one for each zone-scoped job. `origin_pulls` resolves one per zone it configures, and belongs behind `zones` for a second reason: the zone's SSL mode has to be `full` or `strict` before authenticating to the origin means anything. `zerotrust` is included here by declaration in its own `tier.tf`, because Access applications are addressed by hostname and require the corresponding zone and DNS record to exist, yet the layer never reads a zone for the derivation to find.
+- **Tier 3 (`dns`, `load_balancing`, `logpush`, `origin_pulls`, `pages`, `r2`, `rules`, `tunnels`, `waf`, `workers`, `zerotrust`):** These layers resolve zones dynamically via `data "cloudflare_zone"`, which fails at plan time until Tier 2 has created the zone. `tunnels` resolves one for the proxied CNAME behind each public hostname, `pages` one for the CNAME behind each custom domain, and `logpush` one for each zone-scoped job. `origin_pulls` resolves one per zone it configures, and belongs behind `zones` for a second reason: the zone's SSL mode has to be `full` or `strict` before authenticating to the origin means anything. `zerotrust` is included here by declaration in its own `tier.tf`, because Access applications are addressed by hostname and require the corresponding zone and DNS record to exist, yet the layer never reads a zone for the derivation to find.
 
 ## Why split this way
 
@@ -102,9 +105,9 @@ Tier membership is derived directly from the Terraform source code - calling the
 
 ## Layers do not read each other's state
 
-The `dns`, `waf`, `load_balancing`, `logpush`, `origin_pulls`, `r2`, `rules`, `tunnels`, and `workers` layers resolve a zone key to a zone ID using `data "cloudflare_zone"` filtered by name and account ID, rather than reading `terraform_remote_state`. State files remain completely decoupled: any layer can be applied, re-initialised, or migrated without affecting the others.
+The `dns`, `waf`, `load_balancing`, `logpush`, `origin_pulls`, `pages`, `r2`, `rules`, `tunnels`, and `workers` layers resolve a zone key to a zone ID using `data "cloudflare_zone"` filtered by name and account ID, rather than reading `terraform_remote_state`. State files remain completely decoupled: any layer can be applied, re-initialised, or migrated without affecting the others.
 
-This design requires the Cloudflare API to be accessible at plan time for consumer layers, and plans will fail if the zone does not yet exist. Apply `zones` first; `dns`, `waf`, `load_balancing`, `logpush`, `origin_pulls`, `r2`, `rules`, `tunnels`, and `workers` can then plan and apply concurrently.
+This design requires the Cloudflare API to be accessible at plan time for consumer layers, and plans will fail if the zone does not yet exist. Apply `zones` first; `dns`, `waf`, `load_balancing`, `logpush`, `origin_pulls`, `pages`, `r2`, `rules`, `tunnels`, and `workers` can then plan and apply concurrently.
 
 `account_governance` queries the API to resolve role, permission group, and resource group names to IDs. `zerotrust` queries the account's existing Zero Trust organisation to adopt the configured team name. `gateway` dynamically resolves Cloudflare's content categories, security categories, and application catalogues so that configuration files reference human-readable names like `"Microsoft 365"` rather than arbitrary IDs like `606`.
 
@@ -165,6 +168,7 @@ The pipeline maps variable files to layers dynamically. The table below lists th
 | `load_balancing`     | `account.tfvars`, `zones.tfvars`, `load_balancing.tfvars`             | None                                                                                                                          |
 | `logpush`            | `account.tfvars`, `zones.tfvars`, `logpush.tfvars`                    | `TF_VAR_logpush_destination_secrets`, `TF_VAR_logpush_ownership_challenges` (from the `<account>-plan` environment)           |
 | `origin_pulls`       | `account.tfvars`, `zones.tfvars`, `origin_pulls.tfvars`               | `TF_VAR_origin_pull_certificates` (from the `<account>-plan` environment; only where a zone uploads a certificate of its own) |
+| `pages`              | `account.tfvars`, `zones.tfvars`, `pages.tfvars`                      | `TF_VAR_pages_project_secrets` (from the `<account>-plan` environment; only where a project lists `secret_names`)             |
 | `r2`                 | `account.tfvars`, `zones.tfvars`, `r2.tfvars`, `tags.tfvars`          | None                                                                                                                          |
 | `rules`              | `account.tfvars`, `zones.tfvars`, `rules.tfvars`                      | None                                                                                                                          |
 | `tunnels`            | `account.tfvars`, `zones.tfvars`, `tunnels.tfvars`                    | None (no tunnel secret is sent and no connector token is read)                                                                |
@@ -1237,6 +1241,86 @@ Embedding the sitekey, calling `/siteverify`, and storing the secret in the back
 
 ---
 
+## Pages
+
+The `pages` layer manages Cloudflare Pages projects - static and Jamstack front ends - through [`modules/pages_project`](../modules/pages_project/), once per project. It declares the project, its Git source and branch deployment rules, its per-environment bindings and env vars, and its custom domains, including the proxied CNAME behind each. It is its own layer rather than part of `workers`: Pages has its own permission group, and the token that can change what a site serves should not also be able to rewrite the Workers in front of the API that site calls.
+
+```hcl
+# accounts/account_a/pages.tfvars
+pages_projects = {
+  docs_site = {
+    name = "account-a-docs"
+    source = {
+      type      = "github"
+      owner     = "example-org"
+      repo_name = "docs"
+    }
+    build          = { build_command = "npm run build", destination_dir = "dist" }
+    custom_domains = [{ hostname = "docs.example.com", zone_key = "primary" }]
+  }
+
+  admin_portal = {
+    name              = "account-a-admin"   # Direct Upload: no `source`
+    access_protection = "all"
+    production        = { secret_names = ["SESSION_SECRET"] }
+    custom_domains    = [{ hostname = "admin.example.com", zone_key = "primary" }]
+  }
+}
+```
+
+A project with a `source` builds on Cloudflare from GitHub or GitLab. Cloudflare's Git app must already be installed on the owner with access to the repository, and Terraform cannot install it. A project without one is **Direct Upload**: this layer creates it, and deployments arrive from `wrangler pages deploy` in the application's own pipeline. Either way, **this layer does not deploy anything**. A newly created project serves nothing until its first deployment lands.
+
+### Custom domains need a DNS record, and the API does not create it
+
+Adding a custom domain through the API - unlike the dashboard - does not write its DNS record, so the domain sits at `pending` and no certificate is issued. Give each custom domain a `zone_key` and this layer writes a proxied CNAME to the project's real pages.dev hostname. Without one, the plan fails unless `allow_unmanaged_pages_hostnames` is set, for a record genuinely managed elsewhere. A custom domain must not also be a record in `dns.tfvars`.
+
+### Access: the pages.dev hostname is the bypass
+
+Protecting an internal portal is a `zerotrust` change, made with that layer's token. This layer has no Zero Trust scope, so it cannot write or check an Access application. What it does is work out which hostnames one has to cover, and publish them in the `pages_access_applications` output, shaped as `access_applications` entries for `zerotrust.tfvars`. Copy each entry under the same key and add `policy_keys`.
+
+That list is the reason the output exists. Every project also answers on `<subdomain>.pages.dev` and every preview on `*.<subdomain>.pages.dev`, and neither is covered by an Access application on the custom domain. The wildcard does not match the bare hostname either. So:
+
+| `access_protection` | Hostnames in the hand-over | Use for |
+|---|---|---|
+| `previews` (default) | `*.<subdomain>.pages.dev` | A public site whose unreleased branches should not be |
+| `all` | every custom domain, `<subdomain>.pages.dev`, `*.<subdomain>.pages.dev` | An internal admin portal or dashboard |
+| `none` | nothing | Only with `allow_unprotected_previews`, or previews switched off |
+
+The subdomain is read from the project after apply, not built from its name. pages.dev is one namespace across every Cloudflare account, and a name somebody else already holds is given a random suffix. Re-read the output after any apply that changes a project's custom domains: the `zerotrust` entry is a copy, and a hostname added here and not there is served without a login.
+
+### Secrets and the browser
+
+Plain `env_vars` are readable in the dashboard, the API and every plan of this layer. A secret is listed by name under `secret_names` and its value arrives in `TF_VAR_PAGES_PROJECT_SECRETS` in the `<account>-plan` environment - see [VARIABLES_AND_SECRETS.md](../VARIABLES_AND_SECRETS.md). The plan fails for a declared secret with no value, or a value no project declares.
+
+Both kinds of variable reach the build as well as Functions. A framework that inlines variables with a public prefix (`VITE_`, `NEXT_PUBLIC_`, `PUBLIC_`, `REACT_APP_` and similar) writes the value into the JavaScript every visitor downloads, whatever type it was stored as. The plan refuses a secret under such a name outright, and refuses a plain variable whose name looks like a credential unless `allow_credential_like_plain_env_vars` is set.
+
+**This layer's state holds every secret value in plain text.** Cloudflare never returns a secret once set, but Terraform records what it sent.
+
+`production` and `preview` are configured separately and preview inherits nothing. A preview is built from any branch, so it should not be handed production's bindings or secrets by default.
+
+### Adopting projects that already exist
+
+A project name is unique per account, so applying against a project created in the dashboard fails rather than duplicating it. `layers/pages/imports.tf` carries the API query and commented `import` blocks for projects (`<account_id>/<project_name>`) and domains (`<account_id>/<project_name>/<hostname>`). A project with secret env vars cannot be imported; remove the secrets, import, then let this layer set them again.
+
+### Governing defaults
+
+| Setting | Default | Effect |
+|---|---|---|
+| `default_production_branch` | `"main"` | For a project that does not state one. |
+| `default_preview_deployment_setting` | `"all"` | Every pushed branch gets a preview - which is why the next default matters. |
+| `default_access_protection` | `"previews"` | Previews are listed in the Access hand-over unless a project says otherwise. |
+| `allow_unprotected_previews` | `false` | A project publishing previews with `access_protection = "none"` fails the plan. |
+| `allow_unmanaged_pages_hostnames` | `false` | A custom domain with no `zone_key` fails the plan, because nothing would create its record. |
+| `allow_credential_like_plain_env_vars` | `false` | A plain env var named like `*_TOKEN`, `*_SECRET` or `API_KEY` fails the plan. |
+
+### Known gaps
+
+- The API may return defaults for `deployment_configs` fields this layer leaves unset, which shows as drift on the plan after the first apply. Pin the field in `pages.tfvars` if it does.
+- Unicode (IDN) custom domains are rejected; punycode is accepted. The Pages API has not been confirmed to normalise them the way the zones API does.
+- `web_analytics_token`, Durable Object, Hyperdrive, AI, Vectorize and mTLS bindings are not exposed yet.
+
+---
+
 ## Adding a new account
 
 In enterprise and MSP environments, onboarding an account or tenant should follow isolated per-customer repository patterns rather than co-locating multiple clients in a single repository.
@@ -1266,7 +1350,7 @@ The Release Manager automates:
 Within your customer's dedicated deployment repository, you can manage multiple administrative accounts (for example: `production`, `staging`, `development`):
 
 1. Create a directory `accounts/<account_name>/`.
-2. Copy all twenty-one template `.tfvars` files from `accounts/account_a/`:
+2. Copy all twenty-two template `.tfvars` files from `accounts/account_a/`:
    - `account.tfvars`
    - `account_governance.tfvars`
    - `bulk_redirects.tfvars`
@@ -1277,6 +1361,7 @@ Within your customer's dedicated deployment repository, you can manage multiple 
    - `load_balancing.tfvars`
    - `logpush.tfvars`
    - `origin_pulls.tfvars`
+   - `pages.tfvars`
    - `r2.tfvars`
    - `rules.tfvars`
    - `tags.tfvars`

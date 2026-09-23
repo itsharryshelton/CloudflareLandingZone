@@ -108,4 +108,35 @@ access_applications = {
     # not a page of login HTML.
     service_auth_401_redirect = true
   }
+
+  # Copied from the pages layer's pages_access_applications output, under the
+  # same key. The pages layer cannot write Access itself - its token has no Zero
+  # Trust scope - so this entry is the only thing protecting the portal.
+  #
+  # The bare pages.dev hostname is listed on purpose. Covering only the custom
+  # domain leaves production reachable on account-a-admin.pages.dev without a
+  # login, and "*." does not match the bare hostname. If Cloudflare suffixed the
+  # subdomain because the name was taken, the output has the real one.
+  pages_admin_portal = {
+    name   = "Pages - account-a-admin"
+    domain = "admin.example.com"
+    extra_destinations = [
+      { uri = "account-a-admin.pages.dev" },
+      { uri = "*.account-a-admin.pages.dev" },
+    ]
+
+    policy_keys = ["block_untrusted_countries", "platform_engineers_mfa"]
+
+    session_duration     = "8h"
+    app_launcher_visible = true
+  }
+
+  # docs_site takes the layer default, previews only. Its production site is
+  # public, so only the preview wildcard is protected.
+  pages_docs_site = {
+    name   = "Pages previews - account-a-docs"
+    domain = "*.account-a-docs.pages.dev"
+
+    policy_keys = ["block_untrusted_countries", "platform_engineers_mfa"]
+  }
 }

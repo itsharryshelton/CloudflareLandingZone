@@ -322,6 +322,7 @@ jobs:
           LOGPUSH_OWNERSHIP_CHALLENGES: ${{ inputs.layer == 'logpush' && secrets.TF_VAR_LOGPUSH_OWNERSHIP_CHALLENGES || '' }}
           DEVICE_POSTURE_INTEGRATION_SECRETS: ${{ inputs.layer == 'device_posture' && secrets.TF_VAR_DEVICE_POSTURE_INTEGRATION_SECRETS || '' }}
           ORIGIN_PULL_CERTIFICATES: ${{ inputs.layer == 'origin_pulls' && secrets.TF_VAR_ORIGIN_PULL_CERTIFICATES || '' }}
+          PAGES_PROJECT_SECRETS: ${{ inputs.layer == 'pages' && secrets.TF_VAR_PAGES_PROJECT_SECRETS || '' }}
         run: |
           set -euo pipefail
           # Exported only when set: an unset secret would reach Terraform as an
@@ -341,7 +342,13 @@ jobs:
           if [[ -n "${ORIGIN_PULL_CERTIFICATES:-}" ]]; then
             export TF_VAR_origin_pull_certificates="$ORIGIN_PULL_CERTIFICATES"
           fi
-          unset LOGPUSH_DESTINATION_SECRETS LOGPUSH_OWNERSHIP_CHALLENGES DEVICE_POSTURE_INTEGRATION_SECRETS ORIGIN_PULL_CERTIFICATES
+          # Encrypted env vars for Pages projects. Unset is valid where no
+          # project lists secret_names; where one does, preflight names what
+          # is missing.
+          if [[ -n "${PAGES_PROJECT_SECRETS:-}" ]]; then
+            export TF_VAR_pages_project_secrets="$PAGES_PROJECT_SECRETS"
+          fi
+          unset LOGPUSH_DESTINATION_SECRETS LOGPUSH_OWNERSHIP_CHALLENGES DEVICE_POSTURE_INTEGRATION_SECRETS ORIGIN_PULL_CERTIFICATES PAGES_PROJECT_SECRETS
 
           # Which account var files this layer takes is derived from the config,
           # not hardcoded - see .github/scripts/tf-varfiles.sh. Written to a file
