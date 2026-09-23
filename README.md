@@ -2,7 +2,7 @@
 
 Enterprise-grade Infrastructure-as-Code (IaC) for managing multi-account, multi-zone Cloudflare footprints through a single set of standardised modules.
 
-New here? Go to the Wiki for the Guides.
+New here? The [Wiki](https://github.com/itsharryshelton/CloudflareLandingZone/wiki) has the task guides for operators who change configuration. Engineers changing the Terraform itself should start with [deployment/README.md](deployment/README.md) and [CONTRIBUTING.md](CONTRIBUTING.md).
 
 Looking to quickly setup the code/repos in your Github? Check out my [Release Manager](https://github.com/itsharryshelton/CloudflareLandingZone-Release-Manager)
 
@@ -30,7 +30,7 @@ The Platform Landing Zone establishes your organisation's primary Cloudflare edg
 
 A Platform Landing Zone consists of account-level governance configurations and centralised infrastructure services. A core function of the platform layer is providing a standardised, automated mechanism to vend zone-level Application Landing Zones to development and workload teams.
 
-- Establishes the overarching administrative structure across your Cloudflare footprint. It organises account-level RBAC roles, audit logging, and global security policies (such as baseline WAF rulesets, Account-level Rate Limiting, API Shield schemas, and Zero Trust identity policies). This layer separates platform-wide policy from individual domain configurations, applying governance consistently without creating administrative overhead.
+- Establishes the overarching administrative structure across your Cloudflare footprint. It organises account membership and RBAC, audit log export, and the security policy every zone inherits: the WAF baseline catalogue each zone selects from, account-wide lists, and Zero Trust identity and device posture. This layer separates platform-wide policy from individual domain configurations, applying governance consistently without creating administrative overhead.
 - Shared capabilities provisioned centrally for all domains and workloads. Common examples include central Logpush streams (exporting to Azure Sentinel, SIEM, or R2 buckets), unified Identity Provider integration (e.g., Microsoft Entra ID), global Anycast DNS routing, and enterprise mTLS configurations. Only centralise capabilities that provide clear security, operational, or economic benefits across multiple workloads.
 - Providing a repeatable, automated process for requesting, building, and vending Application Landing Zones (Domains/Zones) to workload teams. Driven by Infrastructure-as-Code (Terraform & GitOps), this vending process guarantees that every newly onboarded domain automatically inherits your organisation's security and compliance baselines.
 
@@ -38,8 +38,8 @@ A Platform Landing Zone consists of account-level governance configurations and 
 
 Each web application, microservice, or domain operates inside a dedicated Application Landing Zone. It encapsulates all Cloudflare resources owned and operated by specific workload teams across development, staging, and production environments.
 
-- Manages zone DNS records, custom WAF rules, Cloudflare Workers/Pages, R2 buckets, and Load Balancers.
-- Assigns zones to specific environment templates (e.g., Public Web App, Internal/Corp Zero Trust, or Edge Compute Worker), allowing teams domain autonomy while inheriting global platform guardrails.
+- Manages zone DNS records, custom WAF rules, cache and origin rules, Cloudflare Workers/Pages, R2 buckets, and Load Balancers.
+- Each zone selects its posture by name from platform catalogues - WAF baseline rules and rate limits, zone settings over platform defaults - allowing teams domain autonomy while inheriting global platform guardrails.
 
 ### Repository Structure
 
@@ -62,24 +62,31 @@ Monolithic Terraform states create catastrophic blast radius vulnerabilities wit
 
 ```text
 Platform Layer (Central Governance)
-├── account_governance   (RBAC, user groups, audit configuration)
-├── zerotrust            (Access applications, service tokens, IdPs)
+├── account_governance   (Account members, user groups and their RBAC policies)
+├── zerotrust            (Zero Trust organisation, IdPs, Access groups, policies and applications, service tokens)
 ├── device_posture       (Device posture checks, MDM and EDR integrations such as Intune and CrowdStrike)
 ├── tunnels              (Cloudflare Tunnels, public hostnames, private network routes)
 ├── gateway              (SWG egress filtering: DNS, network, and HTTP)
+├── lists                (Account-wide IP, ASN and hostname lists that WAF rules reference)
+├── bulk_redirects       (Account-wide URL redirect lists and the rules that apply them)
 ├── logpush              (Log streams: audit, Gateway and zone logs to a SIEM or R2 - Enterprise)
 ├── turnstile            (Turnstile widgets: the CAPTCHA replacement embedded in a form)
 ├── ai_gateway           (AI Gateway: LLM traffic proxy - logging, caching, rate and spend limits, DLP, guardrails, dynamic routes)
-└── wan                  (Magic WAN tunnels, interconnects, static routes)
+└── wan                  (Magic WAN IPsec and GRE tunnels, BGP, static routes)
 
 Application Layer (Zone & Workload Scope)
-├── zones                (Zone lifecycle, DNS records, vanity nameservers)
-│   ├── waf              (Firewall rulesets, rate limiting, bot policies)
+├── zones                (Zone lifecycle, rate plans, TLS posture and settings, bot management)
+│   ├── dns              (DNS records)
+│   ├── waf              (Firewall rules, rate limiting, managed rulesets, bot traffic rules)
+│   ├── rules            (Cache, request header transform and origin rules)
 │   ├── load_balancing   (Health monitors, origin pools, failover logic)
 │   ├── origin_pulls     (Authenticated Origin Pulls: edge-to-origin mTLS, zone-wide and per hostname)
+│   ├── workers          (Workers, KV, D1, queues, routes, custom domains, cron triggers)
 │   ├── pages            (Pages projects: Jamstack front ends, branch deploys, bindings, custom domains)
-│   └── r2               (Bucket policies, CORS, custom domains)
+│   └── r2               (Buckets, CORS, lifecycle and retention rules, custom domains)
 ```
+
+Apply order is not this grouping. `account_governance` applies first and alone, then `zones` alongside every layer that touches no zone, then the layers that resolve a zone - see [the dependency model](deployment/README.md#sequential-dependency-model-3-tier-pipeline).
 
 ### Architectural Principles
 
@@ -106,11 +113,11 @@ While `modules/` sits inside this repository for development convenience in this
 
 ```hcl
 module "dns" {
-  source = "git::https://github.com/your-org/terraform-cloudflare-lz-dns.git?ref=v1.2.0"
+  source = "git::https://github.com/your-org/terraform-cloudflare-lz-dns-records.git?ref=v1.2.0"
 }
 ```
 
-This guarantees that changes on `main` do not automatically alter live infrastructure until a customer explicitly bumps their module version in their deployment layer.
+This guarantees that changes on `main` do not automatically alter live infrastructure until a customer explicitly bumps their module version in their deployment layer. The Release Manager names each module repository `terraform-cloudflare-lz-<module>` in kebab-case - `modules/dns_records` becomes `terraform-cloudflare-lz-dns-records` - and does not rewrite the layers' `source` lines, so pointing each layer at its module repository is a step of setting up the deployment repository.
 
 ## Architectural Decisions: CFLZ vs Cloudflare Guidance
 
@@ -146,7 +153,7 @@ CFLZ uses GitHub Actions driven strictly by GitOps workflows. Terraform is execu
 
 | Workflow                                                       | Trigger                          | Touches Cloudflare? | Can change anything?              |
 | ----------------------------------------------------------------| ----------------------------------| ---------------------| -----------------------------------|
-| [`ci.yml`](.github/workflows/ci.yml)                           | Every PR, every push to `main`   | No                  | No (offline validation & linting) |
+| [`ci.yml`](.github/workflows/ci.yml)                           | Every PR, every push to `main`, manual | No            | A git tag only: offline validation & linting, then a patch tag on a green push to `main` |
 | [`secret-scanning.yml`](.github/workflows/secret-scanning.yml) | Every PR, push to `main`, manual | No                  | No                                |
 | [`terraform-plan.yml`](.github/workflows/terraform-plan.yml)   | Manual dispatch only             | Reads               | No                                |
 | [`terraform-apply.yml`](.github/workflows/terraform-apply.yml) | Manual dispatch only             | Reads & writes      | Yes, after human approval         |
@@ -161,7 +168,7 @@ CFLZ uses GitHub Actions driven strictly by GitOps workflows. Terraform is execu
 - **Zero-Downtime State Refactoring (`state-forget.yml`):** A maintenance workflow that instructs Terraform to forget a resource without deleting it at Cloudflare (`terraform state rm`). This facilitates moving resources between layers (for example, handing DNS records from the `zones` layer over to the dedicated `dns` layer) without edge disruption, gated by explicit human approval.
 - **Distributed State Lock Recovery (`state-unlock.yml`):** Safely releases abandoned S3 conditional lockfiles in Cloudflare R2 left behind by cancelled or interrupted pipeline jobs, resolving `PreconditionFailed` deadlocks without requiring manual R2 bucket intervention.
 - **R2 State Backend with Native Locking:** Terraform state resides in Cloudflare R2 via the S3-compatible backend (`use_lockfile = true`), partitioned with one independent state key per account and layer. Native S3 conditional writes enforce distributed locking without requiring external lock tables (such as DynamoDB).
-- **Proactive API Rate Limiting:** The provider's requests are paced through a loopback HTTP rate limiter ([`cf-api-throttle.py`](.github/scripts/cf-api-throttle.py)) running inside the runner container. This prevents plan and apply runs against dense zones from breaching Cloudflare's threshold of 1,200 requests per 5 minutes per credential (HTTP 429).
+- **Proactive API Rate Limiting:** The provider's requests are paced through a loopback HTTP rate limiter ([`cf-api-throttle.py`](.github/scripts/cf-api-throttle.py)) running on the runner itself. This prevents plan and apply runs against dense zones from breaching Cloudflare's threshold of 1,200 requests per 5 minutes per credential (HTTP 429).
 - **Resource Tagging:** Zones, Access applications, R2 buckets, KV namespaces, D1 databases, queues and Workers are tagged from `accounts/<account>/tags.tfvars`, validated at plan time, and written after apply by a dedicated job ([`resource-tags.sh`](.github/scripts/resource-tags.sh)) until the provider ships a tagging resource. Every managed resource carries `managed-by` and `layer`, so anything created by hand stands out. See [Resource tags](.github/workflows/README.md#resource-tags).
 - **Least-Privilege Environment Scoping:** Each account has one `<account>-plan` GitHub Environment holding a read-only token, and one `<account>-<layer>-apply` environment per layer holding that layer's write token behind a required reviewer, so a credential for one layer cannot change another. A separate `<account>-tags-apply` environment holds a tag-only token for the resource tags job. The R2 state keys are repository secrets scoped to the state bucket alone. See [VARIABLES_AND_SECRETS.md](VARIABLES_AND_SECRETS.md).
 
@@ -171,10 +178,14 @@ CFLZ uses GitHub Actions driven strictly by GitOps workflows. Terraform is execu
 
 | Document                                                   | For                                                                              |
 | ------------------------------------------------------------| ----------------------------------------------------------------------------------|
+| [Wiki](https://github.com/itsharryshelton/CloudflareLandingZone/wiki) | Task guides for operators: adding a zone, a record, a WAF rule, a bucket |
 | [VARIABLES_AND_SECRETS.md](VARIABLES_AND_SECRETS.md)       | Quick reference: every GitHub variable, secret and environment to set, per layer |
-| [deployment/README.md](deployment/README.md)               | How layers and accounts fit together                                             |
+| [deployment/README.md](deployment/README.md)               | How layers and accounts fit together, and each layer's inputs and guardrails    |
 | [.github/workflows/README.md](.github/workflows/README.md) | Pipeline, environments, token scopes, security notes                             |
 | [CONTRIBUTING.md](CONTRIBUTING.md)                         | Changing the Terraform rather than the configuration                             |
+| [deployment/layers/workers/migrations/README.md](deployment/layers/workers/migrations/README.md) | D1 schema migrations: naming, and how the pipeline applies them |
+| [deployment/layers/workers/data/kv/README.md](deployment/layers/workers/data/kv/README.md) | KV data: what Terraform owns, and bulk datasets loaded after apply |
+| [deployment/layers/origin_pulls/ca/README.md](deployment/layers/origin_pulls/ca/README.md) | The vendored Cloudflare Origin Pull CA, and refreshing it |
 
 > ## A Note on Feature Coverage & Maintenance
 > This project is designed to give you a solid, enterprise-ready starting point for deploying Cloudflare Landing Zones, but it doesn't cover every single Cloudflare feature out of the box. You may find that your specific deployment requires tweaking the `.tf` files to add new variables or support additional resources.  
@@ -188,4 +199,4 @@ Distributed under the Apache License 2.0 - See [LICENSE](LICENSE) and [NOTICE](N
 
 ### Open-Source & BSL Considerations
 - Apache-2.0 License: You are free to copy, modify, and run this code for commercial clients privately without triggering file-level copyleft obligations (unlike MPL-2.0).
-- Terraform BSL / OpenTofu: Terraform (v1.6+) is licensed under the Business Source License (BSL 1.1) by IBM. CFLZ relies on standard HCL features and is fully compatible with OpenTofu (MPL-2.0) if your organization requires a completely open-source toolchain.
+- Terraform BSL / OpenTofu: Terraform (v1.6+) is licensed under the Business Source License (BSL 1.1) by IBM. CFLZ relies on standard HCL features, but is developed and tested only against Terraform (the pipeline pins 1.14.6). OpenTofu (MPL-2.0) is untested. Before relying on it, check that your OpenTofu version satisfies `required_version = ">= 1.12.0"`, which OpenTofu compares with its own version number, and that it short-circuits `||` and `&&`, which the guardrails rely on.

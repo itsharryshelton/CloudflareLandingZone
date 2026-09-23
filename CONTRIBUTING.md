@@ -1,7 +1,8 @@
 # Contributing
 
 This document is about changing the Terraform. If you only want to configure a
-customer, you want the Wiki instead, and you should not need to touch a `.tf` file at all.
+customer, you want the [Wiki](https://github.com/itsharryshelton/CloudflareLandingZone/wiki)
+instead, and you should not need to touch a `.tf` file at all.
 
 ## Upstream and downstream
 
@@ -28,16 +29,18 @@ deployment/
   layers/           root modules, one per product, each with its own state
   accounts/         configuration, one directory per Cloudflare account
 .github/
-  workflows/        CI, plan, apply
-  scripts/          the derivation helpers CI depends on
+  workflows/        CI, secret scanning, plan, apply, state maintenance
+  scripts/          the derivation helpers CI depends on, plus the post-apply scripts
+  actions/          modules-auth, which lets `terraform init` read the private modules
 ```
 
 Two rules hold the whole thing together.
 
 Modules know nothing about this repository. They take flat arguments and real IDs,
-never logical keys, and they never use `for_each` at the top level. One module
-instance is one resource group. That is what lets a module be tagged, frozen and
-reused across every customer.
+never logical keys, and they never iterate over the fleet. One module instance is
+one resource group - one zone's records, one bucket, one tunnel - and any
+`for_each` inside a module is over the members of that group only. That is what
+lets a module be tagged, frozen and reused across every customer.
 
 Layers own the fleet shaped view. They hold every variable, iterate `for_each` over
 maps keyed by a logical key, and turn `zone_key = "primary"` into a zone ID.
@@ -136,8 +139,15 @@ Ask yourself whether the module would make sense to somebody who has never seen
    environment per account.
 7. If the product needs a credential of its own - a pre-shared key, an OAuth
    client secret - declare it as a `sensitive` variable that the account tree
-   never assigns, and document that it arrives as `TF_VAR_<name>` from the apply
-   environment. See `wan_ipsec_tunnel_psks` in `layers/wan/variables.tf`.
+   never assigns, and document that it arrives as `TF_VAR_<name>` from the
+   `<account>-plan` environment, not the apply one: the plan step reads it, and
+   apply runs the saved plan without re-reading `TF_VAR_`. Add a conditional
+   export for it to the plan step of `_terraform-run.yml`, so an unset secret
+   never reaches Terraform as an empty string. See `origin_pull_certificates` in
+   `layers/origin_pulls/variables.tf`, and its export in `_terraform-run.yml`.
+8. Add the layer to the `ci.yml` self-test, and give it a `tier.tf` only if the
+   derived apply tier is wrong. See "Adding a new product layer" in
+   [deployment/README.md](deployment/README.md).
 
 ## Adding an account
 
@@ -173,13 +183,15 @@ Terraform as `CLOUDFLARE_API_TOKEN`, `AWS_ACCESS_KEY_ID` and
 `layers/*/defaults.auto.tfvars` and `accounts/*/*.tfvars`. It then re-denies
 `**/terraform.tfvars`, `**/local.auto.tfvars` and `**/*.local.tfvars` after those
 exceptions, so no negation can reach them. `ci.yml` asserts both directions, and
-greps committed tfvars for anything credential shaped.
+fails if a state file, saved plan or local override is tracked.
+`secret-scanning.yml` runs betterleaks over the whole git history and greps every
+tracked file for a Cloudflare token prefix.
 
 Terraform state and plan files are as sensitive as the tokens. Both contain
 resolved zone IDs, DNS record contents and complete WAF expressions. Plan
-artifacts expire after five days, and the summary published to a pull request is
-reduced to resource addresses and actions so no attribute values leak into a
-comment.
+artifacts expire after five days, and the plan summary published to the job
+summary is reduced to resource addresses and actions, so no attribute values
+leak into the run page.
 
 Use reserved ranges in anything committed as an example: RFC 5737 for addresses
 (`192.0.2.0/24`, `198.51.100.0/24`, `203.0.113.0/24`) and RFC 2606 for domains
@@ -187,8 +199,11 @@ Use reserved ranges in anything committed as an example: RFC 5737 for addresses
 
 ## The pipeline runs Terraform, not you
 
-Terraform is never run from a workstation, including by contributors. No `init`, no
-`plan`, no `apply`. Push a branch and let the pipeline do it.
+Terraform is never run against a real account or real state from a workstation,
+including by contributors. No `init` against the R2 backend, no live `plan`, no
+`apply`. Push a branch and let the pipeline do it. The one exception is an offline
+plan in a scratch copy - no backend, a dummy token, nothing that can reach an
+account - which is how a guardrail is proven (see below).
 
 The reasons are the same ones that shaped the layer split. Credentials and state keys
 stay in GitHub Environments where they can be scoped and rotated, every plan is
@@ -196,43 +211,52 @@ recorded against a commit, and the only thing that can reach a customer account 
 reviewed and approved run.
 
 So the loop for a module or layer change is: push a branch, open a draft pull
-request, read what CI says, push a fix. `ci.yml` runs on every push and covers:
+request, read what CI says, push a fix. `ci.yml` runs on every pull request and
+every push to `main`, and covers:
 
 | Check | What it does |
 |---|---|
 | `terraform fmt` | Formatting, recursive |
-| `tflint` | Lint, recursive |
-| `terraform validate` | Every layer and every module, offline |
-| `terraform plan` | Every offline-plannable layer against every account, with a dummy token |
-| Config guards | Every account var file maps to a layer, backend blocks stay commented, nothing secret is tracked |
-| Mapping self test | The account and layer derivation in `.github/scripts/` still produces what it should |
+| `tflint` | Lint, recursive, with the root `.tflint.hcl` |
+| `terraform validate` | Every layer, offline. Modules are validated through the layers that call them |
+| `terraform plan (offline)` | Every offline-plannable layer the change affects, against each affected account, with a dummy token |
+| `config guards` | Every account var file maps to a layer, backend blocks stay commented, no state, plan or local override is tracked, and the account/layer mapping self-test |
+| `API rate limiter` | The tests for `cf-api-throttle.py` |
 
-Only `zones` and `wan` can be planned without credentials. `waf`,
-`load_balancing` and `r2` resolve zones through a data source,
-`account_governance` resolves role and permission group names the same way,
-`zerotrust` reads the account's existing Zero Trust organization, and `gateway`
-resolves Cloudflare's category and application catalogues; each is a real API
-read at plan time. Those six are covered by `validate` in CI, and by
-`terraform-plan.yml` on a pull request using a read-only token. Which layers
-qualify is derived, not listed, so a new layer is classified correctly without
-editing the workflow.
+`secret-scanning.yml` runs alongside it on the same triggers. On a push to `main`,
+once every check above has passed, the `publish patch tag` job tags the commit -
+see [Releases](#releases).
+
+Seven layers can be planned without credentials: `ai_gateway`, `bulk_redirects`,
+`device_posture`, `lists`, `turnstile`, `wan` and `zones`. Every other layer holds
+a `data "cloudflare_*"` block and so makes a real API read at plan time: the
+layers that resolve a zone by name, `account_governance` resolving role and
+permission group names, `zerotrust` reading the account's existing Zero Trust
+organization, and `gateway` resolving Cloudflare's category and application
+catalogues. Those are covered by `validate` in CI, and planned against the live
+account by `terraform-plan.yml` (dispatched by hand) and by `terraform-apply.yml`
+before its approval gate. Which layers qualify is derived, not listed, so a new
+layer is classified correctly without editing the workflow.
 
 `wan` is account-scoped, resolves nothing by name and holds no data source at
 all, so every guardrail in it can be fired locally with a dummy token and no
 stubbing. That makes it the easiest layer in the repository to test a check
 against, and there is no excuse for an untested one.
 
-`r2` is the one that classifies conservatively. It reads a zone only for a
-bucket served from a custom domain, so a deployment of private buckets makes no
-API call at all - but the `data` block is in the source either way, so the
-derivation puts it in the second tier regardless. That is the right direction to
-be wrong in.
+The zone-reading layers classify conservatively. Each looks up only the zones its
+account tree references - a bucket's custom domain in `r2`, a zone-scoped job in
+`logpush`, a published hostname in `tunnels` - so an account that references none
+makes no API call at all. The `data` block is in the source either way, so the
+derivation puts the layer in tier 3, and out of CI's offline plan, regardless.
+That is the right direction to be wrong in.
 
 A layer that reads the API is still testable offline, and a new guardrail in one
-should be proven before review. Copy the layer to a scratch directory, delete its
-`terraform.tf` and its data source file, repoint the module `source` at the real
-path, and replace each `data.cloudflare_x.this` reference with a `local.stub_x`
-you write by hand. Take the stub's shape from `terraform providers schema -json`
+should be proven before review. Copy the layer to a scratch directory, keeping the
+modules at the same relative path or repointing each module `source` at the real
+one. Keep `terraform.tf`: it holds `required_providers`, and its backend block is
+commented out, so `init` there uses a local backend. Delete the data source file,
+and replace each `data.cloudflare_x.this` reference with a `local.stub_x` you
+write by hand. Take the stub's shape from `terraform providers schema -json`
 rather than the registry documentation, which flattens nesting modes. Plan it
 against the account's committed `.tfvars` with a dummy `CLOUDFLARE_API_TOKEN`, and
 every precondition in `preflight.tf` can then be made to fire on demand.
@@ -246,25 +270,36 @@ A validation block nobody has seen fail is a validation block that might not wor
 When you add one, prove it rejects what it claims to, and do it through the pipeline.
 
 Put a deliberately bad value in an account tree on your branch, push, and confirm the
-CI plan fails with your message. For example, a proxied TXT record in
-`deployment/accounts/account_a/dns.tfvars`:
+CI plan fails with your message. This works for the seven offline-plannable layers.
+For example, add an entry keyed `not_a_zone` to the `zone_config` map in
+`deployment/accounts/account_a/zone_config.tfvars`, for a zone `zones.tfvars` does
+not declare:
+
+```hcl
+not_a_zone = { ssl_mode = "strict" }
+```
+
+CI should fail with `zone_config has entries with no matching zone in var.zones:
+not_a_zone`. If it plans cleanly, your check is doing nothing. Remove the bad value
+in a follow up commit before asking for review, and say in the pull request
+description which run proved the check fires, so a reviewer does not have to take it
+on trust.
+
+For guardrails on a layer that reads the API - `dns`, `waf`, `r2`, `gateway`,
+`zerotrust` and the rest - CI's offline plan never runs the layer, so the same trick
+works against `terraform-plan.yml` rather than `ci.yml`, or offline, with the
+stubbed data source described above. A proxied TXT record in `dns.tfvars` is the
+classic one:
 
 ```hcl
 { name = "@", type = "TXT", content = "v=spf1 -all", ttl = 1, proxied = true },
 ```
 
-CI should fail with the message about only A, AAAA and CNAME being proxiable. If it
-plans cleanly, your check is doing nothing. Remove the bad value in a follow up
-commit before asking for review, and say in the pull request description which run
-proved the check fires, so a reviewer does not have to take it on trust.
-
-For guardrails on `waf`, `load_balancing`, `r2`, `account_governance`,
-`zerotrust` or `gateway`, the same trick works against `terraform-plan.yml`
-rather than `ci.yml`, since those layers need a real read - or offline, with the
-stubbed data source described above. `r2` is easier than the rest: a bucket with
-no `custom_domains` reads nothing, so every guardrail except the two zone checks
-can be fired with a dummy token and no stubbing at all. `wan` needs neither,
-since it reads nothing under any configuration.
+It should fail with the message about only A, AAAA and CNAME being proxiable. A
+zone-reading layer whose account tree references no zone reads nothing, so most of
+its guardrails can be fired with a dummy token and no stubbing at all - `r2` with
+no `custom_domains`, for instance. `wan` needs neither, since it reads nothing
+under any configuration.
 
 `gateway` is the layer the stubbing recipe was worth writing down for, because
 its two data sources are plain lists. Replace
@@ -284,9 +319,14 @@ In the description, say what changed and which run demonstrates it. If the chang
 alters a variable schema, say whether it is backwards compatible, because downstream
 repositories pin a tag and someone has to decide whether they can bump it.
 
-CI must be green. The required status check is `plan complete`, not `plan`, because
-`plan` is legitimately skipped when a change affects no account and a skipped job
-never satisfies a required check.
+CI must be green. Make the `ci.yml` jobs the required status checks - `terraform
+fmt`, `tflint`, `terraform validate`, `terraform plan (offline)`, `config guards`
+and `API rate limiter` - plus `betterleaks & token guard` from
+`secret-scanning.yml`. None of them is skipped on a pull request: the offline plan
+job runs and reports "no offline-plannable layer was affected" rather than
+skipping. `plan complete` is the aggregate job of `terraform-plan.yml`, which is
+dispatched by hand and never runs on a pull request, so it cannot be a required
+check.
 
 ### Reviewing
 
@@ -307,11 +347,19 @@ get skimmed, and that particular destroy takes every DNS record with it.
 
 ## Releases
 
-Merging to `main` publishes a patch tag. Downstream repositories pin an immutable
-tag, so a fleet upgrade is a deliberate bump rather than something that happens
-because you pushed.
+Merging to `main` publishes a patch tag: the `publish patch tag` job in `ci.yml`
+tags every green push with the next `vX.Y.Z+1`. Downstream repositories pin an
+immutable tag, so a fleet upgrade is a deliberate bump rather than something that
+happens because you pushed.
 
-Minor and major bumps are decisions, not automation. Tag them by hand:
+Module repositories published by the
+[Release Manager](https://github.com/itsharryshelton/CloudflareLandingZone-Release-Manager)
+tag differently: their CI reads `#major`, `#minor` or `#patch` from every commit
+since the last tag and bumps by the highest one found, patch when there is none.
+That is why commit messages here carry the keyword alongside their Conventional
+Commits type (`fix:` `#patch`, `feat:` `#minor`, `feat!:` `#major`).
+
+Here, minor and major bumps are decisions, not automation. Tag them by hand:
 
 - Patch: fixes and additive changes that existing tfvars keep working across.
 - Minor: new inputs or new modules, still backwards compatible.

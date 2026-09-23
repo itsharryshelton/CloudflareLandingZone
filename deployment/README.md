@@ -4,7 +4,8 @@ Everything you edit lives here. The modules under [../modules/](../modules/) sta
 
 ## Directory Structure
 
-```deployment/
+```text
+deployment/
 ├── layers/                            # code, shared by every account
 │   ├── account_governance/            # own state: members, user groups, RBAC
 │   ├── ai_gateway/                    # own state: AI gateways, caching, rate and spend limits, DLP, guardrails, dynamic routes
@@ -21,10 +22,10 @@ Everything you edit lives here. The modules under [../modules/](../modules/) sta
 │   ├── rules/                         # own state: cache rules, transform rules, origin rules
 │   ├── tunnels/                       # own state: Cloudflare Tunnels, public hostnames, private network routes
 │   ├── turnstile/                     # own state: Turnstile widgets, the sitekey and secret a form is protected by
-│   ├── waf/                           # own state: firewall custom rules, rate limiting
-│   ├── wan/                           # own state: Magic WAN IPsec and GRE tunnels, static routes
+│   ├── waf/                           # own state: firewall custom rules, rate limiting, managed rulesets, bot traffic rules
+│   ├── wan/                           # own state: Magic WAN IPsec and GRE tunnels, BGP, static routes
 │   ├── workers/                       # own state: Worker scripts, KV namespaces, D1 databases, queues, routes, crons
-│   ├── zerotrust/                     # own state: Access applications, policies, service tokens, IdPs
+│   ├── zerotrust/                     # own state: Zero Trust organisation, IdPs, Access groups, policies, applications, service tokens
 │   └── zones/                         # own state: zones, TLS posture, settings, bot management
 └── accounts/                          # config, one tree per Cloudflare account
     ├── account_a/
@@ -55,7 +56,9 @@ Everything you edit lives here. The modules under [../modules/](../modules/) sta
         └── ...
 ```
 
-Each layer is a root module with its own state file, holding `terraform.tf`, `providers.tf`, `variables.tf`, `locals*.tf`, one `<subject>.tf`, `preflight.tf`, `outputs.tf` and its own `defaults.auto.tfvars` where platform baselines apply.
+Each layer is a root module with its own state file, holding `terraform.tf`, `providers.tf`, `variables.tf`, `locals*.tf`, one `<subject>.tf`, `preflight.tf`, `outputs.tf` and its own `defaults.auto.tfvars` where platform baselines apply. Where they apply, a layer also carries `zone_lookup.tf` (or another `*_lookup.tf`) for the names it resolves through the API, `tags.tf` for [resource tags](../.github/workflows/README.md#resource-tags), `tier.tf` for a declared apply tier, and `imports.tf` for adopting what already exists at Cloudflare.
+
+Upstream, a layer's `module` blocks point at [../modules/](../modules/), except `dns`, `gateway`, `lists`, `rules`, `turnstile` and `waf`, which point at a placeholder `git::https://github.com/Your-Org/cloudflare-platform-modules//<module>`. Each block carries a commented example of the pinned `?ref=` form. In a deployment repository, every `source` has to name the published module repository at a tag.
 
 Layers are named after the Cloudflare product they manage, with no artificial numeric prefixes in directory names. Instead, execution ordering is determined by real infrastructure dependencies and enforced through a sequential multi-tier pipeline model.
 
@@ -94,7 +97,7 @@ Tier 3: Zone-Dependent & Consumer Layers
 Tier membership is derived directly from the Terraform source code - calling the `zone_base` module means Tier 2, resolving a zone with `data "cloudflare_zone"` means Tier 3 - except where the source cannot express the dependency at all. Those two layers declare their own tier in a `tier.tf` holding `locals { apply_tier = <n> }`, which `tf-matrix.sh` reads in preference to the derivation:
 - **Tier 1 (`account_governance`):** Account-wide permissions and resource-group scopes. Every downstream token is evaluated against what this layer applies, so it runs on its own first. Declared in `tier.tf`, because the dependency is on Cloudflare's authorisation decision rather than on any Terraform attribute.
 - **Tier 2 (`zones`, `ai_gateway`, `bulk_redirects`, `device_posture`, `gateway`, `lists`, `turnstile`, `wan`):** `zones` creates the zone containers at Cloudflare. The remaining layers touch no zones, so nothing waits on them. `lists` is deliberately placed in Tier 2 so that named lists exist before `waf` references them, and `device_posture` so that a posture rule exists before a `zerotrust` Access policy requires it.
-- **Tier 3 (`dns`, `load_balancing`, `logpush`, `origin_pulls`, `pages`, `r2`, `rules`, `tunnels`, `waf`, `workers`, `zerotrust`):** These layers resolve zones dynamically via `data "cloudflare_zone"`, which fails at plan time until Tier 2 has created the zone. `tunnels` resolves one for the proxied CNAME behind each public hostname, `pages` one for the CNAME behind each custom domain, and `logpush` one for each zone-scoped job. `origin_pulls` resolves one per zone it configures, and belongs behind `zones` for a second reason: the zone's SSL mode has to be `full` or `strict` before authenticating to the origin means anything. `zerotrust` is included here by declaration in its own `tier.tf`, because Access applications are addressed by hostname and require the corresponding zone and DNS record to exist, yet the layer never reads a zone for the derivation to find.
+- **Tier 3 (`dns`, `load_balancing`, `logpush`, `origin_pulls`, `pages`, `r2`, `rules`, `tunnels`, `waf`, `workers`, `zerotrust`):** These layers resolve zones dynamically via `data "cloudflare_zone"`, which fails at plan time until Tier 2 has created the zone. `tunnels` resolves one for the proxied CNAME behind each public hostname, `pages` one per zone a custom domain's `zone_key` names, and `logpush` one for each zone-scoped job. `origin_pulls` resolves one per zone it configures, and belongs behind `zones` for a second reason: the zone's SSL mode has to be `full` or `strict` before authenticating to the origin means anything. `zerotrust` is included here by declaration in its own `tier.tf`, because Access applications are addressed by hostname and require the corresponding zone and DNS record to exist, yet the layer never reads a zone for the derivation to find.
 
 ## Why split this way
 
@@ -102,7 +105,7 @@ Tier membership is derived directly from the Terraform source code - calling the
 
 **Product isolation over combined states.** A WAF, DNS, or load balancer apply cannot propose destroying a zone, because zones are not in its state. Zone deletion is the most destructive failure mode in Cloudflare, as it immediately cascades to eliminate all DNS records. Splitting state also allows each layer's pipeline runner to hold a tightly scoped token: `waf` requires `Zone WAF:Edit` and `Zone:Read`, never `Zone:Edit`. The boundary is strictly enforced across roles: `account_governance` is the only layer whose credentials can grant administrative access, and `zerotrust` is the only layer that controls access behind Cloudflare Access. Neither holds zone-level modification rights.
 
-**Zone as a `for_each` key, not a directory.** Maintaining a directory per account and zone would mean onboarding a zone requires adding duplicated `.tf` orchestrator files. A fleet-wide module version bump would touch hundreds of files. Adding a zone here requires editing only `zones.tfvars`, `zone_config.tfvars`, and `dns.tfvars`.
+**Zone as a `for_each` key, not a directory.** Maintaining a directory per account and zone would mean onboarding a zone requires adding duplicated `.tf` orchestrator files. A fleet-wide module version bump would touch hundreds of files. Adding a zone here needs only a `zones.tfvars` entry; `zone_config.tfvars` overrides its baseline, and `dns.tfvars` holds its records.
 
 **DNS separated from Zone lifecycle.** Zone lifecycle management (creation, rate plan subscription, TLS minimum versions, and security level) is separated from high-velocity DNS record management. Routine record changes cannot trigger zone-level recreation or setting drift, and teams managing DNS records do not require permissions to alter zone subscriptions or TLS settings.
 
@@ -112,15 +115,21 @@ The `dns`, `waf`, `load_balancing`, `logpush`, `origin_pulls`, `pages`, `r2`, `r
 
 This design requires the Cloudflare API to be accessible at plan time for consumer layers, and plans will fail if the zone does not yet exist. Apply `zones` first; `dns`, `waf`, `load_balancing`, `logpush`, `origin_pulls`, `pages`, `r2`, `rules`, `tunnels`, and `workers` can then plan and apply concurrently.
 
-`account_governance` queries the API to resolve role, permission group, and resource group names to IDs. `zerotrust` queries the account's existing Zero Trust organisation to adopt the configured team name. `gateway` dynamically resolves Cloudflare's content categories, security categories, and application catalogues so that configuration files reference human-readable names like `"Microsoft 365"` rather than arbitrary IDs like `606`.
+`account_governance` queries the API to resolve role, permission group, and resource group names to IDs. `zerotrust` queries the account's existing Zero Trust organisation, to adopt its team name when `zero_trust_team_name` is unset and to refuse an unintended rename when it is set. `gateway` dynamically resolves Cloudflare's content categories, security categories, and application catalogues so that configuration files reference human-readable names like `"Microsoft 365"` rather than arbitrary IDs like `606`.
 
 `wan`, `bulk_redirects`, `lists`, `turnstile`, `ai_gateway`, and `device_posture` are completely account-scoped and contain no zone data sources.
 
+### Reading a layer's outputs
+
+Several hand-overs in this document are a layer output: `name_servers`, `device_posture_rule_ids`, `origin_trust_bundles`, `turnstile_sitekeys`, `pages_access_applications`, `ai_gateway_endpoints`. The pipeline exports none of them as an artifact - only `resource_tags`, for the tags job. `terraform apply` prints every root output under `Outputs:` at the end of the `Terraform apply` step of that layer's `<account>-<layer>-apply` job, sensitive ones as `<sensitive>`, so that job log is where to read them. `terraform output` itself needs a directory initialised against the layer's state, which this repository only does inside the pipeline.
+
 ## Config precedence
 
+Lowest precedence first:
+
 1. `layers/<layer>/defaults.auto.tfvars`: platform baseline, auto-loaded from the layer's working directory. Customer-agnostic.
-2. `accounts/<account>/*.tfvars`: passed explicitly with `-var-file` flags, overriding defaults.
-3. `local.auto.tfvars` in a layer directory: operator local experiments. Strictly Gitignored.
+2. `local.auto.tfvars` in a layer directory: operator local experiments, for an offline plan in a scratch copy. Auto-loaded after `defaults.auto.tfvars`, because Terraform reads `*.auto.tfvars` files in lexical order, so it overrides the baseline. Strictly Gitignored.
+3. `accounts/<account>/*.tfvars`: passed explicitly with `-var-file` flags, which Terraform reads after every `*.auto.tfvars`, so they override both. That includes the guardrails: an `allow_*` variable set in an account's tfvars relaxes it for that account, so review such a change as a policy exception.
 
 Terraform `-var-file` arguments do not merge maps across files: if two files define the same variable, the last file wins wholesale. Account configuration is therefore partitioned by variable rather than by zone: `zones.tfvars` owns the zone inventory, `zone_config.tfvars` owns zone settings, `dns.tfvars` owns DNS records, and `waf.tfvars` owns firewall rules. No two files define the same top-level variable.
 
@@ -130,7 +139,7 @@ The helper script `.github/scripts/tf-varfiles.sh` verifies variable declaration
 
 Layer defaults are customer-agnostic. Account configuration files contain account IDs, domain names, IP address ranges, and routing topologies. This is operational configuration, not secret material, and this repository is protected by private repository access controls and RBAC.
 
-The following secrets must never be committed to source control:
+The following secrets must never be committed to source control. The pipeline supplies them as environment variables at run time, from GitHub secrets - see [VARIABLES_AND_SECRETS.md](../VARIABLES_AND_SECRETS.md) for where each one is set:
 
 ```bash
 export CLOUDFLARE_API_TOKEN="<per-account, per-layer scoped token>"
@@ -138,16 +147,19 @@ export AWS_ACCESS_KEY_ID="<R2 access key for state backend>"
 export AWS_SECRET_ACCESS_KEY="<R2 secret key for state backend>"
 export TF_VAR_identity_provider_secrets='{"entra_id":"<oauth_client_secret>"}'
 export TF_VAR_wan_ipsec_tunnel_psks='{"london_primary":"<pre_shared_key>"}'
+export TF_VAR_wan_bgp_md5_keys='{"<peering tunnel key>":"<md5_key>"}'
 export TF_VAR_logpush_destination_secrets='{"audit_archive":"r2://<bucket>/audit/{DATE}?account-id=<id>&access-key-id=<key_id>&secret-access-key=<secret>"}'
+export TF_VAR_logpush_ownership_challenges='{"primary_http_requests":"<challenge_token>"}'
 export TF_VAR_device_posture_integration_secrets='{"intune":{"client_secret":"<entra_app_client_secret>"}}'
 export TF_VAR_origin_pull_certificates='{"api_origin":{"certificate":"<client_certificate_pem>","private_key":"<private_key_pem>"}}'
+export TF_VAR_pages_project_secrets='{"admin_portal":{"production":{"SESSION_SECRET":"<value>"}}}'
 ```
 
 `.gitignore` enforces default-deny rules for `*.tfvars`, with explicit whitelisting for `layers/*/defaults.auto.tfvars` and `accounts/*/*.tfvars`. It explicitly re-denies `**/terraform.tfvars`, `**/local.auto.tfvars`, and `**/*.local.tfvars`.
 
 ## Pipeline Execution & Layer Mapping
 
-Terraform is executed strictly within GitHub Actions CI/CD pipelines and never on local developer or operator workstations. The project must never be initialised or applied locally: credentials, scoped API tokens, and remote state keys reside exclusively within GitHub Environments protected by strict RBAC, mandatory reviews, and approval gates.
+Terraform is executed strictly within GitHub Actions CI/CD pipelines and never on local developer or operator workstations. The project must never be initialised against its state backend or applied locally: credentials, scoped API tokens, and remote state keys reside exclusively within GitHub Environments protected by strict RBAC, mandatory reviews, and approval gates. (An offline plan of a scratch copy, with no backend and a dummy token, is how a contributor proves a guardrail - see [CONTRIBUTING.md](../CONTRIBUTING.md).)
 
 Plans and applies are dispatched by hand from the Actions tab. When one runs:
 1. `tf-matrix.sh` selects every account and layer pair the `account` and `layer` inputs allow - the whole fleet by default - and sorts the layers into three apply tiers. (On a pull request, `ci.yml` uses the same script to pick pairs from the changed files for its offline plan.)
@@ -158,9 +170,9 @@ Plans and applies are dispatched by hand from the Actions tab. When one runs:
 
 ### Layer Variable File Mapping
 
-The pipeline maps variable files to layers dynamically. The table below lists the configuration files and sensitive environment variables consumed by each layer during automated execution:
+The pipeline maps variable files to layers dynamically. The table below lists the configuration files and sensitive environment variables consumed by each layer during automated execution. Only `account.tfvars`, and `zones.tfvars` for a layer that declares `zones`, are required: every other variable has a default, in the layer or its `defaults.auto.tfvars`, so a file an account does not have is simply not passed.
 
-| Layer                | Required `-var-file` Arguments                                        | Sensitive Environment Variables                                                                                               |
+| Layer                | `-var-file` Arguments                                                 | Sensitive Environment Variables                                                                                               |
 | ----------------------| -----------------------------------------------------------------------| -------------------------------------------------------------------------------------------------------------------------------|
 | `account_governance` | `account.tfvars`, `account_governance.tfvars`                         | None                                                                                                                          |
 | `ai_gateway`         | `account.tfvars`, `ai_gateway.tfvars`                                 | None (BYOK provider keys live in Secrets Store and are added outside Terraform)                                               |
@@ -180,7 +192,7 @@ The pipeline maps variable files to layers dynamically. The table below lists th
 | `waf`                | `account.tfvars`, `zones.tfvars`, `waf.tfvars`                        | None                                                                                                                          |
 | `wan`                | `account.tfvars`, `wan.tfvars`                                        | `TF_VAR_wan_ipsec_tunnel_psks`, `TF_VAR_wan_bgp_md5_keys` (not yet exported by the pipeline)                                  |
 | `workers`            | `account.tfvars`, `zones.tfvars`, `workers.tfvars`, `tags.tfvars`     | None (Worker secrets use Secrets Store)                                                                                       |
-| `zerotrust`          | `account.tfvars`, `zerotrust.tfvars`, `tags.tfvars`                   | `TF_VAR_identity_provider_secrets` (from the `<account>-plan` environment; must be set, `{}` if none)                         |
+| `zerotrust`          | `account.tfvars`, `zerotrust.tfvars`, `tags.tfvars`                   | `TF_VAR_identity_provider_secrets` (from the `<account>-plan` environment; must be set, `{}` only if no OAuth-type provider is declared) |
 | `zones`              | `account.tfvars`, `zones.tfvars`, `zone_config.tfvars`, `tags.tfvars` | None                                                                                                                          |
 
 Like `zones.tfvars`, `tags.tfvars` reaches several layers: it assigns `resource_tags`, which `zones`, `zerotrust`, `r2` and `workers` each declare and each read their own section of. The layers resolve and output the tags; a pipeline job writes them after apply, because the provider has no tagging resource yet. See [Resource tags](../.github/workflows/README.md#resource-tags).
@@ -189,7 +201,7 @@ Like `zones.tfvars`, `tags.tfvars` reaches several layers: it assigns `resource_
 
 State is stored in Cloudflare R2 using the S3-compatible backend.
 
-The backend configuration block is committed commented out so that automated CI linting jobs can execute offline validation (`terraform init -backend=false`) in container runners without cloud credentials. In deployment pipelines, the runner injects the backend configuration dynamically at runtime:
+The backend configuration block is committed commented out so that automated CI jobs can validate and plan offline (`terraform init -backend=false`, or a plain `init` onto the local backend) without cloud credentials. In deployment pipelines, `_terraform-run.yml` writes the fixed backend settings to a `backend.generated.tf` that is never committed, and passes the account-specific parts at init:
 
 ```bash
 terraform init -reconfigure \
@@ -210,26 +222,26 @@ Resources reference each other by logical key, never by physical Cloudflare ID. 
 
 Keys are scoped locally to each account tree: `primary` in `account_a` is completely independent of `primary` in `account_b`.
 
-`preflight.tf` in each layer enforces structural guardrails at plan time:
-- A `zone_key` referencing an unmanaged zone fails the plan with an explicit error.
-- A `zone_config` entry referencing an undeclared zone fails the plan.
-- Two WAF policies conflicting over the same zone are caught before apply.
-- A load balancer hostname outside its zone domain fails the plan.
-- An R2 bucket configured for public anonymous `.r2.dev` access fails the plan.
-- A queue with no consumer, a consumer with no dead letter queue, or a queue that dead letters into itself fails the plan.
-- A D1 database restricted to a jurisdiction while carrying read replication fails the plan.
-- A Cloudflare WAN static route pointing to an unmanaged tunnel fails the plan.
-- A Cloudflare Tunnel hostname outside its referenced zone, or a tunnel route naming an undeclared tunnel, fails the plan.
-- A zone-scoped Logpush job on a zone below Enterprise, a dataset pushed from the wrong scope, or a credential committed in a Logpush destination fails the plan.
-- A user group assigning an undeclared member fails the plan.
-- An unmanaged root CA certificate or uninspected HTTP rule in Gateway fails the plan.
-- A firewall posture check that passes a disabled firewall, a binary check with no signing thumbprint, a posture result that expires before it is refreshed, or a service provider integration missing its credential fails the plan.
+`preflight.tf` in each layer, together with variable validations and module preconditions, enforces guardrails at plan time. A check that expresses a policy rather than a structural fault usually has an `allow_*` switch in the layer's defaults. A selection of what fails the plan - each layer's section below has the rest:
+- Every layer: a key reference - `zone_key`, `tunnel_key`, `member_keys`, `policy_keys` and the like - that names nothing, with an explicit error.
+- `zones`: a `zone_config` entry referencing an undeclared zone.
+- `account_governance`: an unknown role, permission group or resource group name; a restricted role; a member email outside `allowed_email_domains`.
+- `zerotrust`: an unintended team-name change; an Access policy using a restricted decision (`bypass`); an `include` rule admitting an email outside `allowed_email_domains`; an OAuth identity provider without its secret, or a secret with no provider.
+- `device_posture`: a firewall check that passes a disabled firewall, a binary check with no signing thumbprint, a posture result that expires in less than twice its polling period, or a service provider integration missing a setting or its credential.
+- `gateway`: a category or application name that does not resolve; a custom policy in the reserved precedence band; two policies sharing a precedence; an HTTP rule while TLS decryption is off or unmanaged.
+- `waf` and `rules`: two policies for the same zone; an unknown baseline name or a baseline missing its input; managed rulesets or bot traffic below the zone tier they need; a cache rule that could cache a personalised response.
+- `load_balancing`, `pages`, `r2`, `tunnels`, `workers`: a hostname outside the zone its `zone_key` names.
+- `r2`: public `.r2.dev` access, wildcard CORS, or a bucket-wide deleting lifecycle rule.
+- `workers`: a queue that dead letters into itself; a queue with no consumer, or a consumer with no dead letter queue; a D1 database in a `jurisdiction` with read replication on; a `secret_text` binding; a Worker with no compatibility date or with observability off.
+- `wan`: a static route to an unmanaged tunnel or next hop, a prefix reachable over one tunnel, a public or default route, or a tunnel with health checks off.
+- `tunnels`: a route naming an undeclared tunnel, a public or default private network route, or an origin with TLS verification off.
+- `logpush`: a zone-scoped job on a zone below Enterprise, a dataset pushed from the wrong scope, or a credential committed in a Logpush destination.
 
 ---
 
 ## Zones
 
-The `zones` layer manages zone lifecycle, rate plan subscriptions, TLS security settings, and baseline bot management.
+The `zones` layer manages zone lifecycle, rate plan subscriptions, TLS posture, zone settings and, where a zone or the account asks for it, bot management. Adding a zone needs only a `zones.tfvars` entry: with no `zone_config` entry it gets the platform baseline, and its records go in `dns.tfvars`.
 
 ```hcl
 # accounts/account_a/zones.tfvars
@@ -251,10 +263,18 @@ zone_config = {
     ssl_mode         = "strict"
     min_tls_version  = "1.2"
     always_use_https = "on"
-    security_level   = "medium"
+    zone_settings    = { security_level = "high" }
   }
 }
 ```
+
+A `zone_config` entry may also set `zone_type` (`full`, `partial`, `secondary` or `internal`), `paused`, `tls_1_3`, `manage_subscription` and `bot_management`. Any other zone setting goes in `zone_settings` as `setting_id = value`, merged over `default_zone_settings`; the dedicated fields above win over a `zone_settings` key of the same name. Every zone also gets `zone_base`'s own baseline: `automatic_https_rewrites`, `opportunistic_encryption`, `browser_check` and `http3` on. A zone's `bot_management` block replaces `default_bot_management` wholesale rather than merging with it, and a field the zone's `zone_tier` does not support fails the plan.
+
+Removing a setting or a `bot_management` block does not revert it. Neither has a delete operation at Cloudflare, so the planned destroy only drops it from state, and the last applied value stays live on the zone - see the [Notes](../.github/workflows/README.md#notes) on planned destroys.
+
+A new zone stays `pending` until the registrar points at the nameservers in this layer's `name_servers` output.
+
+`zone_config.<key>.dns_records` still exists, from before DNS moved to its own layer: records declared there are created by the `zones` layer, in its state. Keep each zone's records in exactly one layer; new records belong in `dns.tfvars`.
 
 ### Governing defaults
 
@@ -264,8 +284,11 @@ zone_config = {
 | `default_min_tls_version` | `"1.2"` | Rejects legacy TLS 1.0 and 1.1 connections edge-wide. |
 | `default_tls_1_3` | `"on"` | Enables TLS 1.3 without 0-RTT by default (0-RTT requires idempotent origins). |
 | `default_always_use_https` | `"on"` | Automatically redirects HTTP requests to HTTPS with a 301 redirect. |
-| `manage_zone_subscriptions` | `false` | Billing safeguard. When false, Terraform will not modify zone subscription plans. Set to true only when Terraform is authorised to purchase paid rate plans. |
-| `default_subscription_frequency` | `"monthly"` | Subscription billing frequency (`monthly` or `annual`). |
+| `default_zone_settings` | `{ security_level = "medium" }` | Settings every zone gets, beneath its own `zone_settings`. |
+| `default_zone_tier` | `"free"` | The plan assumed for a zone with no `zone_tier`. It decides which bot management fields are allowed, and is the plan bought when a subscription is managed. |
+| `default_bot_management` | `null` | No bot management resource is created, and the zone's current bot settings are left alone, unless a zone sets `bot_management`. |
+| `manage_zone_subscriptions` | `false` | Billing safeguard. When false, Terraform does not change a zone's rate plan; a zone can override it with `zone_config.<key>.manage_subscription`. When on, `zone_tier` is the plan bought, the plan shows a `BILLING` warning rather than failing, and the run needs Billing Read and Write - on a separate token, per the layer's `providers.tf`. |
+| `default_subscription_frequency` | `"monthly"` | Billing frequency for a managed subscription: `weekly`, `monthly`, `quarterly` or `yearly`. Ignored unless the subscription is managed. |
 
 ---
 
@@ -289,17 +312,22 @@ dns_config = {
 ```
 
 ### Key Considerations
-- `proxied = true` requires `ttl = 1` (automatic TTL). Proxying is supported only on `A`, `AAAA`, and `CNAME` records.
+- `dns_config` is keyed by the zone keys in `zones.tfvars`; an unknown key fails the plan. Only zones with at least one record are looked up.
+- `proxied = true` requires `ttl = 1` (automatic TTL). Proxying is supported only on `A`, `AAAA`, and `CNAME` records. Otherwise `ttl` is `1` or 30 to 86400 seconds, and `MX`, `SRV` and `URI` records need a `priority`. A record may also carry a `comment` and `tags`.
 - Names can be specified as `"@"`, relative (`"www"`), or fully qualified (`"www.example.com"`). The module normalises them automatically. Declaring both relative and fully qualified variations of the same record causes a plan validation failure.
-- Cloudflare-managed records (such as R2 custom domain CNAMEs) are not declared in `dns.tfvars`. The DNS module manages only declared resources and will not prune unmanaged records.
+- A record is identified by its type, fully qualified name and content, so reordering the list changes nothing. Changing any of those three plans a destroy and a create rather than an in-place update.
+- Records another layer or Cloudflare writes are not declared in `dns.tfvars`: the CNAMEs `tunnels` and `pages` create for published hostnames and custom domains, and the records Cloudflare manages for R2 and Worker custom domains. The DNS module manages only declared records and will not prune unmanaged ones.
 
 ---
 
 ## WAF Baseline
 
-The `waf` layer manages custom firewall rules, rate limiting, and managed ruleset associations. Operators select baseline security policies by name rather than writing complex wirefilter expressions manually.
+The `waf` layer manages custom firewall rules, rate limiting, managed rulesets and per-category bot traffic rules, one `waf_policies` entry per zone. Operators select baseline security policies by name rather than writing complex wirefilter expressions manually.
 
 ```hcl
+# accounts/account_a/waf.tfvars
+waf_trusted_ip_ranges = ["203.0.113.0/24"] # block_admin_from_untrusted needs it
+
 waf_policies = {
   primary = {
     zone_key              = "primary"
@@ -309,7 +337,7 @@ waf_policies = {
 }
 ```
 
-The baseline catalogue is defined in `layers/waf/locals.waf.tf` and parameterised via variables (`waf_trusted_ip_ranges`, `waf_admin_paths`, `waf_blocked_countries`).
+The baseline catalogue is defined in `layers/waf/locals.waf.tf` and parameterised via variables: `waf_trusted_ip_ranges`, `waf_admin_paths`, `waf_blocked_countries` and `waf_ip_blocklist_name` for the custom rules, and `waf_managed_rules_action`, `waf_owasp_paranoia_level`, `waf_owasp_score_threshold` and `waf_owasp_action` for the managed rulesets. Beyond the catalogue, a policy takes the tenant's own `custom_block_rules` and `rate_limiting_rules`, and raw `managed_rulesets` IDs. An unknown baseline name fails the plan.
 
 ### Custom rules
 
@@ -317,24 +345,49 @@ The baseline catalogue is defined in `layers/waf/locals.waf.tf` and parameterise
 |---|---|---|
 | `block_admin_from_untrusted` | `block` | `waf_trusted_ip_ranges` |
 | `geoblock_countries` | `block` | `waf_blocked_countries` |
+| `block_listed_ips` | `block` | `waf_ip_blocklist_name` - the `name` of a list the `lists` layer creates |
 | `block_known_exploit_paths` | `block` | None |
 | `challenge_undisclosed_bots` | `managed_challenge` | `waf_trusted_ip_ranges` |
 | `log_trusted_admin_access` | `log` | `waf_trusted_ip_ranges` |
 
+`waf_admin_paths` defaults to eight paths, `/user/login`, `/user/password` and `/user/register` among them, so `block_admin_from_untrusted` blocks those login pages for every address outside `waf_trusted_ip_ranges`. Trim the list where that is wrong for a site.
+
 ### Rate limits
+
+All four count over a 60-second window, per client IP per data centre.
 
 | Name | Mitigation | Notes |
 |---|---|---|
-| `auth_brute_force` | `block` | 20 req/min per IP on login and authentication paths. |
-| `api_general` | `managed_challenge` | 600 req/min per IP under `/api/`. |
-| `origin_error_shield` | `block` | Evaluates origin 5xx responses. |
-| `observe_only` | `log` | Measures traffic before enforcement. Forces `mitigation_timeout = 0`. |
+| `auth_brute_force` | `block` | 20 requests to a path containing `/login` or `/auth`; blocks for 600 seconds. |
+| `api_general` | `managed_challenge` | 600 requests under `/api/`; challenges for 60 seconds. |
+| `origin_error_shield` | `block` | 50 origin responses of 500 or above, `/healthz` excluded; blocks for 60 seconds. |
+| `observe_only` | `log` | 1000 requests, `/healthz` excluded. Measures traffic before enforcement. The module forces `mitigation_timeout = 0` for every `log` rate limit. |
+
+### Managed rulesets and bot traffic
+
+`baseline_managed_rulesets` selects `cloudflare_managed` and `owasp_core` into the `http_request_firewall_managed` phase. A zone below `managed_rules_min_tier` - `enterprise` in the platform defaults - fails the plan. Cloudflare deploys a managed entry point on every paid zone when it is created, and the `import` block in `layers/waf/imports.tf` adopts it automatically.
+
+`bot_traffic` sets an action - `allow`, `log`, `managed_challenge`, `js_challenge`, `challenge` or `block` - for verified bots in Cloudflare's `search`, `agent` and `training` categories, with per-category `category_overrides`. A bot that does not declare itself has no category and is unaffected. A zone below `bot_traffic_min_tier` (`pro`) fails the plan. Zone-wide Bot Fight Mode and bot management settings, `ai_bots_protection` included, belong to the `zones` layer.
 
 **Automatic Colocation Characteristic:** Cloudflare tracks zone-level rate limits per data centre colocation, rejecting rate limiting rules that omit `cf.colo.id` (API error 20155). The layer automatically appends `cf.colo.id` to all rate limiting rules, eliminating manual configuration errors.
 
-**Rule Evaluation Order:** Baseline platform rules are concatenated ahead of tenant-specific custom rules. Cloudflare processes rules sequentially, guaranteeing that platform security blocks cannot be bypassed by custom tenant rules.
+**Rule Evaluation Order:** the custom ruleset runs `bot_traffic` rules first, then the baseline, then the tenant's `custom_block_rules`, so a tenant rule - a skip included - cannot undo a baseline block that has already matched. Two exceptions: a `bot_traffic` `allow` is written as a skip of the rest of the custom ruleset, so matching bots are exempt from the baseline custom rules; and a tenant skip using `skip.phases` or `skip.rulesets` can skip the rate limiting and managed phases, where the baseline rate limits and managed rulesets run.
 
-**Validation Guardrails:** Baseline rules with empty input variables fail the plan immediately. For example, enabling `block_admin_from_untrusted` with an empty `waf_trusted_ip_ranges` would generate a rule blocking all admin access globally, including internal operations.
+**Validation Guardrails:** A baseline rule selected without its input fails the plan: `waf_trusted_ip_ranges`, `waf_blocked_countries` or `waf_ip_blocklist_name`, per the table above. For example, enabling `block_admin_from_untrusted` with an empty `waf_trusted_ip_ranges` would generate a rule blocking all admin access globally, including internal operations. `waf_admin_paths` is not checked, so keep it non-empty: empty, the admin rules produce an expression Cloudflare rejects at apply.
+
+### Governing defaults
+
+| Setting | Default | Effect |
+|---|---|---|
+| `waf_trusted_ip_ranges` | `[]` | Must be set before selecting any rule that reads it. |
+| `waf_blocked_countries` | `[]` | Must be set before selecting `geoblock_countries`. |
+| `waf_ip_blocklist_name` | `null` | Must be set before selecting `block_listed_ips`. |
+| `default_zone_tier` | `"free"` | The plan assumed for a zone with no `zone_tier` in `zones.tfvars`, for the two tier gates below. |
+| `managed_rules_min_tier` | `"enterprise"` | Minimum zone plan for managed rulesets. |
+| `bot_traffic_min_tier` | `"pro"` | Minimum zone plan for `bot_traffic`. |
+| `waf_owasp_paranoia_level` | `1` | OWASP rules above this paranoia level are disabled. |
+| `waf_owasp_score_threshold` | `40` | OWASP anomaly score that triggers the action. |
+| `waf_managed_rules_action`, `waf_owasp_action` | `null` | Leaves each ruleset's rules on the action Cloudflare ships. |
 
 ---
 
@@ -358,15 +411,20 @@ user_groups = {
 }
 ```
 
-Role, permission group, and resource group IDs are account-specific. The layer dynamically resolves human-readable names to IDs at plan time (`permission_lookup.tf`). An invalid role or permission name triggers an informative plan failure listing available roles in the account.
+Role, permission group, and resource group IDs are account-specific. The layer dynamically resolves human-readable names to IDs at plan time (`permission_lookup.tf`). An unknown role or resource group name fails the plan and lists the names the account has; an unknown permission group name fails the plan and points at the dashboard catalogue. Where a name is ambiguous, `role_ids`, `permission_group_ids` and `resource_group_ids` take the ID instead, merged with the names.
+
+- A policy is `access = "allow"` by default; `"deny"` is supported, and Cloudflare evaluates deny first. A policy that names no resource group covers the whole account, which needs exactly one account-scoped resource group to resolve.
+- Deleting a member revokes their access on the next apply, and changing an email revokes the old address and sends a fresh invitation. An invitee shows as pending in the `member_statuses` output until they accept.
+- Renaming a group's `name` recreates the group, and its members lose its permissions until the new one exists.
+- `member_ids` adds people managed outside Terraform to a group. This layer never revokes them.
 
 ### Governing defaults
 
 | Setting | Default | Effect |
 |---|---|---|
-| `default_role_names` | `["Minimal Account Access"]` | Members without an explicit role receive minimal dashboard access. Permissions are granted predictably through user groups. |
-| `restricted_role_names` | `["Super Administrator - All Privileges"]` | Fails the plan if this role is requested by name or ID. Granting Super Administrator requires an explicit exception. |
-| `allowed_email_domains` | `[]` (any) | Restricts member invitations to corporate email domains. Mistyped external addresses fail at plan time. |
+| `default_role_names` | `["Minimal Account Access"]` | Members that set no `role_names` receive these roles, in addition to any `role_ids`. Permissions are then granted predictably through user groups. |
+| `restricted_role_names` | `["Super Administrator - All Privileges"]` | Fails the plan if a member is given this role, by name or ID. Granting Super Administrator requires an explicit exception. User group policies are not checked against it. |
+| `allowed_email_domains` | `[]` (any) | Restricts member invitations to corporate email domains, matched exactly on the part after `@`, so each subdomain needs its own entry. Mistyped external addresses fail at plan time. |
 
 ### Out of Scope
 - **API Tokens:** API tokens represent credentials and must never enter Terraform state.
@@ -402,25 +460,41 @@ r2_buckets = {
 }
 ```
 
+A bucket that declares `lifecycle_rules` replaces `default_lifecycle_rules` rather than adding to it, so the example above loses the default rule that aborts incomplete multipart uploads after 7 days. Declare that rule again alongside your own, as `accounts/account_a/r2.tfvars` does, or set `lifecycle_rules = []` to opt out deliberately.
+
+The lifecycle and lock resources own each bucket's whole rule list, and every bucket declares its `r2.dev` setting, so a rule added or a switch flipped in the dashboard is reverted on the next apply. Each lock rule sets exactly one of `retain_for_days`, `retain_until_date` or `retain_indefinitely`.
+
 ### Provider 5.x Native Resources
-Older Cloudflare Terraform patterns used the AWS provider for R2 bucket lifecycles and CORS. This layer relies exclusively on native Cloudflare provider resources (`cloudflare_r2_bucket_cors`, `cloudflare_r2_bucket_lifecycle`, `cloudflare_r2_custom_domain`). This eliminates the need to store data-plane S3 access keys in pipeline environments.
+Older Cloudflare Terraform patterns used the AWS provider for R2 bucket lifecycles and CORS. This layer relies exclusively on native Cloudflare provider resources: `cloudflare_r2_bucket`, `cloudflare_r2_bucket_cors`, `cloudflare_r2_bucket_lifecycle`, `cloudflare_r2_bucket_lock`, `cloudflare_r2_managed_domain` and `cloudflare_r2_custom_domain`. The layer needs no S3 access key of its own; the only R2 S3 key in the pipeline is the bucket-scoped key for the state backend.
 
 ### Governing defaults
 
 | Setting | Default | Effect |
 |---|---|---|
 | `allow_public_r2_dev_domains` | `false` | Fails the plan if a bucket requests an unauthenticated, uncached `pub-<hash>.r2.dev` public URL. Public assets should be served via `custom_domains` behind Cloudflare cache and WAF. |
-| `allow_wildcard_cors_origins` | `false` | Fails the plan if `allowed_origins = ["*"]` is specified, preventing unauthorised cross-origin data exposure. |
-| `allow_bucket_wide_object_expiry` | `false` | Fails the plan if a lifecycle rule specifies an empty prefix, preventing accidental fleet-wide object deletion. |
-| `default_custom_domain_min_tls` | `"1.2"` | Enforces TLS 1.2 minimum on custom domain endpoints. |
+| `allow_wildcard_cors_origins` | `false` | Fails the plan if any CORS rule's `allowed_origins` contains `"*"`, preventing unauthorised cross-origin data exposure. |
+| `allow_bucket_wide_object_expiry` | `false` | Fails the plan if an enabled lifecycle rule that deletes objects has an empty or omitted prefix, preventing accidental bucket-wide object deletion. Multipart aborts and storage class transitions may use an empty prefix. |
+| `default_custom_domain_min_tls` | `"1.2"` | Minimum TLS for a custom domain that sets no `min_tls` of its own. A default, not a floor: a domain can still set a lower one. |
+| `default_lifecycle_rules` | abort incomplete multipart uploads after 7 days | Applied to every bucket that declares no `lifecycle_rules`. |
+| `default_storage_class` | `"Standard"` | For a bucket that states none. `default_bucket_location` and `default_jurisdiction` are `null`, leaving both to Cloudflare. |
+
+The plan also fails for a custom domain outside its zone, a bucket name or custom domain hostname used twice, a deleting lifecycle rule that overlaps a lock prefix, and an Infrequent Access transition on a bucket already in that class.
 
 ---
 
 ## Zero Trust
 
-The `zerotrust` layer manages Cloudflare Access: team domain adoption, identity provider integrations, access groups, service tokens, and access applications.
+The `zerotrust` layer manages Cloudflare Access: the Zero Trust organisation (team name, plus the account-wide session, seat and dashboard-lock settings), identity providers, service tokens, access groups, reusable access policies and access applications.
 
 ```hcl
+identity_providers = {
+  entra_id = {
+    name   = "Entra ID"
+    type   = "azureAD"
+    config = { client_id = "<application id>", directory_id = "<tenant id>", support_groups = true }
+  }
+}
+
 access_groups = {
   platform_engineers = {
     name = "Platform Engineers"
@@ -450,27 +524,40 @@ access_applications = {
 }
 ```
 
+An Entra group rule matches nobody unless its identity provider sets `support_groups = true`.
+
 ### Team Name Management
-A Cloudflare Zero Trust organisation must exist before Access resources can be provisioned. Setting `zero_trust_team_name` adopts and manages the organisation. If left unset, the layer adopts the team name already provisioned on the account. Renaming an existing team domain breaks active Access URLs and WARP registrations, so `allow_team_name_change` must be explicitly set to authorise renames.
+A Cloudflare Zero Trust organisation must exist before Access resources can be provisioned, and Terraform cannot create one: on an account without it, every plan of this layer fails on the organisation lookup. Choose the team name once, outside Terraform - in the Zero Trust dashboard, or with `POST /accounts/<account_id>/access/organizations`.
+
+From then on the layer always adopts the existing organisation (read in `organization_lookup.tf`) and owns its settings. The first apply overwrites the dashboard's session, seat and login values with this layer's, and sets the display name to `zero_trust_organization_name` - the team name when that is unset. Leave `zero_trust_team_name` unset to keep the current team name, or set it to assert it. Renaming an existing team domain breaks active Access URLs and WARP registrations, so a value that differs from the current name fails the plan unless `allow_team_name_change = true`. Set that for the renaming run only, then set it back.
 
 ### Secrets Injection
-Identity provider client secrets (such as Microsoft Entra ID application registration secrets) must never be committed to `.tfvars` files. They are supplied at plan time, keyed by identity provider, from the `<account>-plan` environment's `TF_VAR_IDENTITY_PROVIDER_SECRETS`. The pipeline exports it on every plan, so it must be set whenever this layer is planned - to `{}` on an account with no identity provider secrets:
+Identity provider client secrets (such as Microsoft Entra ID application registration secrets) must never be committed to `.tfvars` files. They are supplied at plan time, keyed by the `identity_providers` key, from the `<account>-plan` environment's `TF_VAR_IDENTITY_PROVIDER_SECRETS`:
 
 ```bash
 export TF_VAR_identity_provider_secrets='{"entra_id":"<the_secret>"}'
 ```
 
-Service token secrets are generated by Cloudflare and stored in state. They are deliberately omitted from Terraform plan outputs to prevent credential disclosure in pull requests.
+The pipeline exports it on every plan, so it must be set whenever this layer is planned. The plan fails for an OAuth-type provider (`azureAD`, `oidc`, `okta`, `google` and the like) with no secret, and for a secret whose key matches no provider. `{}` is therefore valid only on an account that declares no OAuth-type provider; SAML and the one-time PIN need none.
+
+Service token client secrets are generated by Cloudflare and held in plain text in this layer's state, and so in its saved plan artifact. No output exposes them - only `service_token_client_ids` and `service_token_expires_at` - and the plan summary carries resource addresses and actions only.
+
+Access applications carry [resource tags](../.github/workflows/README.md#resource-tags) from the `access_applications` section of `tags.tfvars`, separate from the Access tags in `access_applications[*].tags`.
 
 ### Governing defaults
 
 | Setting | Default | Effect |
 |---|---|---|
-| `restricted_policy_decisions` | `["bypass"]` | Fails the plan if an Access policy uses `bypass`, which removes authentication entirely. |
-| `allowed_email_domains` | `[]` (any) | Restricts allowed email domains in policy rules. |
-| `lock_dashboard_to_read_only` | `false` | When enabled, locks the Zero Trust dashboard to read-only, establishing GitOps as the sole modification route. |
+| `restricted_policy_decisions` | `["bypass"]` | Fails the plan if an Access policy uses `bypass`, which removes authentication entirely. `bypass` combined with `include.everyone` is refused whatever this says. |
+| `allowed_email_domains` | `[]` (any) | When set, fails the plan if an `include` rule in an access group or policy admits an `emails` address or `email_domains` entry outside the list. `exclude` and `require` are not checked. |
+| `lock_dashboard_to_read_only` | `false` | When enabled, locks the Zero Trust dashboard to read-only, establishing GitOps as the sole modification route. `ui_read_only_toggle_reason` records why it was lifted. |
 | `default_session_duration` | `"24h"` | Default session lifespan before re-authentication is required. |
-| `default_service_token_duration` | `"8760h"` | One-year lifespan for service tokens. Prevents unrotated perpetual tokens. |
+| `default_warp_auth_session_duration` | `"24h"` | The same, for sessions authenticated through the WARP client. |
+| `user_seat_expiration_inactive_time` | `"730h"` | How long an inactive user keeps a seat. Cloudflare's minimum. |
+| `auto_redirect_to_identity` | `false` | Whether the login page skips straight to the only identity provider. |
+| `allow_authenticate_via_warp` | `false` | Whether a WARP session satisfies Access without a separate login. |
+| `allow_team_name_change` | `false` | Fails the plan if `zero_trust_team_name` differs from the current team name. |
+| `default_service_token_duration` | `"8760h"` | Validity for a service token that sets no `duration`: one year. A token may still set its own, including `"forever"`, and nothing refuses it. |
 
 ---
 
@@ -478,10 +565,12 @@ Service token secrets are generated by Cloudflare and stored in state. They are 
 
 The `device_posture` layer manages the checks a device must pass before an Access or Gateway policy lets it through - Cloudflare One Client checks run on the device (client running, OS version, disk encryption, firewall, a signed EDR binary, a corporate serial number) - and the service provider integrations that read a verdict from an MDM or EDR: Intune, CrowdStrike, SentinelOne, Kolide, Tanium, Workspace ONE, Uptycs or a custom API.
 
-It is deliberately separate from `zerotrust`. Two layers consume a posture rule - Access policies in `zerotrust` and Gateway policies in `gateway` - and applying it in Tier 2 means a rule exists before either names it. It also keeps the MDM and EDR credentials out of `zerotrust` state, which already holds identity provider secrets and service tokens.
+It is deliberately separate from `zerotrust`. Two layers consume a posture rule - Access policies in `zerotrust` and Gateway policies in `gateway`. Tier 2 puts it ahead of `zerotrust` (Tier 3). `gateway` is Tier 2 as well and applies alongside it, which is harmless when adding a rule: a policy can only name a rule by an ID read after this layer has applied. It also keeps the MDM and EDR credentials out of `zerotrust` state, which already holds identity provider secrets and service tokens.
+
+Uptycs can be connected as an integration, but no posture rule type reads it yet.
 
 ```hcl
-# accounts/account_a/device_posture.tfvars
+# accounts/<account>/device_posture.tfvars - the integration needs TF_VAR_DEVICE_POSTURE_INTEGRATION_SECRETS
 device_posture_rules = {
   require_client = { name = "Cloudflare One Client Running", type = "warp" }
 
@@ -510,9 +599,9 @@ device_posture_integrations = {
 ```
 
 ### Referencing a Rule
-Neither consuming layer can read this layer's state, so a rule is referenced by ID: apply it, read `device_posture_rule_ids` from this layer's outputs, and put the ID in `device_posture_ids` (`zerotrust.tfvars`) or `device_posture_check_ids` (`gateway.tfvars`).
+Neither consuming layer can read this layer's state, so a rule is referenced by ID: apply it, read `device_posture_rule_ids` from this layer's outputs (see [Reading a layer's outputs](#reading-a-layers-outputs)), and put the ID in a rule set's `device_posture_ids` in `zerotrust.tfvars` - `access_policies.<key>.require.device_posture_ids`, for instance - or in `gateway_policies.<key>.device_posture_check_ids` in `gateway.tfvars`.
 
-Renaming a rule replaces it and changes its ID. Removing one that a policy still names leaves the policy requiring a check nothing can pass - and because this layer applies first, removing both in one run deletes the rule before the policy stops naming it. Remove the reference, apply, then remove the rule.
+Renaming a rule replaces it and changes its ID. Removing one that a policy still names leaves the policy requiring a check nothing can pass - and because this layer applies before `zerotrust`, and alongside `gateway`, removing both in one run can delete the rule before the policy stops naming it. Remove the reference, apply, then remove the rule.
 
 ### Secrets Injection
 An integration's credential never goes in `.tfvars`. It is supplied at plan time, keyed by integration, from the `<account>-plan` environment's `TF_VAR_DEVICE_POSTURE_INTEGRATION_SECRETS`:
@@ -523,15 +612,27 @@ export TF_VAR_device_posture_integration_secrets='{"intune":{"client_secret":"<e
 
 The plan fails for an integration missing a setting or credential its type needs, and for a credential no integration reads. Cloudflare tests the connection on create, so a wrong credential still fails at apply. The example account trees keep their integrations commented out, because CI plans this layer offline with no secrets.
 
+| Integration type | `config` it needs | Secret keys |
+|---|---|---|
+| `intune` | `client_id`, `customer_id` | `client_secret` |
+| `crowdstrike_s2s` | `client_id`, `customer_id`, `api_url` | `client_secret` |
+| `kolide` | nothing | `client_secret` |
+| `sentinelone_s2s`, `tanium_s2s` | `api_url` | `client_secret` |
+| `workspace_one` | `client_id`, `api_url`, `auth_url` | `client_secret` |
+| `uptycs` | `customer_id` | `client_key`, `client_secret` |
+| `custom_s2s` | `api_url`, `access_client_id` | `access_client_secret` |
+
 ### Governing defaults
 
-| Setting                         | Default      | Effect                                                                                                                                                                                         |
-| ---------------------------------| --------------| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `default_posture_schedule`      | `"5m"`       | Client re-check interval, stated explicitly as Cloudflare's own default.                                                                                                                       |
-| `default_integration_interval`  | `"10m"`      | How often Cloudflare polls a service provider.                                                                                                                                                 |
-| `derive_posture_expiration`     | `true`       | A rule with no expiration gets twice its polling period. Without one, a device that stops reporting keeps its last pass indefinitely. An explicit expiration shorter than that fails the plan. |
-| `require_signed_binary_checks`  | `true`       | Fails the plan for a file or application check with no signing thumbprint, which any file at that path would pass.                                                                             |
-| `restricted_posture_rule_types` | `["tanium"]` | Refuses the legacy Access-only Tanium check, which Gateway cannot evaluate.                                                                                                                    |
+| Setting                         | Default      | Effect |
+| ---------------------------------| --------------| --------|
+| `default_posture_schedule`      | `"5m"`       | Client re-check interval, stated explicitly as Cloudflare's own default. Applied to device checks other than `warp`, `gateway` and `tanium`. |
+| `default_integration_interval`  | `"10m"`      | How often Cloudflare polls a service provider. |
+| `derive_posture_expiration`     | `true`       | A rule with no expiration gets twice its polling period: its schedule for a device check, or its integration's interval for a service provider check. Without one, a device that stops reporting keeps its last pass indefinitely. `warp` and `gateway` checks, and rules that read through an `integration_id`, get none. |
+| `require_signed_binary_checks`  | `true`       | Fails the plan for a `file`, `application`, `sentinelone` or `carbonblack` check with no `input.thumbprint`, which any file at that path would pass. A `file` check with `exists = false` is exempt. |
+| `restricted_posture_rule_types` | `["tanium"]` | Refuses the legacy Access-only Tanium check, which Gateway cannot evaluate. |
+
+Whatever `derive_posture_expiration` says, an explicit expiration shorter than twice the polling period fails the plan.
 
 A firewall check with `enabled = false` always fails the plan: it passes only devices whose firewall is off.
 
@@ -572,7 +673,9 @@ tunnel_routes = {
 ```
 
 ### Public Hostnames
-Ingress rules are evaluated in order and the first match wins, so a path-specific rule goes above the bare hostname it narrows. A catch-all rule (`default_catch_all_service`, a 404 by default) is appended automatically, because `cloudflared` requires the last rule to match everything.
+Ingress rules are evaluated in order and the first match wins, so a path-specific rule goes above the bare hostname it narrows. A catch-all rule (`default_catch_all_service`, a 404 by default, or the tunnel's own `catch_all_service`) is appended automatically, because `cloudflared` requires the last rule to match everything. A hostname may appear in one tunnel only.
+
+A tunnel can also set its own `config_src`. One set to `"local"` takes its rules from the connector's own config file, so it must declare no `ingress` - the plan fails if it does - and it gets no remote configuration, no catch-all and no CNAMEs from this layer.
 
 Every rule with a `zone_key` gets its proxied CNAME (`<tunnel-id>.cfargotunnel.com`) created in that zone by this layer, in the same apply as the tunnel, so a hostname cannot exist without the record that routes to it. Do not also declare that record in `dns.tfvars`: Cloudflare refuses a second record of the same name.
 
@@ -619,7 +722,7 @@ logpush_jobs = {
 
   primary_http_requests = {
     dataset          = "http_requests"
-    zone_key         = "primary"
+    zone_key         = "primary" # zones.tfvars must give this zone zone_tier = "enterprise"
     destination_conf = "s3://example-com-logs/http_requests/{DATE}?region=eu-west-2&sse=AES256"
     filter = <<-JSON
       {"where":{"and":[{"key":"ClientRequestPath","operator":"!eq","value":"/healthz"}]}}
@@ -632,9 +735,9 @@ logpush_jobs = {
 ```
 
 ### Scope
-Each dataset is produced per zone (`http_requests`, `dns_logs`, ...) or per account (`audit_logs`, `gateway_dns`, `access_requests`, ...), and a few, such as `firewall_events`, at both. A job for a zone dataset names a `zone_key`; a job for an account dataset does not. The catalogue that decides which is `logpush_zone_datasets` and `logpush_account_datasets` in `layers/logpush/variables.tf`, and a job in the wrong scope fails the plan rather than the apply.
+Each dataset is produced per zone (`http_requests`, `dns_logs`, ...) or per account (`audit_logs`, `gateway_dns`, `access_requests`, ...), and a few, such as `firewall_events`, at both. A job for a zone dataset names a `zone_key`; a job for an account dataset does not. The catalogue that decides which is `logpush_zone_datasets` and `logpush_account_datasets` in `layers/logpush/variables.tf`, and a job in the wrong scope, or on a dataset in neither list, fails the plan rather than the apply.
 
-A zone-scoped job also needs its zone on Enterprise. The layer reads `zone_tier` from `zones.tfvars` and fails the plan below `logpush_min_zone_tier`, so declare the zone's real plan there.
+A zone-scoped job also needs its zone on Enterprise. The layer reads `zone_tier` from `zones.tfvars` and fails the plan below `logpush_min_zone_tier`, so declare the zone's real plan there. A zone with no `zone_tier` counts as `default_zone_tier`, which is `free`, and fails.
 
 `output_options.field_names` is required on every job. Cloudflare has no "all fields" option, and each dataset's page in the Logpush documentation lists its fields.
 
@@ -647,7 +750,7 @@ export TF_VAR_logpush_destination_secrets='{"audit_archive":"r2://<bucket>/audit
 
 The plan fails on a credential-shaped `destination_conf` in a `.tfvars`, on a job with neither or both, and on a secret keyed to no job.
 
-Where Cloudflare asks for proof of control before it will push - object stores such as S3 and Google Cloud Storage - it writes a challenge file into the destination, and the file's contents go in `TF_VAR_logpush_ownership_challenges` under the job's key.
+Where Cloudflare asks for proof of control before it will push - object stores such as S3 and Google Cloud Storage - it writes a challenge file into the destination, and the file's contents go in `TF_VAR_logpush_ownership_challenges` under the job's key. A challenge keyed to no job fails the plan.
 
 Both are read by the plan, so the pipeline takes them from the `<account>-plan` environment (`TF_VAR_LOGPUSH_DESTINATION_SECRETS`, `TF_VAR_LOGPUSH_OWNERSHIP_CHALLENGES`), not the apply one. Both reach state and the saved plan in plain text.
 
@@ -678,14 +781,16 @@ The `gateway` layer manages outbound corporate egress filtering: DNS policies, n
 
 | Pipeline | Inspection Point | Visibility Scope | Typical Actions |
 |---|---|---|---|
-| `dns` | Resolves query prior to connection | Hostname only. Blind to payload or path | `allow`, `block`, `override`, `safesearch` |
+| `dns` | Resolves query prior to connection | Hostname only. Blind to payload or path | `allow`, `block`, `override`, `safesearch`, `ytrestricted` |
 | `network` | L4 connection (TCP/UDP/ICMP) | Ports, IP addresses, TLS SNI | `allow`, `block`, `l4_override` |
-| `http` | Decrypted L7 HTTP/HTTPS traffic | Full URL path, query strings, headers, body | `allow`, `block`, `off`, `scan`, `isolate`, `quarantine` |
+| `http` | Decrypted L7 HTTP/HTTPS traffic | Full URL path, query strings, headers, body | `allow`, `block`, `on`, `off`, `scan`, `noscan`, `isolate`, `noisolate`, `quarantine`, `redirect` |
+
+An action from another pipeline fails the plan. `override`, `l4_override`, `quarantine` and `redirect` each need their matching `settings` block. Selectors are per pipeline too: `domains` and `hosts` on `dns` and `http`; `sni_domains`, `sni_hosts`, `destination_ports` and `protocols` on `network` only; methods, file types and DLP profiles on `http` only. A policy with no selector fails unless it sets `match_all_traffic = true`, which `allow`, `off`, `noscan` and `noisolate` may not. `device_posture_check_ids` sits on the policy itself, not under `match`.
 
 ### Precedence Architecture
-Gateway evaluates policies in ascending precedence order within each pipeline and stops on the first match. Lower precedence numbers execute first.
+Gateway evaluates policies in ascending precedence order within each pipeline. Lower precedence numbers execute first.
 
-Precedence numbers below `reserved_precedence_ceiling` (default `100`) are strictly reserved for platform baseline policies. Custom rules in account configuration must specify precedence values of 100 or higher, with recommended intervals of 100 to permit future rule insertion.
+Precedence is allocated across the whole account, though, not per pipeline: no two Gateway policies of any type may share a number, and a duplicate fails the plan. Numbers below `reserved_precedence_ceiling` (default `100`) are strictly reserved for platform baseline policies, which use 10 to 60. Custom rules in account configuration must specify precedence values of 100 or higher, with recommended intervals of 100 to permit future rule insertion.
 
 ```hcl
 gateway_policies = {
@@ -712,6 +817,8 @@ gateway_policies = {
 ```
 
 ### Account Settings & TLS Decryption
+`gateway_settings = null`, the platform default, leaves the account's Gateway settings unmanaged, and the dashboard stays authoritative. The settings object already exists on every Zero Trust account, so to manage it, import it first, at `module.gateway.cloudflare_zero_trust_gateway_settings.this["<account_id>"]` - without the import, the first apply writes it from this configuration alone and drops whatever the dashboard held.
+
 The `gateway_settings` object configures account-wide Gateway posture:
 - `tls_decrypt.enabled`: Controls whether Gateway intercepts and decrypts outbound HTTPS connections.
 - `protocol_detection.enabled`: Identifies protocols from packet contents rather than relying solely on destination ports.
@@ -735,9 +842,23 @@ gateway_inspection_certificate = {
 ```
 
 ### Automated Root CA Lifecycle
-Enabling TLS decryption without an active root CA certificate causes Cloudflare API error 400 (code 2211). Setting `gateway_inspection_certificate` generates and edge-activates a custom root CA certificate automatically, linking it directly to `gateway_settings`.
+Enabling TLS decryption without an active root CA certificate causes Cloudflare API error 400 (code 2211). Setting `gateway_inspection_certificate` has Cloudflare generate and activate a root CA for the account and, when `gateway_settings` is managed, points `gateway_settings.certificate.id` at it. Do not also set `certificate.id` - the plan fails if both are set.
 
-Before activating `tls_decrypt.enabled`, distribute this CA certificate to all managed endpoints (via Microsoft Intune, Group Policy, or MDM) to prevent untrusted certificate warnings across user devices.
+Activation is asynchronous. Wait for the `inspection_certificate_binding_status` output to read `available`, distribute `inspection_certificate_pem` to all managed endpoints (via Microsoft Intune, Group Policy, or MDM) to prevent untrusted certificate warnings across user devices, and only then enable `tls_decrypt.enabled`, in a later change. Nothing renews the root: watch `inspection_certificate_expires_on`. Changing `validity_period_days` replaces it, creating the new root before destroying the old.
+
+### Baseline Policies
+The platform baseline is a catalogue of six policies in `layers/gateway/locals.gateway.tf`, each opt-in by name through `gateway_baseline_policies` (empty by default). Selecting one whose input variable is empty fails the plan.
+
+| Name | Pipeline | Action | Precedence | Reads |
+|---|---|---|---|---|
+| `block_security_threats` | `dns` | `block` | 10 | `gateway_security_categories` |
+| `bypass_trusted_applications` | `http` | `off` | 20 | `gateway_bypass_applications` |
+| `block_security_threats_http` | `http` | `block` | 30 | `gateway_security_categories` |
+| `block_disallowed_content` | `dns` | `block` | 40 | `gateway_blocked_content_categories` |
+| `block_dlp_matches` | `http` | `block` | 50 | `gateway_dlp_profile_ids` |
+| `quarantine_risky_downloads` | `http` | `quarantine` | 60 | `gateway_quarantine_file_types` |
+
+Category and application names match case-insensitively, and one that does not resolve fails the plan. The API does not tell content categories from security categories, so a name put in the wrong variable resolves but never matches.
 
 ### Microsoft 365 Decryption Bypass
 Certain enterprise applications (such as Microsoft 365 desktop clients) use certificate pinning and fail under TLS decryption. The platform baseline provides a preconfigured bypass rule:
@@ -747,24 +868,27 @@ gateway_baseline_policies   = ["bypass_trusted_applications"]
 gateway_bypass_applications = ["Microsoft 365"]
 ```
 
-Cloudflare processes Do Not Inspect (`action = "off"`) rules before evaluating inspection-dependent policies.
+Cloudflare processes Do Not Inspect (`action = "off"`) rules before evaluating inspection-dependent policies. `restricted_actions = ["off"]` would refuse this baseline along with any tenant bypass.
 
 ### Governing defaults
 
 | Setting | Default | Effect |
 |---|---|---|
 | `reserved_precedence_ceiling` | `100` | Reserves precedence 1 to 99 for platform baseline rules. Custom policies claiming lower precedence fail at plan time. |
+| `restricted_actions` | `[]` | Actions no policy may use, baseline policies included. |
+| `default_block_notification` | enabled, with a stock message | Added to every `block` policy that sets no notification of its own, baseline blocks included. |
+| `default_untrusted_cert_action` | `"error"` | What an HTTP `allow` policy that sets nothing does with an origin whose certificate is invalid. |
 | `allow_antivirus_fail_closed` | `false` | Fails the plan if antivirus `fail_closed` is enabled without explicit authorisation. Unscannable or oversized files are delivered rather than causing widespread unexplained download failures. |
-| `allow_uninspected_http_policies` | `false` | Fails the plan if HTTP policies exist whilst `tls_decrypt.enabled` is false. Prevents false security assumptions where L7 rules would only apply to unencrypted HTTP. |
-| `allow_dlp_payload_logging` | `false` | Prevents sensitive matching data from being recorded in logs. |
-| `allow_disabling_dnssec_validation` | `false` | Enforces DNSSEC validation on all DNS queries. |
-| `allow_untrusted_certificate_pass_through` | `false` | Rejects connections to origins with invalid SSL certificates. |
+| `allow_uninspected_http_policies` | `false` | Fails the plan if a `gateway_policies` HTTP rule other than `action = "off"` exists while `gateway_settings` is null or `tls_decrypt.enabled` is not true. Prevents false security assumptions where L7 rules would only apply to unencrypted HTTP. With `gateway_settings` managed, baseline HTTP rules are checked too. |
+| `allow_dlp_payload_logging` | `false` | Fails the plan if a policy sets `settings.payload_log_enabled = true`, which records sensitive matching data in logs. |
+| `allow_disabling_dnssec_validation` | `false` | Fails the plan if a policy sets `settings.insecure_disable_dnssec_validation = true`. |
+| `allow_untrusted_certificate_pass_through` | `false` | Fails the plan if a policy, or `default_untrusted_cert_action`, uses `"pass_through"` for origins with invalid certificates. |
 
 ---
 
 ## Cloudflare WAN
 
-The `wan` layer manages Magic WAN: IPsec and GRE tunnels connecting customer premises, data centres, and cloud VPCs to Cloudflare Anycast edge, alongside static routing.
+The `wan` layer manages Magic WAN: IPsec and GRE tunnels connecting customer premises, data centres, and cloud VPCs to Cloudflare Anycast edge, optionally peering over BGP, alongside static routing.
 
 ```hcl
 wan_ipsec_tunnels = {
@@ -774,16 +898,29 @@ wan_ipsec_tunnels = {
     customer_endpoint   = "203.0.113.10"
     interface_address   = "10.252.0.0/31"
   }
+  london_secondary = {
+    name                = "lon-ipsec-02"
+    cloudflare_endpoint = "192.0.2.10"
+    customer_endpoint   = "203.0.113.11"
+    interface_address   = "10.252.0.2/31"
+  }
 }
 
 wan_static_routes = {
-  london_lan = {
+  london_lan_primary = {
     prefix     = "10.10.0.0/16"
     tunnel_key = "london_primary"
     priority   = 100
   }
+  london_lan_secondary = {
+    prefix     = "10.10.0.0/16"
+    tunnel_key = "london_secondary"
+    priority   = 200
+  }
 }
 ```
+
+Two tunnels per prefix is the baseline: a prefix reachable over one tunnel fails the plan unless `allow_single_tunnel_prefixes` is set. GRE tunnels go in `wan_gre_tunnels`, with the same shape. Either kind can peer over BGP by setting `bgp_customer_asn` (and `bgp_extra_prefixes`). A static route names exactly one of `tunnel_key` or `nexthop`, and an IPv6 route takes its next hop from the tunnel's `interface_address6` (a `/127`). Interconnects (CNI) have no resource here; one can only be reached as a `nexthop`.
 
 ### Derived Next Hops
 In a `/31` tunnel interface, Cloudflare occupies one IP address and the customer edge router occupies the other. Static routes must target the customer router as the next hop. The layer derives customer next-hop IP addresses automatically from `tunnel_key`, preventing configuration errors that route traffic into Cloudflare's own endpoint.
@@ -795,12 +932,16 @@ IPsec Pre-Shared Keys (PSKs), and BGP MD5 keys where a tunnel peers, must never 
 export TF_VAR_wan_ipsec_tunnel_psks='{"london_primary":"<32_char_secure_psk>"}'
 ```
 
+Omitting a tunnel's PSK is valid: Cloudflare generates one that Terraform never sees, visible only in the dashboard. The plan fails for a PSK shorter than 16 characters, for a PSK keyed to anything but an IPsec tunnel, and for an MD5 key on a tunnel that sets no `bgp_customer_asn`.
+
 ### Governing defaults
 
 | Setting | Default | Effect |
 |---|---|---|
-| `allow_tunnels_without_health_checks` | `false` | Enforces bidirectional health checks on every tunnel to ensure automated failover. |
-| `allow_single_tunnel_prefixes` | `false` | Requires at least two redundant tunnels for each advertised prefix. |
+| `default_tunnel_health_check_*` | enabled, `mid`, `reply`, `unidirectional` | Health check for a tunnel that sets none. |
+| `allow_tunnels_without_health_checks` | `false` | Fails the plan if a tunnel sets `health_check_enabled = false`, which removes automated failover. |
+| `allow_single_tunnel_prefixes` | `false` | Fails the plan if a static route prefix is reachable over fewer than two distinct tunnels or next hops. BGP prefixes are not checked. |
+| `allow_static_routes_to_unmanaged_nexthops` | `false` | Fails the plan if a hand-written `nexthop` is not the customer side of a tunnel declared here. |
 | `allow_default_static_route` | `false` | Prohibits default `0.0.0.0/0` or `::/0` routes into site tunnels. |
 | `allow_public_static_route_prefixes` | `false` | Restricts static routes to private RFC 1918, RFC 6598, or IPv6 ULA ranges. |
 
@@ -825,18 +966,20 @@ account_lists = {
     description  = "Trusted partner static egress ranges"
     manage_items = true
     items = [
-      { value = "198.51.100.0/24", comment = "Partner Primary DC" },
-      { value = "203.0.113.50/32", comment = "Partner Secondary Gateway" },
+      { ip = "198.51.100.0/24", comment = "Partner Primary DC" },
+      { ip = "203.0.113.50/32", comment = "Partner Secondary Gateway" },
     ]
   }
 }
 ```
 
-### Operational vs Managed Items
-- `manage_items = false`: Terraform provisions and manages the list container itself. List items are added or removed dynamically via the Cloudflare dashboard, SIEM integrations, or SOC automated response scripts without triggering Terraform state drift.
-- `manage_items = true`: Terraform manages list rows authoritatively. Any out-of-band changes are reverted on the next apply. Recommended for stable corporate address allocations.
+A row sets exactly one of `ip`, `asn` or `hostname` (`{ url_hostname, exclude_exact_hostname }`), matching the list's `kind` - `ip` unless stated, and changing it replaces the list. A list `name` is 1 to 50 lowercase letters, digits and underscores, unique in the account, because a rule refers to it as `$name`.
 
-`lists` is applied in Tier 2 so that named list objects are established before `waf` rules reference them in Tier 3.
+### Operational vs Managed Items
+- `manage_items = false` (the default): Terraform provisions and manages the list container itself. List items are added or removed dynamically via the Cloudflare dashboard, SIEM integrations, or SOC automated response scripts without triggering Terraform state drift. Rows supplied for such a list fail the plan rather than being silently ignored. The `list_ids_for_api_load` output gives each unmanaged list's ID, keyed by name; the loader itself is outside this repository.
+- `manage_items = true`: Terraform manages list rows authoritatively. Any out-of-band changes are reverted on the next apply. Recommended for stable corporate address allocations. More rows than `max_managed_items` (200 unless stated), a row that does not match `kind`, and duplicate rows all fail the plan.
+
+`lists` is applied in Tier 2 so that named list objects are established before `waf` rules reference them in Tier 3. The link is by name only: the WAF `block_listed_ips` baseline reads the list whose `name` equals `waf_ip_blocklist_name` in `waf.tfvars`.
 
 ---
 
@@ -884,7 +1027,7 @@ rule_policies = {
     origin_rules = [
       {
         name       = "Route legacy API to alternate backend"
-        expression = "http.request.uri.path starts_with \"/api/v1/\""
+        expression = "starts_with(http.request.uri.path, \"/api/v1/\")"
         enabled    = true
         origin = {
           host = "legacy-api.internal.example.com"
@@ -900,7 +1043,14 @@ rule_policies = {
 Rule evaluation behaviour differs by phase:
 - **Cache Rules:** Cloudflare evaluates all matching rules and the **last** matching rule takes precedence. Broad caching rules should be placed first, followed by specific bypass exceptions.
 - **Origin Rules:** Cloudflare evaluates rules in order and stops at the **first** match. Specific overrides must precede general rules.
-- **Transform Rules:** Evaluated in the late transform phase after security filtering, preventing spoofed request headers from bypassing WAF evaluation.
+- **Transform Rules:** request header changes only, in `http_request_late_transform`, after the security phases. A header set or removed here cannot influence a WAF rule, and a WAF rule cannot match on it; it changes only what the origin receives. URL rewrites and response header changes are not managed by this layer.
+
+Each module owns its phase's entry-point ruleset for the zone. Values in these rules reach state and plan output, so they must never hold a credential.
+
+### Guardrails
+- An enabled cache rule with `cache = true` whose expression mentions neither a cookie nor `authorization` fails the plan unless it sets `acknowledge_public_response = true`, because it would cache one visitor's response for the next. The first example rule passes only because it tests `http.cookie`.
+- Two `rule_policies` entries for the same zone fail the plan, as do a policy with no rules, a cache rule that sets nothing, a header operation with both or neither of `value` and `expression` (`remove` takes neither), and an origin rule that sets none of `host_header`, `origin` and `sni`.
+- There is no plan-tier gate. The origin port and SNI overrides are Enterprise features, and on a lower plan Cloudflare rejects the whole origin ruleset at apply - the example's `port = 8443` included, on a `business` zone.
 
 ---
 
@@ -943,9 +1093,24 @@ bulk_redirect_rules = [
 ```
 
 ### Operational Considerations
-- **Status Codes:** Use 302 (temporary) redirects during active testing or initial migration phases. Browsers cache 301 (permanent) redirects aggressively, making routing corrections difficult to propagate quickly.
-- **Scope Restriction:** Scope redirect rules to specific zones using `scope_zone_keys` to limit blast radius.
-- **Dataset Scalability:** For datasets containing thousands of entries, leave `manage_items = false` and load redirect rows asynchronously via the Cloudflare Bulk Redirects API or pipeline scripts.
+- **Status Codes:** Use 302 (temporary) redirects during active testing or initial migration phases. Browsers cache 301 (permanent) redirects aggressively, making routing corrections difficult to propagate quickly. A row may use 301, 302, 307 or 308; one that states none gets `default_status_code`, 302.
+- **Scope Restriction:** Scope redirect rules to specific zones using `scope_zone_keys` to limit blast radius. The layer needs no zone ID for this: each key becomes that zone's `domain_name` from `zones.tfvars`, matched as the host or any subdomain of it, and `scope_hostnames` adds exact hosts. A row whose source hostname is outside the zone inventory fails the plan unless `allow_hostnames_outside_zone_inventory` is set.
+- **Rule Order:** `bulk_redirect_rules` is an ordered list, one rule per list, and the first redirect that matches wins. `enabled = false` stages or rolls back a list. The layer owns the account's single `http_request_redirect` entry-point ruleset, so nothing else may manage it.
+- **Dataset Scalability:** `manage_items` defaults to `false`, and a managed list over `default_max_managed_items` (500) rows fails the plan. A larger dataset stays unmanaged and is loaded through the Lists API (`PUT .../rules/lists/<list_id>/items`) against the `list_id` in the `bulk_redirect_lists` output. This repository ships no loader for it: nothing in the pipeline loads redirect rows, whatever the output's description suggests.
+
+A row's `source_url` is a hostname and path, with no scheme or query string; `target_url` is a full URL with its scheme; `preserve_path_suffix` needs `subpath_matching`; and duplicate sources fail the plan.
+
+### Governing defaults
+
+| Setting | Default | Effect |
+|---|---|---|
+| `default_manage_items` | `false` | Lists are containers only unless a list sets `manage_items = true`. |
+| `default_max_managed_items` | `500` | Ceiling on the rows a managed list may hold. A list can set its own `max_managed_items`. |
+| `default_status_code` | `302` | For a row that states none. The variable's own default is 301. |
+| `default_preserve_query_string` | `true` | Cloudflare's own default is false. |
+| `max_bulk_redirect_lists`, `max_bulk_redirect_rules` | `25`, `50` | Account ceilings, checked at plan time. |
+| `allow_hostnames_outside_zone_inventory` | `false` | Fails the plan for a source hostname in no zone in `zones.tfvars`. |
+| `allow_unreferenced_lists` | `false` | Fails the plan for a list no rule references. |
 
 ---
 
@@ -963,7 +1128,7 @@ kv_namespaces = {
 
 worker_scripts = {
   security_headers = {
-    name        = "security-headers-worker"
+    name        = "account-a-security-headers"
     script_file = "headers/security_headers.js"
 
     bindings = [
@@ -990,12 +1155,14 @@ worker_scripts = {
 }
 ```
 
+A Worker can also take `custom_domains = [{ zone_key = "primary", hostname = "api.example.com" }]` and `cron_schedules = ["*/30 * * * *"]`. A custom domain must sit inside its zone, must not also be a record in `dns.tfvars`, and cannot share a host with a route. A cron expression has five fields, runs in UTC, and needs a `scheduled()` handler in the script.
+
 ### Serverless State: D1 & Queues
 
 D1 databases and queues are declared in the same file and bound by logical key, so no account tree carries a database UUID or a queue ID.
 
 ```hcl
-# accounts/account_a/workers.tfvars
+# accounts/account_a/workers.tfvars - the same file as above: these Workers go in its one worker_scripts map
 d1_databases = {
   telemetry = {
     name                  = "account-a-telemetry"
@@ -1046,26 +1213,41 @@ worker_scripts = {
 - **Ordering is derived, not declared.** A queue must exist before a Worker can bind it, and the Worker must exist before it can be named as that queue's consumer. The layer creates the queue from variables alone (`queue` module) and attaches the consumer separately, from the deployed Worker's name (`queue_consumer` module), so Terraform works out `queue -> Worker -> consumer` from the references without a `depends_on`. The consumer has to be its own module call: Terraform treats `module.queues[key]` as depending on everything inside that module, so a consumer inside it would leave the Worker waiting on itself.
 - **D1 schema is not Terraform's.** The layer owns the database and the binding; tables come from migrations. A migration is an ordered one-way change, which is not what a plan reconciling desired state does.
 
-  Migrations live in the layer at `migrations/<database_key>/0001_initial_schema.sql`, keyed by the same logical key a binding uses. After every `workers` apply, [`d1-migrations.sh`](../.github/scripts/d1-migrations.sh) reads the `d1_databases` output, applies whatever has not run yet and records it in a `d1_migrations` table inside each database, so a re-run is a no-op. File names are validated before anything is applied, a directory naming no database fails the run, and a migration that removes data is called out in the log - D1 has no snapshot to restore from. See [migrations/README.md](layers/workers/migrations/README.md).
-- **Every D1 field is replace-on-change.** Name, jurisdiction and location are fixed at creation, and a replaced D1 database is an empty one - there is no snapshot and no undo. Read a plan proposing a replacement as a plan to lose the data.
+  Migrations live in the layer at `migrations/<database_key>/0001_initial_schema.sql`, keyed by the same logical key a binding uses. After every successful `workers` apply, [`d1-migrations.sh`](../.github/scripts/d1-migrations.sh) reads the `d1_databases` output, applies whatever has not run yet and records it in a `d1_migrations` table inside each database, so a re-run is a no-op. File names are validated before anything is applied, a directory naming a database the account does not declare fails the run, and a migration that removes data is called out in the log. See [migrations/README.md](layers/workers/migrations/README.md).
+- **A database's name, jurisdiction and location hint are set at creation.** A replaced D1 database is a new, empty one, so read a plan proposing a replacement as a plan to lose the data, and export first. `read_replication_mode` is the exception: it changes in place, though turning it off takes up to 24 hours to take effect.
 
 ### Architectural Standards
-- **External Source Files:** JavaScript and TypeScript Worker source files are stored under `deployment/layers/workers/scripts/` and referenced by relative path. Script source code is not embedded directly in `.tfvars`.
-- **Content Hashing:** The module calculates SHA-256 hashes of script files automatically, ensuring that code updates trigger deployment plans.
-- **Secrets Store Integration:** Production secrets are bound using Cloudflare Secrets Store references rather than plain-text environment variables, preventing credential exposure in Terraform state.
-- **Workers KV Scalability:** `max_managed_pairs` limits the number of KV entries managed directly in Terraform. Large datasets should be synchronised using `wrangler kv bulk put` against the output namespace ID.
+- **External Source Files:** each Worker is one ready-to-run JavaScript file under `deployment/layers/workers/scripts/` (`worker_source_dir`), named by `script_file` relative to that directory. It is uploaded unmodified: there is no bundling or TypeScript compile, and files it imports are not uploaded. Build a TypeScript or multi-file Worker first and commit the output. Script source code is not embedded directly in `.tfvars`.
+- **Content Hashing:** the layer passes each script by path with its `filesha256()` as `content_sha256`. The source never enters state; the hash is what makes an edit show up in a plan.
+- **Secrets Store Integration:** Production secrets are bound using Cloudflare Secrets Store references rather than plain-text environment variables, preventing credential exposure in Terraform state. The store and its secrets are created outside Terraform, in the dashboard or with wrangler; the account tree names the store by ID and the secret by name.
+- **Workers KV Scalability:** Terraform manages at most `default_max_managed_kv_pairs` (500) pairs per namespace, from `pairs` or a `pairs_file`; a namespace can override it with `max_managed_pairs`, and going over fails the plan. A larger dataset goes in `layers/workers/data/bulk/`, and `kv-bulk-load.sh` loads it after every apply. See [data/kv/README.md](layers/workers/data/kv/README.md).
 - **Data Planes Stay Out Of State:** KV pairs beyond configuration, D1 rows and queue messages are all loaded or produced outside Terraform. The layer owns the container and the binding; the pipeline and the application own the contents.
 
 ### Guardrails
+
+Set in `layers/workers/defaults.auto.tfvars`; an account can override one in its own `workers.tfvars`.
 
 | Variable | Default | Effect |
 | --- | --- | --- |
 | `allow_inline_secret_text` | `false` | Fails the plan if a Worker carries a `secret_text` binding, which holds the literal secret in the variable file, the plan output and state. Use a `secrets_store_secret` binding instead. |
 | `allow_unpinned_compatibility_date` | `false` | Fails the plan if a Worker has neither its own `compatibility_date` nor `default_compatibility_date`, which would pin its runtime to whenever it was last uploaded. |
-| `allow_disabled_observability` | `false` | Fails the plan if a Worker is deployed with Workers Logs off. Sample with `head_sampling_rate` where the concern is volume. |
+| `allow_disabled_observability` | `false` | Fails the plan if a Worker's resolved `observability.enabled` is false. Turning off `logs_enabled` or `invocation_logs`, or sampling at 0, is not caught. Sample with `head_sampling_rate` where the concern is volume. |
 | `allow_queues_without_consumer` | `false` | Fails the plan if a queue has nothing reading it. Producers keep succeeding while the backlog ages out at the retention period, with nothing raising an error. A queue another queue dead letters into is exempt. |
 | `allow_queue_consumer_without_dead_letter_queue` | `false` | Fails the plan if a consumer has no dead letter queue, in which case a message that fails `max_retries` times is deleted with no copy to examine. |
 | `allow_replicated_d1_in_jurisdiction` | `false` | Fails the plan if a database restricted to a `jurisdiction` also has read replication on, which keeps a copy of the data in every supported region. |
+
+### Governing defaults
+
+| Setting | Default | Effect |
+| --- | --- | --- |
+| `default_compatibility_date` | `"2026-01-01"` | Pins every Worker that sets no date of its own, and is what satisfies `allow_unpinned_compatibility_date`. Bumping it redeploys all of those Workers in one plan. |
+| `default_observability` | `enabled`, `logs_enabled` and `invocation_logs` all `true` | Merged field by field into each Worker's own `observability`. |
+| `default_max_managed_kv_pairs` | `500` | Ceiling on the pairs Terraform manages per namespace. |
+| `default_d1_read_replication_mode` | `null` | Setting it to `"auto"` trips `allow_replicated_d1_in_jurisdiction` for every database with a `jurisdiction`. |
+| `default_queue_message_retention_period` | `null` | Cloudflare's own default, 4 days. A queue may set 60 to 1209600 seconds. |
+| `default_logpush`, `default_usage_model`, `default_placement_mode`, `default_compatibility_flags`, `default_d1_primary_location_hint` | `false`, `null`, `null`, `[]`, `null` | Applied to a Worker or database that sets none of its own. |
+
+The plan also fails, with no override, for a key that names nothing (`zone_key`, `kv_namespace_key`, `d1_database_key`, `queue_key`, a binding's or consumer's `worker_key`, `dead_letter_queue_key`), a queue that dead letters into itself, a missing script or `pairs_file`, a route pattern or custom domain claimed by two Workers, and two Worker, queue or D1 names that differ only in case.
 
 ---
 
@@ -1077,10 +1259,9 @@ The `load_balancing` layer manages origin health monitors, origin pools, and zon
 # accounts/account_a/load_balancing.tfvars
 load_balancers = {
   api_lb = {
-    zone_key     = "primary"
-    lb_hostname  = "api.example.com"
-    proxied      = true
-    steering_policy = "dynamic_latency"
+    zone_key    = "primary"
+    lb_hostname = "api.example.com"
+    proxied     = true
 
     origins = [
       { name = "origin-primary", address = "203.0.113.10", weight = 1.0 },
@@ -1088,18 +1269,17 @@ load_balancers = {
     ]
 
     health_check = {
-      type           = "https"
-      path           = "/healthz"
-      interval       = 60
-      timeout        = 5
-      retries        = 2
-      expected_codes = "2xx"
+      path = "/status" # every field left out takes default_health_check
     }
   }
 }
 ```
 
 Monitors and origin pools operate at account scope, whilst the load balancer hostname binding is scoped to the target zone. Hostnames must reside within the apex domain of the referenced `zone_key`.
+
+Each entry creates one monitor, one pool named `<lb_hostname>-pool`, and one load balancer that uses that pool as both default and fallback. Traffic is split between origins by their `weight`; `steering_policy` chooses between pools, so with one pool it has nothing to choose, and left null it is Cloudflare's default failover. Optional per-entry fields: `session_affinity` (`none`, `cookie`, `ip_cookie` or `header`), `pool_minimum_origins`, `pool_notification_email`, and per-origin `port`, `header_host` and `enabled`.
+
+`default_health_check` is `https`, `/healthz`, port 443, `GET`, expecting `2xx`, every 60 seconds with a 5-second timeout and 2 retries. A monitor switched to `type = "http"` keeps port 443 unless it sets its own. The plan fails for a duplicate `lb_hostname`, a `timeout` not shorter than `interval`, duplicate origin names, and a `pool_minimum_origins` above the origin count.
 
 ---
 
@@ -1133,20 +1313,24 @@ origin_pulls = {
 }
 ```
 
-A hostname is qualified against its zone, and one belonging to another zone fails the plan rather than being silently turned into `api.other.com.example.com`. `enabled = false` parks an association without deleting it, which is the reversible way to take a hostname out.
+A hostname is qualified against its zone, and one belonging to another zone fails the plan rather than being silently turned into `api.other.com.example.com`. Only a single label (`api`) or `@` (the apex) is qualified; a multi-label relative name such as `api.eu` is taken as written, and then fails as another zone's. Each hostname sets exactly one of `certificate_key` or `certificate_id`, and an `origin_pulls` key with no entry in `zones.tfvars` fails the plan. `enabled = false` parks an association without deleting it, which is the reversible way to take a hostname out.
 
 ### Cloudflare's default certificate identifies Cloudflare, not you
 
 A zone that turns AOP on without uploading a certificate runs on the certificate the Cloudflare edge presents for **every** customer on the platform. An origin that trusts it therefore accepts anything proxied through any Cloudflare account, not only this one.
 
-That is still a real filter in front of an origin that would otherwise accept traffic from anywhere, so it is allowed and a `check` warns on each zone using it. Where the origin is relied on to identify the tenant - a shared origin, a cardholder-data environment - upload a certificate of your own and set `certificate_key`. Setting `allow_shared_cloudflare_certificate = false` turns that warning into a failed plan for the whole account.
+That is still a real filter in front of an origin that would otherwise accept traffic from anywhere, so it is allowed, and a single `check` warning names every zone using it. Where the origin is relied on to identify the tenant - a shared origin, a cardholder-data environment - upload a certificate of your own and set `certificate_key`. Setting `allow_shared_cloudflare_certificate = false` turns that warning into a failed plan for the whole account.
 
 ### Exporting the trust bundle to the origin
 
-The layer's `origin_trust_bundles` output is the deliverable for whoever configures the origin: per zone, the PEM the origin's client-certificate trust store has to hold. It carries Cloudflare's Origin Pull CA for a zone running on the default certificate, and the uploaded certificates for a zone running on its own. Certificates only - no private key is ever output.
+The layer's `origin_trust_bundles` output is the deliverable for whoever configures the origin: per zone, the PEM the origin's client-certificate trust store has to hold. In order, it carries Cloudflare's Origin Pull CA (only for a zone running on the default certificate), the zone certificate, then every per-hostname certificate uploaded here; `origin_trust_bundle_sources` lists which is which. Certificates only - no private key is ever output. A certificate referenced by `certificate_id` is in no bundle, and has to come from wherever it was uploaded.
+
+Because the bundle is per zone, installing it at the origin of a hostname with a dedicated certificate makes that origin trust the zone's other certificates too. There, install only the hostname's own certificate.
+
+Read the output from the `origin_pulls` apply job (see [Reading a layer's outputs](#reading-a-layers-outputs)). From a directory initialised against the layer's state, it is:
 
 ```bash
-terraform -chdir=layers/origin_pulls output -json origin_trust_bundles \
+terraform -chdir=deployment/layers/origin_pulls output -json origin_trust_bundles \
   | jq -r '.primary' >cloudflare-client-ca.pem
 ```
 
@@ -1173,9 +1357,12 @@ Doing 3 before 1 fails every request in between. Removing a certificate runs the
 Certificate material never goes in `.tfvars`. It is supplied at plan time, keyed by certificate, from the `<account>-plan` environment's `TF_VAR_ORIGIN_PULL_CERTIFICATES`:
 
 ```bash
-export TF_VAR_origin_pull_certificates="$(jq -n \
-  --rawfile cert api.crt --rawfile key api.key \
-  '{api_origin: {certificate: $cert, private_key: $key}}')"
+# One entry per certificate_key the account tree names - edge_client and api_origin in the example above
+jq -n \
+  --rawfile ec edge.crt --rawfile ek edge.key \
+  --rawfile ac api.crt --rawfile ak api.key \
+  '{edge_client: {certificate: $ec, private_key: $ek}, api_origin: {certificate: $ac, private_key: $ak}}' \
+  | gh secret set TF_VAR_ORIGIN_PULL_CERTIFICATES --repo <owner/repo> --env <account>-plan
 ```
 
 PEM is line-structured and a value flattened to one line is rejected by Cloudflare, which is why the keys are read with `--rawfile` rather than pasted. The plan fails for a `certificate_key` naming material that was not supplied, and for supplied material nothing refers to - an unused private key in state is one nobody rotates and nobody misses.
@@ -1187,7 +1374,7 @@ Self-signed is normal here: the origin is told to trust this certificate itself,
 | Setting | Default | Effect |
 |---|---|---|
 | `default_zone_level_enabled` | `false` | Zone-level AOP is opt-in per zone rather than inherited. |
-| `allow_shared_cloudflare_certificate` | `true` | Permits a zone to run on Cloudflare's default certificate, with a `check` warning per zone. `false` fails the plan instead. |
+| `allow_shared_cloudflare_certificate` | `true` | Permits a zone to run on Cloudflare's default certificate, with one `check` warning naming every such zone. `false` fails the plan instead. |
 | `cloudflare_origin_pull_ca_certificate` | `null` | Uses the copy vendored at `layers/origin_pulls/ca/`. See that directory's README to refresh it. |
 
 ### Out of Scope
@@ -1213,21 +1400,29 @@ turnstile_widgets = {
 }
 ```
 
-A hostname covers itself and every subdomain, so `example.com` also serves `www.example.com` - and listing `www.example.com` does *not* serve the apex.
+A hostname covers itself and every subdomain, so `example.com` also serves `www.example.com` - and listing `www.example.com` does *not* serve the apex. For that reason the plan fails for an apex and its subdomain in the same widget, and for the same hostname in two widgets. It also fails for a hostname that is not a plain FQDN - a scheme, port, path or wildcard - and for two widgets whose `name` differs only in case.
 
 ### The sitekey is the handover, and Terraform cannot complete it
 
-A widget is two keys. The sitekey is public and belongs in the page; the secret is sent by the backend to `/siteverify`. This layer creates the widget and holds both, but it does not manage the page or the backend, so nothing here can tell whether a widget protects anything at all. Read `turnstile_sitekeys` after an apply and hand each value to whoever owns the page.
+A widget is two keys. The sitekey is public and belongs in the page; the secret is sent by the backend to `/siteverify`. This layer creates the widget and holds both, but it does not manage the page or the backend, so nothing here can tell whether a widget protects anything at all. Read `turnstile_sitekeys` after an apply (see [Reading a layer's outputs](#reading-a-layers-outputs)) and hand each value to whoever owns the page.
 
 That asymmetry is also why a replacement is an outage rather than a diff. Updating a widget in place - hostnames, mode, branding - keeps the sitekey and live pages keep working. Replacing one issues a *new* sitekey while every page still carries the old one, and every challenge fails until those pages are redeployed. A `region` change, a key rename and an apply against an empty state all replace. Read any plan on this layer for "must be replaced" before approving it.
 
 ### Adopting widgets that already exist
 
-If widgets are already in the account - and for Turnstile they usually are, because a widget is created in the dashboard the moment somebody protects a form - adopt them rather than letting this layer create duplicates. `layers/turnstile/imports.tf` carries the dashboard query and a commented `import` block; the import id is `<account_id>/<sitekey>`. See that file before the first apply.
+If widgets are already in the account - and for Turnstile they usually are, because a widget is created in the dashboard the moment somebody protects a form - adopt them rather than letting this layer create duplicates. `layers/turnstile/imports.tf` carries the API query that lists them and a commented `import` block; the import id is `<account_id>/<sitekey>`. See that file before the first apply.
 
 ### Secrets
 
-Nothing is injected into this layer: Cloudflare issues the secret, and Terraform records what the API returned, so **this layer's state holds every widget's secret key in plain text**. Anyone holding it can forge a passing `/siteverify` response for any form the widget protects, and it cannot be rotated in place - a new secret means a new widget, and a new widget means a new sitekey. The secret is deliberately not re-exported as a root output; read one from state when handing it over. Treat a leak of this state, or of a saved plan of this layer, as a compromise of every protected form.
+Nothing is injected into this layer: Cloudflare issues the secret, and Terraform records what the API returned, so **this layer's state holds every widget's secret key in plain text**. Anyone holding it can forge a passing `/siteverify` response for any form the widget protects, and it cannot be rotated in place - a new secret means a new widget, and a new widget means a new sitekey. The secret is deliberately not re-exported as a root output; it lives in `module.turnstile`. Read one from state when handing it over - from a directory initialised against the layer's state:
+
+```bash
+terraform show -json | jq -r '.values.root_module.child_modules[]
+  | select(.address == "module.turnstile") | .resources[]
+  | select(.type == "cloudflare_turnstile_widget" and .index == "primary") | .values.secret'
+```
+
+Treat a leak of this state, or of a saved plan of this layer, as a compromise of every protected form. The shared `<account>-plan` token, which carries every Read group and has no reviewer gate, can read every widget's secret as well.
 
 ### Governing defaults
 
@@ -1235,7 +1430,7 @@ Nothing is injected into this layer: Cloudflare issues the secret, and Terraform
 |---|---|---|
 | `default_widget_mode` | `"managed"` | Cloudflare decides, and asks for a click only when it needs one. The mode that fails visibly. |
 | `default_widget_region` | `"world"` | `"china"` is a separate widget network and is fixed at creation, so it is never a silent default. |
-| `max_domains_per_widget` | `200` | Cloudflare's Enterprise ceiling, enforced before the API sees the widget (10 on every other plan). |
+| `max_domains_per_widget` | `200` | Cloudflare's Enterprise ceiling, enforced before the API sees the widget. Every other plan allows 10, so on a non-Enterprise account set `max_domains_per_widget = 10` in its `turnstile.tfvars`, or 11 to 200 hostnames pass the plan and fail the apply. |
 | `allow_offlabel_widgets` | `false` | Removing Cloudflare branding is a contractual and design decision, so it takes a pull request that says why. |
 | `invisible_mode_privacy_addendum_accepted` | `false` | Invisible mode tells the visitor nothing, which is why Cloudflare requires its privacy addendum first. |
 
@@ -1276,19 +1471,19 @@ A project with a `source` builds on Cloudflare from GitHub or GitLab. Cloudflare
 
 ### Custom domains need a DNS record, and the API does not create it
 
-Adding a custom domain through the API - unlike the dashboard - does not write its DNS record, so the domain sits at `pending` and no certificate is issued. Give each custom domain a `zone_key` and this layer writes a proxied CNAME to the project's real pages.dev hostname. Without one, the plan fails unless `allow_unmanaged_pages_hostnames` is set, for a record genuinely managed elsewhere. A custom domain must not also be a record in `dns.tfvars`.
+Adding a custom domain through the API - unlike the dashboard - does not write its DNS record, so the domain sits at `pending` and no certificate is issued. Give each custom domain a `zone_key` and this layer writes a proxied CNAME to the project's real pages.dev hostname. Without one, the plan fails unless `allow_unmanaged_pages_hostnames` is set, for a record genuinely managed elsewhere. A custom domain must sit inside the zone its `zone_key` names and belongs to one project only, and two projects cannot share a `name` - each fails the plan. A custom domain must not also be a record in `dns.tfvars`; nothing checks that, because neither layer can see the other's records.
 
 ### Access: the pages.dev hostname is the bypass
 
-Protecting an internal portal is a `zerotrust` change, made with that layer's token. This layer has no Zero Trust scope, so it cannot write or check an Access application. What it does is work out which hostnames one has to cover, and publish them in the `pages_access_applications` output, shaped as `access_applications` entries for `zerotrust.tfvars`. Copy each entry under the same key and add `policy_keys`.
+Protecting an internal portal is a `zerotrust` change, made with that layer's token. This layer has no Zero Trust scope, so it cannot write or check an Access application. What it does is work out which hostnames one has to cover, and publish them in the `pages_access_applications` output, shaped as `access_applications` entries for `zerotrust.tfvars`. Copy each entry under the same key (`pages_<project key>`) and add `policy_keys`.
 
-That list is the reason the output exists. Every project also answers on `<subdomain>.pages.dev` and every preview on `*.<subdomain>.pages.dev`, and neither is covered by an Access application on the custom domain. The wildcard does not match the bare hostname either. So:
+That list is the reason the output exists. Every project also answers on its own `<project>.pages.dev` hostname and every preview on `*.<project>.pages.dev`, and neither is covered by an Access application on the custom domain. The wildcard does not match the bare hostname either. (`<project>.pages.dev` here is the whole hostname the `pages_projects` output gives as `subdomain`.) So:
 
 | `access_protection` | Hostnames in the hand-over | Use for |
 |---|---|---|
-| `previews` (default) | `*.<subdomain>.pages.dev` | A public site whose unreleased branches should not be |
-| `all` | every custom domain, `<subdomain>.pages.dev`, `*.<subdomain>.pages.dev` | An internal admin portal or dashboard |
-| `none` | nothing | Only with `allow_unprotected_previews`, or previews switched off |
+| `previews` (default) | `*.<project>.pages.dev` | A public site whose unreleased branches should not be |
+| `all` | every custom domain, `<project>.pages.dev`, `*.<project>.pages.dev` | An internal admin portal or dashboard |
+| `none` | nothing | Only with `allow_unprotected_previews`, or on a Git project with `source.preview_deployment_setting = "none"`. A Direct Upload project always counts as publishing previews, because `wrangler pages deploy --branch` makes one |
 
 The subdomain is read from the project after apply, not built from its name. pages.dev is one namespace across every Cloudflare account, and a name somebody else already holds is given a random suffix. Re-read the output after any apply that changes a project's custom domains: the `zerotrust` entry is a copy, and a hostname added here and not there is served without a login.
 
@@ -1296,7 +1491,7 @@ The subdomain is read from the project after apply, not built from its name. pag
 
 Plain `env_vars` are readable in the dashboard, the API and every plan of this layer. A secret is listed by name under `secret_names` and its value arrives in `TF_VAR_PAGES_PROJECT_SECRETS` in the `<account>-plan` environment - see [VARIABLES_AND_SECRETS.md](../VARIABLES_AND_SECRETS.md). The plan fails for a declared secret with no value, or a value no project declares.
 
-Both kinds of variable reach the build as well as Functions. A framework that inlines variables with a public prefix (`VITE_`, `NEXT_PUBLIC_`, `PUBLIC_`, `REACT_APP_` and similar) writes the value into the JavaScript every visitor downloads, whatever type it was stored as. The plan refuses a secret under such a name outright, and refuses a plain variable whose name looks like a credential unless `allow_credential_like_plain_env_vars` is set.
+Both kinds of variable reach the build as well as Functions. A framework that inlines variables with a public prefix (`VITE_`, `NEXT_PUBLIC_`, `PUBLIC_`, `REACT_APP_`, `GATSBY_`, `NUXT_PUBLIC_`, `EXPO_PUBLIC_`, `VUE_APP_`, `STORYBOOK_`) writes the value into the JavaScript every visitor downloads, whatever type it was stored as. The plan refuses a secret under such a name outright, in any case, and refuses a plain variable whose name looks like a credential unless `allow_credential_like_plain_env_vars` is set.
 
 **This layer's state holds every secret value in plain text.** Cloudflare never returns a secret once set, but Terraform records what it sent.
 
@@ -1304,7 +1499,7 @@ Both kinds of variable reach the build as well as Functions. A framework that in
 
 ### Adopting projects that already exist
 
-A project name is unique per account, so applying against a project created in the dashboard fails rather than duplicating it. `layers/pages/imports.tf` carries the API query and commented `import` blocks for projects (`<account_id>/<project_name>`) and domains (`<account_id>/<project_name>/<hostname>`). A project with secret env vars cannot be imported; remove the secrets, import, then let this layer set them again.
+A project name is unique per account, so applying against a project created in the dashboard fails rather than duplicating it. `layers/pages/imports.tf` carries the API query and commented `import` blocks for projects (`<account_id>/<project_name>`) and domains (`<account_id>/<project_name>/<hostname>`). A project with secret env vars cannot be imported; remove the secrets, import, then let this layer set them again. A CNAME that already exists for a custom domain has to be imported too, into `module.pages_project[<key>].cloudflare_dns_record.this["<hostname>"]` with id `<zone_id>/<record_id>`, or the apply tries to create a second record and the API refuses it.
 
 ### Governing defaults
 
@@ -1315,13 +1510,13 @@ A project name is unique per account, so applying against a project created in t
 | `default_access_protection` | `"previews"` | Previews are listed in the Access hand-over unless a project says otherwise. |
 | `allow_unprotected_previews` | `false` | A project publishing previews with `access_protection = "none"` fails the plan. |
 | `allow_unmanaged_pages_hostnames` | `false` | A custom domain with no `zone_key` fails the plan, because nothing would create its record. |
-| `allow_credential_like_plain_env_vars` | `false` | A plain env var named like `*_TOKEN`, `*_SECRET` or `API_KEY` fails the plan. |
+| `allow_credential_like_plain_env_vars` | `false` | A plain env var whose name contains `SECRET`, `TOKEN`, `PASSWORD`, `PASSWD`, `API_KEY`/`APIKEY`, `PRIVATE_KEY`/`PRIVATEKEY` or `CREDENTIAL` - anywhere in the name, in any case - fails the plan. |
 
 ### Known gaps
 
 - The API may return defaults for `deployment_configs` fields this layer leaves unset, which shows as drift on the plan after the first apply. Pin the field in `pages.tfvars` if it does.
-- Unicode (IDN) custom domains are rejected; punycode is accepted. The Pages API has not been confirmed to normalise them the way the zones API does.
-- `web_analytics_token`, Durable Object, Hyperdrive, AI, Vectorize and mTLS bindings are not exposed yet.
+- Unicode (IDN) custom domains are rejected. Punycode passes, but only without a `zone_key` - with one it fails the in-zone check, because `zones.tfvars` holds the Unicode zone name - so on an IDN zone a custom domain needs `allow_unmanaged_pages_hostnames` and a CNAME managed elsewhere.
+- `web_analytics_token`, Durable Object, Hyperdrive, AI, Vectorize and mTLS bindings are not exposed yet, nor are `analytics_engine_datasets`, `browsers`, `limits`, `usage_model` or `build_image_major_version`.
 
 ---
 
@@ -1352,7 +1547,7 @@ ai_gateways = {
 
 ### The endpoint is the handover, and Terraform cannot complete it
 
-A gateway does nothing until an application's base URL points at it. `ai_gateway_endpoints` gives both forms: `base`, which takes the provider's path segment and its own API path (`<base>/openai/chat/completions`), and `openai_compat`, the OpenAI SDK base URL, where the model is `<provider>/<model>` or `dynamic/<route>`. Hand them to whoever owns the application.
+A gateway does nothing until an application's base URL points at it. `ai_gateway_endpoints` (see [Reading a layer's outputs](#reading-a-layers-outputs)) gives both forms: `base`, which takes the provider's path segment and its own API path (`<base>/openai/chat/completions`), and `openai_compat`, the OpenAI SDK base URL, where the model is `<provider>/<model>` or `dynamic/<route>`. Hand them to whoever owns the application.
 
 Every gateway is authenticated by default: requests must carry `cf-aig-authorization: Bearer <token>`, with a Cloudflare API token holding `AI Gateway Run`. This layer does not create that token - it is the application's credential - and Cloudflare cannot scope one to a single gateway, so any Run token can use every gateway on the account, BYOK keys included. `authentication = false` fails the plan unless `allow_unauthenticated_gateways` is set: the account ID and gateway ID in the URL are not secrets, so an unauthenticated gateway serves anyone who guesses the second. Routes, BYOK and Zero Data Retention need authentication on regardless, and the plan says so.
 
@@ -1366,13 +1561,13 @@ Cloudflare's create call does not take `dlp_policies`, `guardrails` or `spend_li
 
 ### Dynamic routes
 
-A route is a graph of elements - `start`, `conditional`, `rate`, `model`, `end` - declared as a map keyed by element ID, each element's `outputs` naming the element that runs next. The plan checks the graph: one start, at least one end, no dangling or self-referencing outputs, nothing pointing back at the start, nothing unreachable. Percentage splits are not supported; the provider cannot represent their outputs.
+A route is a graph of elements - `start`, `conditional`, `rate`, `model`, `end` - declared as a map keyed by element ID, each element's `outputs` naming the element that runs next. The plan checks the graph: one start, at least one end, no dangling or self-referencing outputs, nothing pointing back at the start, and no element other than the start that no output points at. It does not check that every element is reachable from the start, or that the graph has no cycle. Percentage splits are not supported; the provider cannot represent their outputs.
 
 The API changes a route's elements by creating a new version and deploying it, and provider 5.23 only ever updates a route's name. So **any element change replaces the route**: it is deleted and recreated under the same name. Clients call it by name, as `dynamic/<name>`, so nothing needs redeploying, but requests to it fail for the seconds in between. Cloudflare's docs expect the providers a route calls to have BYOK keys stored on the gateway; adding those is outside Terraform.
 
 ### Adopting gateways that already exist
 
-A gateway ID is unique per account, so applying against one created in the dashboard fails rather than duplicating it. `layers/ai_gateway/imports.tf` carries the API queries and commented `import` blocks for gateways (`<account_id>/<gateway_id>`) and routes (`<account_id>/<gateway_id>/<route_id>`). Read it first: an adopted gateway that already uses BYOK must set `secrets_store_id` or the apply unlinks its store, spend limit rules must keep their existing IDs as their keys, a route must be imported only with its elements copied exactly, and a gateway switched to Unified Billing in the dashboard is switched back by the first apply that changes it. `default` is the gateway Cloudflare creates on its own, and on most accounts it has to be imported rather than declared.
+A gateway ID is unique per account, so applying against one created in the dashboard fails rather than duplicating it. `layers/ai_gateway/imports.tf` carries the API queries and commented `import` blocks for gateways (`<account_id>/<gateway_id>`) and routes (`<account_id>/<gateway_id>/<route_id>`). Read it first: spend limit rules must keep their existing IDs as their keys, a route must be imported only with its elements copied exactly, and a gateway switched to Unified Billing in the dashboard is switched back by the first apply that changes it. An adopted gateway that already uses BYOK must also set `secrets_store_id`, or the apply unlinks its store - that one is in the variable's description in `modules/ai_gateway`, not in `imports.tf`. `default` is the gateway Cloudflare creates on its own, and on most accounts it has to be imported rather than declared.
 
 ### Governing defaults
 

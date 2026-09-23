@@ -4,7 +4,7 @@ Six workflows, plus one reusable definition the Terraform ones share.
 
 | Workflow                                     | Trigger                                | Touches Cloudflare? | Can change anything? |
 | ----------------------------------------------| ----------------------------------------| ---------------------| ----------------------|
-| [`ci.yml`](ci.yml)                           | every PR, every push to `main`         | no                  | no                   |
+| [`ci.yml`](ci.yml)                           | every PR, every push to `main`, manual | no                  | a git tag only: a green push to `main` publishes the next patch tag |
 | [`secret-scanning.yml`](secret-scanning.yml) | every PR, every push to `main`, manual | no                  | no                   |
 | [`terraform-plan.yml`](terraform-plan.yml)   | manual only                            | reads               | no                   |
 | [`terraform-apply.yml`](terraform-apply.yml) | manual only                            | reads + writes      | yes, after approval  |
@@ -172,7 +172,9 @@ paces every request through a shared token bucket and retries any 429 that still
 gets through, honouring the API's own `Retry-After`. 
 Terraform sees a slow API rather than a rate-limited one.
 
-Two inputs tune it, both with defaults that suit this account's zone count:
+Two inputs of `_terraform-run.yml` tune it. Neither is on the Actions dispatch
+form: to change one, set it in the `with:` block where `terraform-plan.yml` or
+`terraform-apply.yml` calls `_terraform-run.yml`.
 
 | Input | Default | What it does |
 |---|---|---|
@@ -184,24 +186,31 @@ rate limit sets a floor: a refresh of *n* resources cannot finish faster than
 `n / api_rps` seconds, whatever the runner does. Raising `api_rps` above 4.0 does
 not make it faster, it makes it fail.
 
-Each job's `Stop the rate limiter` step publishes what the limiter absorbed —
+Each job's `Stop the rate limiter and report what it absorbed` step publishes what the limiter absorbed —
 request count, 429s retried, worst queue wait — to the job summary. **A non-zero
 `429s_absorbed` means `api_rps` is too high for that credential**; a warning
 about the limiter exiting early means Terraform went unpaced and any 429 in that
 log has a different cause.
 
-Three things do *not* go through it, all deliberately: `init` (which fetches
-providers and modules from the registry and GitHub, not from Cloudflare), the
-post-apply `kv-bulk-load.sh` (which uses `wrangler`, and moves 15,000 keys in a
-handful of bulk calls), and `resource-tags.sh`, which runs in a job of its own
-with a token of its own - a separate 1200-request budget - and paces itself.
+Four things do *not* go through it, all deliberately: the token check's single
+call to `/accounts/<id>/tokens/verify`, which runs before the limiter starts;
+`init` (which fetches providers and modules from the registry and GitHub, not
+from Cloudflare); the post-apply `kv-bulk-load.sh` (which uses `wrangler`, and
+moves 15,000 keys in a handful of bulk calls); and `resource-tags.sh`, which runs
+in a job of its own with a token of its own - a separate 1200-request budget - and
+paces itself.
 
 The post-apply [`d1-migrations.sh`](../scripts/d1-migrations.sh) *does*: it runs
 on the same credential the apply has just spent its budget on, at the worst
 moment to be at the front of a 429 backoff, and one request per migration is not
 a volume the limiter costs anything. The workers job sets
 `CLOUDFLARE_API_BASE_URL` for that step, which is wrangler's equivalent of the
-provider's `CLOUDFLARE_BASE_URL`.
+provider's `CLOUDFLARE_BASE_URL` - while the limiter is running, so `api_rps: 0`
+leaves the migrations unpaced too.
+
+Both post-apply steps run only after a successful apply, in the `workers` apply
+job: the resource tag export first, then the D1 migrations, then the KV load. A
+failed migration step skips the KV load for that run.
 
 ### Credential handling
 
@@ -252,10 +261,12 @@ locked"](#a-cancelled-run-left-the-state-locked).
 R2 has no object versioning, so there is no rollback for a state object. Take
 periodic copies of the bucket if state loss would be expensive to reconstruct.
 
-Every layer's state holds resource attributes in plain text, including values
-Cloudflare returns for tunnel secrets, service tokens and WAF expressions. The
-bucket is a secret store: no public access, no public bucket URL, no custom
-domain, and the R2 token below scoped to it alone.
+Every layer's state holds resource attributes in plain text, including service
+token and Turnstile widget secrets Cloudflare returns, the identity provider,
+device posture, Logpush, Pages and WAN secrets the plan sent, origin pull private
+keys, and complete WAF expressions. The bucket is a secret store: no public
+access, no public bucket URL, no custom domain, and the R2 token below scoped to
+it alone.
 
 ## Required configuration
 
@@ -277,10 +288,12 @@ domain, and the R2 token below scoped to it alone.
 
 ### Reading the private modules repository
 
-Every layer sources its modules from
-`<org>/cloudflare-platform-modules`, which is private.
+A layer that sources its modules from a private repository needs this. Upstream,
+`dns`, `gateway`, `lists`, `rules`, `turnstile` and `waf` name
+`<org>/cloudflare-platform-modules`; the other layers use `../../../modules/`,
+which only this template repository has.
 `GITHUB_TOKEN` is scoped to this repository alone, so `terraform init` cannot
-clone it and fails with `could not read Username for 'https://github.com'`.
+clone a private module and fails with `could not read Username for 'https://github.com'`.
 
 [`../actions/modules-auth`](../actions/modules-auth/action.yml) fixes that: it
 mints a GitHub App installation token per run and rewrites `https://github.com/`
@@ -300,7 +313,12 @@ To create the App, once, at organisation level:
    token for one repository, its `repository` input (default
    `cloudflare-platform-modules`), so an org-wide install buys nothing - and it
    would let anyone holding the private key mint a token for every repository
-   in the org.
+   in the org. The
+   [Release Manager](https://github.com/itsharryshelton/CloudflareLandingZone-Release-Manager)
+   publishes one repository per module instead (`terraform-cloudflare-lz-<module>`,
+   kebab-case). Sourcing from those, install the App on each of them and pass
+   them all to `modules-auth` as a comma-separated `repository`, at every call
+   site - no caller sets it today.
 
 A token is minted fresh per job, expires within the hour, and is revoked by the
 action's post step. Nothing is tied to an individual, so nobody leaving breaks
@@ -324,22 +342,22 @@ one needs.
 
 | Environment                          | Reviewers    | `CLOUDFLARE_API_TOKEN` scope                                                                                                                                                                                                    |
 | --------------------------------------| --------------| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `account_a-plan`                     | none         | read-only: `Zone:Read`, `DNS:Read`, `Zone Settings:Read`, `Zone WAF:Read`, `Account Load Balancers:Read`, `Zone Load Balancers:Read`, `Workers R2 Storage:Read`, `Account Settings:Read`, `Zero Trust:Read`, `Logs:Read` at account and zone scope                     |
-| `account_a-zones-apply`              | **required** | `Zone:Edit`, `DNS:Edit`, `Zone Settings:Edit`                                                                                                                                                                                   |
-| `account_a-waf-apply`                | **required** | `Zone WAF:Edit`, `Zone:Read`, notably *not* `Zone:Edit`                                                                                                                                                                         |
+| `account_a-plan`                     | none         | read-only: every `Read` permission group, at account and zone scope - how `bootstrap-account-tokens.sh` builds `terraform-plan`. A hand-built token needs Read on every product any layer manages, and on each new one a layer adds. That includes groups whose reads are sensitive in their own right - `AI Gateway:Read` returns logged prompts, `Zero Trust: PII Read` the personal data in Zero Trust logs - and this environment has no reviewer |
+| `account_a-zones-apply`              | **required** | `Zone:Edit`, `DNS:Edit`, `Zone Settings:Edit`; plus `Bot Management:Edit` where bot management is configured. A run that manages rate plans also needs `Billing:Read` and `Billing:Write` - on a separate token for that run, never the routine one |
+| `account_a-waf-apply`                | **required** | `Zone WAF:Edit`, `Zone:Read`, notably *not* `Zone:Edit`. Not documented in the layer's `providers.tf`, which is a bare provider block                                                                                          |
 | `account_a-load_balancing-apply`     | **required** | `Account Load Balancers:Edit`, `Zone Load Balancers:Edit`, `Zone:Read`                                                                                                                                                          |
 | `account_a-r2-apply`                 | **required** | `Workers R2 Storage:Edit` at account scope; plus `Zone:Read` and `Zone DNS:Edit` only if a bucket has a custom domain                                                                                                           |
 | `account_a-account_governance-apply` | **required** | `Account Settings:Edit`, and nothing at zone scope                                                                                                                                                                              |
 | `account_a-zerotrust-apply`          | **required** | `Access: Organizations, Identity Providers, and Groups:Edit`, `Access: Apps and Policies:Edit`, `Access: Service Tokens:Edit`, all at account scope                                                                             |
 | `account_a-device_posture-apply`     | **required** | `Zero Trust:Edit` at account scope, and nothing else. The same grant as `gateway`: Cloudflare has no narrower permission group for posture rules and service provider integrations |
-| `account_a-tunnels-apply`            | **required** | `Cloudflare Tunnel:Edit` at account scope; plus `Zone:Read` and `DNS:Edit` only if an ingress rule publishes a hostname, for its proxied CNAME                                                                   |
+| `account_a-tunnels-apply`            | **required** | `Cloudflare Tunnel:Edit` at account scope; plus `Zone:Read` and `DNS:Edit` only if an ingress rule names a `zone_key`, for its proxied CNAME                                                                     |
 | `account_a-logpush-apply`            | **required** | `Logs:Edit` at account and zone scope, and `Zone:Read`; plus `Zero Trust: PII Read` at account scope only if a job pushes an Access, Gateway or DEX dataset |
 | `account_a-origin_pulls-apply`       | **required** | `SSL and Certificates:Edit` and `Zone:Read` at zone scope, and nothing at account scope. Notably *not* `Zone:Edit` and *not* `DNS:Edit` |
 | `account_a-gateway-apply`            | **required** | `Zero Trust:Edit` at account scope, and nothing else. The API refers to the same grant as Zero Trust Write; it covers both the Gateway policy APIs and the category and application catalogues the layer resolves names against |
 | `account_a-wan-apply`                | **required** | `Magic Transit:Edit` at account scope, and nothing else. The permission group is named after the older product and covers the Cloudflare WAN tunnel and route APIs                                                              |
 | `account_a-bulk_redirects-apply`     | **required** | `Account Filter Lists:Edit`, `Account Rulesets:Edit` at account scope, and nothing at zone scope. Can redirect any hostname the account serves |
 | `account_a-dns-apply`                | **required** | `DNS:Edit`, `Zone:Read` |
-| `account_a-lists-apply`              | **required** | `Account Filter Lists:Edit` at account scope |
+| `account_a-lists-apply`              | **required** | `Account Filter Lists:Edit` at account scope. Not documented in the layer's `providers.tf`, which is a bare provider block |
 | `account_a-turnstile-apply`          | **required** | `Turnstile:Edit` at account scope, and nothing else - the API refers to the same grant as Turnstile Sites Write. The narrowest apply token here, but not a low-value one: reading a widget returns its secret key |
 | `account_a-ai_gateway-apply`         | **required** | `AI Gateway:Edit` at account scope, and nothing else - the API refers to the same grant as AI Gateway Write. Not `AI Gateway Run`: the pipeline never sends traffic through a gateway. Not a low-value token either - it can read and delete every gateway's logs, which are prompts and responses, and so can the plan token's `AI Gateway:Read` |
 | `account_a-pages-apply`              | **required** | `Cloudflare Pages:Edit` at account scope; `Zone:Read` and `DNS:Edit` at zone scope only where a custom domain names a `zone_key`, for its CNAME. Nothing in Zero Trust - Access for a project is written by the `zerotrust` token. Wider than it reads: it can repoint a production site's Git source or Direct Upload any build to it |
@@ -384,7 +402,7 @@ the set that can grant somebody else access to the Cloudflare account. It holds
 nothing at zone scope in exchange, so it cannot touch DNS or a firewall rule, but
 treat its reviewer list as the tightest of the set.
 
-The `gateway` token is the third. `Zero Trust:Edit` can rewrite the egress filter
+The `gateway` token needs the same care. `Zero Trust:Edit` can rewrite the egress filter
 in either direction: it can block what people reach, and - the one that matters -
 it can add a Do Not Inspect policy, which stops a channel being decrypted, logged
 in detail or matched by a DLP profile. That change looks like one more rule in a
@@ -392,7 +410,7 @@ plan and is the difference between data exfiltration being visible and not, so
 read this layer's diffs for what they stop watching as much as for what they
 stop. The token holds nothing at zone scope and cannot reach Access.
 
-The `zerotrust` token is the other one to think about. `Access: Organizations,
+The `zerotrust` token needs it as well. `Access: Organizations,
 Identity Providers, and Groups:Edit` can change the team name, add a login method
 and rewrite every Access group, which is enough to reach everything sitting
 behind Access - the internal systems rather than the Cloudflare dashboard. Give
@@ -457,8 +475,10 @@ files are treated as credential material. See
 Unlike the other layer secrets below, it is exported on **every** plan, set or
 not. An unset secret reaches Terraform as an empty string, which is not a valid
 map, so a `zerotrust` plan without `TF_VAR_IDENTITY_PROVIDER_SECRETS` fails with
-`Missing expression`. On an account with no identity provider secrets, set it to
-`{}`.
+`Missing expression`. On an account that declares no OAuth-type identity
+provider, set it to `{}`. Every OAuth-type provider (`azureAD`, `oidc`, `okta`,
+`google` and the like) needs its secret in it, or the plan fails; SAML and the
+one-time PIN need none.
 
 The `wan` layer takes secrets on the same terms, and for the same reasons.
 **`TF_VAR_WAN_IPSEC_TUNNEL_PSKS`** is a JSON object of IPsec pre-shared
@@ -485,8 +505,8 @@ Neither variable is wired into [`_terraform-run.yml`](_terraform-run.yml) yet:
 exported unconditionally, an unset secret would hand Terraform an empty string
 where it expects a map and fail every `wan` plan without one. Export them in the
 plan step of your own copy of that workflow, conditionally on the secret being
-set - the way the `logpush` and `device_posture` ones below are - and hold them
-in **`<account>-plan`**, for the same reason those are.
+set - the way the `logpush`, `device_posture`, `origin_pulls` and `pages` ones
+below are - and hold them in **`<account>-plan`**, for the same reason those are.
 
 The `logpush` layer takes two secrets, and those are wired in:
 [`_terraform-run.yml`](_terraform-run.yml) exports them for the `logpush` layer
@@ -534,11 +554,26 @@ TF_VAR_ORIGIN_PULL_CERTIFICATES = {"api_origin":{"certificate":"-----BEGIN CERTI
 Only needed where a zone uploads a certificate of its own; one running on the
 certificate Cloudflare presents by default needs nothing here. PEM is
 line-structured and a value flattened to one line is rejected by Cloudflare, so
-build it with `jq -n --rawfile cert x.crt --rawfile key x.key` rather than
+build it with `jq -n --rawfile cert x.crt --rawfile key x.key
+'{<certificate_key>: {certificate: $cert, private_key: $key}}'` rather than
 pasting. Each private key is an identity the origin has been told to trust, and
 it lands in the saved plan and in `origin_pulls` state in plain text - so a leak
 of either is a leak of the certificate, and the fix is to upload a replacement
 and only then drop the old one from the origin's trust store.
+
+The `pages` layer takes one secret, wired in the same way and held in the
+**`<account>-plan`** environment for the same reason:
+**`TF_VAR_PAGES_PROJECT_SECRETS`**, a JSON object of encrypted environment
+variable values keyed by project key, then `production` or `preview`, then
+variable name.
+
+```
+TF_VAR_PAGES_PROJECT_SECRETS = {"admin_portal":{"production":{"SESSION_SECRET":"<value>"}}}
+```
+
+Only needed where a project lists `secret_names`. Cloudflare never returns a
+secret once set, but Terraform records what it sent, so every value lands in the
+saved plan and in `pages` state in plain text.
 
 On the apply environments, also set **Deployment branches** to `main` only, so a
 branch cannot reach a write token.
@@ -547,19 +582,28 @@ branch cannot reach a write token.
 
 `terraform-plan.yml` is **manual only**. It does not run on pull requests.
 
-I removed this on purpose; when your zone file grows massively, it will take a long time for any PR to complete, testing against 250 domains, one PR check took 25 minutes to complete; when the PR didn't touch zones; this is because of the rate limiting we are needing to do. Plans & Apply are already gated at the Apply pipeline, so I deemed this low risk - you can always run plans against your branch before PR.
+I removed this on purpose. As the zone inventory grows, every pull request waits on
+it: against 250 domains, one PR check took 25 minutes, even when the PR did not
+touch zones, because every plan is paced by the [rate limiter](#api-rate-limiting).
+The apply pipeline already plans and gates every change, so I judged this low risk -
+and you can dispatch `terraform-plan.yml` against your branch before opening a PR.
+What a pull request does get is `ci.yml`'s offline plan of the offline-plannable
+layers it touches.
 
 ## Notes
 
-**A manual plan of a new zone *and* its WAF, load balancer or R2 custom domain
-config will fail the `waf` / `load_balancing` / `r2` plans.** Those layers resolve
-the zone via `data "cloudflare_zone"`, and it does not exist yet. Preview the
-`zones` layer only, or wait until the zone has been applied.
+**A manual plan of a new zone *and* its config in a zone-reading layer - `dns`,
+`waf`, `load_balancing`, `r2`, every tier 3 layer but `zerotrust` - will fail that
+layer's plan.** Those layers resolve the zone via `data "cloudflare_zone"`, and it
+does not exist yet. Preview the `zones` layer only, or wait until the zone has been
+applied.
 
 This never blocks a merge - it is a manual preview, and `ci.yml`'s offline plan
 does not resolve zones. `terraform-apply.yml` does not have the problem either:
-`plan-tier2` depends on `apply-tier1`, so tier 3 is planned only after the zone
-has been created, and a single apply run handles both changes together unaided.
+its tier 3 plan job waits on the tier 2 apply job, so tier 3 is planned only after
+the zone has been created, and a single apply run handles both changes together
+unaided. (The job IDs count from zero - `plan-tier2` is the one displayed as
+"plan (tier 3)", and it `needs` `apply-tier1`, displayed as "apply (tier 2)".)
 
 **A plan that removes a zone setting shows destroys, and they are safe.**
 `cloudflare_zone_setting` has no delete operation — the provider's `Delete` is an
@@ -595,6 +639,9 @@ Lock Info:
   ID:        0cad19f9-e895-589b-6622-33ddfc27a0ae
   Path:      <bucket>/account_a/dns.tfstate
   Operation: OperationTypePlan
+  Who:       runner@<runner host>
+  Version:   1.14.6
+  Created:   <timestamp the lock was taken>
 ```
 
 The 412 is the backend's conditional write refusing to overwrite a lock that is
@@ -608,8 +655,9 @@ already there. Nothing is wrong with the state itself - a cancelled plan never w
    the `ID` copied out of the error, and the layer name again as `confirm`.
    Leave `dry_run` ticked for the first run: it reports who took the lock and
    when, and releases nothing.
-3. Re-run with `dry_run` unticked. It approves through the layer's
-   `<account>-<layer>-apply` environment, like any state edit here.
+3. Re-run with `dry_run` unticked. Both runs wait for approval in the layer's
+   `<account>-<layer>-apply` environment, like any state edit here: the job runs
+   in that environment whether or not it is a dry run.
 4. Re-run the plan.
 
 If it was an **apply** rather than a plan that died, read the next plan
