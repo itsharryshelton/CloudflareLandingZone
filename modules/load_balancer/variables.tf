@@ -17,8 +17,9 @@ variable "lb_hostname" {
   type        = string
   description = "Fully-qualified hostname the load balancer answers on (e.g. app.example.com)."
 
+  # Lowercase Unicode letters, not just ASCII
   validation {
-    condition     = can(regex("^([a-z0-9_]([a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,}$", var.lb_hostname))
+    condition     = can(regex("^([0-9_\\p{Ll}\\p{Lo}\\p{M}]([0-9\\p{Ll}\\p{Lo}\\p{M}-]{0,61}[0-9\\p{Ll}\\p{Lo}\\p{M}])?\\.)+[\\p{Ll}\\p{Lo}]{2,}$", var.lb_hostname))
     error_message = "lb_hostname must be a fully-qualified, lowercase hostname (e.g. app.example.com) with no scheme, port or path."
   }
 }

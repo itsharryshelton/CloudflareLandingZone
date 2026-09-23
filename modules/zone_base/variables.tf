@@ -12,9 +12,18 @@ variable "domain_name" {
   type        = string
   description = "Apex domain for the zone (e.g. example.com)."
 
+  # Labels accept lowercase Unicode letters
   validation {
-    condition     = can(regex("^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,}$", var.domain_name))
+    condition     = can(regex("^([0-9\\p{Ll}\\p{Lo}\\p{M}]([0-9\\p{Ll}\\p{Lo}\\p{M}-]{0,61}[0-9\\p{Ll}\\p{Lo}\\p{M}])?\\.)+[\\p{Ll}\\p{Lo}]{2,}$", var.domain_name))
     error_message = "domain_name must be a valid apex domain (e.g. example.com), lowercase, no scheme or path."
+  }
+
+  # Cloudflare normalises IDN zone names to Unicode on read, so a punycode name
+  # never matches what the API returns: `name` forces replacement, and every plan
+  # proposes destroying the zone and its DNS records.
+  validation {
+    condition     = !can(regex("(^|\\.)xn--", var.domain_name))
+    error_message = "domain_name must use the Unicode form of an IDN (e.g. café-example.fr), not punycode - Cloudflare returns the Unicode name, so a punycode name drifts on every plan and forces the zone to be replaced."
   }
 }
 

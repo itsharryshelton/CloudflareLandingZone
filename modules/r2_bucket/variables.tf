@@ -372,10 +372,11 @@ variable "custom_domains" {
     that is not genuinely public.
   EOT
 
+  # Lowercase Unicode letters, not just ASCII
   validation {
     condition = alltrue([
       for domain in var.custom_domains :
-      can(regex("^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,}$", lower(domain.domain)))
+      can(regex("^([0-9\\p{Ll}\\p{Lo}\\p{M}]([0-9\\p{Ll}\\p{Lo}\\p{M}-]{0,61}[0-9\\p{Ll}\\p{Lo}\\p{M}])?\\.)+[\\p{Ll}\\p{Lo}]{2,}$", lower(domain.domain)))
     ])
     error_message = "Each custom_domains[*].domain must be a fully-qualified, lowercase hostname (e.g. assets.example.com) with no scheme, port or path."
   }
