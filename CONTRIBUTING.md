@@ -48,7 +48,9 @@ maps keyed by a logical key, and turn `zone_key = "primary"` into a zone ID.
 ## Module conventions
 
 Four files, always, plus `versions.tf`. Copy [modules/_TEMPLATE/](modules/_TEMPLATE/)
-to start.
+to start. [modules/README.md](modules/README.md) has the full set of rules every
+module follows, the module-to-layer map, and how modules are published and
+versioned; this section is the short form.
 
 | File | Holds |
 |---|---|
@@ -106,9 +108,13 @@ comment saying why it is duplicated.
 ## Adding a module
 
 1. Copy `modules/_TEMPLATE/` to `modules/<name>/`.
-2. Fill in the four files and `examples/basic/main.tf`. Leave `versions.tf` alone.
-3. Document it in place. There are no module READMEs, on purpose: a separate
-   document drifts from the code it describes. Every variable carries a
+2. Fill in the four files and `examples/basic/main.tf`. Leave `versions.tf` alone,
+   unless the module needs a newer provider than `~> 5.7` - as `ai_gateway` does -
+   in which case say why in a comment there.
+3. Document it in place. There are no per-module READMEs, on purpose: a separate
+   document drifts from the code it describes, and
+   [modules/README.md](modules/README.md) covers only what every module has in
+   common. Add the new module to its table. Every variable carries a
    `description` saying what it does and what it accepts, TFLint enforces that,
    and the reasoning goes in the header comments of `locals.tf` and `main.tf`.
    Write those descriptions as though somebody will only ever read them from an
