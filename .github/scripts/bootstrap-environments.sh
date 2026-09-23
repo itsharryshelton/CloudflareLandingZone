@@ -262,7 +262,7 @@ $(for account in "${ACCOUNTS[@]}"; do
     done
   done)
 
-Five layers also take a secret that is not a Cloudflare token, on the same terms:
+Six layers also take a secret that is not a Cloudflare token, on the same terms:
   zerotrust       TF_VAR_IDENTITY_PROVIDER_SECRETS           {"entra_id":"<client secret>"}, or {} if none
   wan             TF_VAR_WAN_IPSEC_TUNNEL_PSKS               once wan_ipsec_tunnels is populated
                   TF_VAR_WAN_BGP_MD5_KEYS                    where a tunnel peers over BGP
@@ -272,6 +272,8 @@ Five layers also take a secret that is not a Cloudflare token, on the same terms
   origin_pulls    TF_VAR_ORIGIN_PULL_CERTIFICATES            {"<certificate key>":{"certificate":"<PEM>","private_key":"<PEM>"}}
                                                              PEM line breaks must survive: jq -Rs . over each file
                                                              Only needed where a zone uploads a certificate of its own
+  pages           TF_VAR_PAGES_PROJECT_SECRETS               {"<project key>":{"production":{"<NAME>":"<value>"}}}
+                                                             Only needed where a project lists secret_names
 All of them go in <account>-plan, not an apply environment: the plan reads
 them, and apply runs the saved plan without re-reading TF_VAR_.
 The zerotrust one is exported on every plan, so it must be set - to {} if there

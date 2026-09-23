@@ -76,6 +76,7 @@ Application Layer (Zone & Workload Scope)
 │   ├── waf              (Firewall rulesets, rate limiting, bot policies)
 │   ├── load_balancing   (Health monitors, origin pools, failover logic)
 │   ├── origin_pulls     (Authenticated Origin Pulls: edge-to-origin mTLS, zone-wide and per hostname)
+│   ├── pages            (Pages projects: Jamstack front ends, branch deploys, bindings, custom domains)
 │   └── r2               (Bucket policies, CORS, custom domains)
 ```
 

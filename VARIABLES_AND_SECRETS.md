@@ -93,6 +93,7 @@ the CSV once they are all uploaded.
 | `<account>-load_balancing-apply` | `load_balancing` | `terraform-loadbalancing-apply` | `Account Load Balancers:Edit`, `Zone Load Balancers:Edit`, `Zone:Read` |
 | `<account>-logpush-apply` | `logpush` | `terraform-logpush-apply` | `Logs:Edit` (account + zone), `Zone:Read`; `Zero Trust: PII Read` for Access/Gateway/DEX datasets |
 | `<account>-origin_pulls-apply` | `origin_pulls` | `terraform-originpulls-apply` | `SSL and Certificates:Edit`, `Zone:Read` - notably *not* `Zone:Edit` and *not* `DNS:Edit` |
+| `<account>-pages-apply` | `pages` | `terraform-pages-apply` | `Cloudflare Pages:Edit`; `Zone:Read` + `DNS:Edit` if a custom domain names a `zone_key`. Nothing in Zero Trust - Access for a project is the `zerotrust` layer's. Can change what a production site serves, and read every plain env var
 | `<account>-r2-apply` | `r2` | `terraform-r2-apply` | `Workers R2 Storage:Edit`; `Zone:Read` + `DNS:Edit` if a bucket has a custom domain |
 | `<account>-rules-apply` | `rules` | *not created - make by hand* | Not yet documented in the layer's `providers.tf`. Needs edit on the zone-level cache, late transform and origin ruleset phases, and `Zone:Read` |
 | `<account>-tags-apply` | none - the resource tags job | `terraform-tags-apply` | Resource Tagging write at account scope, plus zone scope for zone tags. Beta groups, found by name - never `Access: Tags` |
@@ -114,7 +115,7 @@ Run the script with `DRY_RUN=1` to see exactly what each token would get.
 
 ## 5. Layer secrets (`TF_VAR_*`)
 
-Only five layers take a secret besides their token. Each is a JSON object keyed
+Only six layers take a secret besides their token. Each is a JSON object keyed
 the same way as the matching map in that layer's `.tfvars`.
 
 These go in the **`<account>-plan`** environment, not the apply one. The plan
@@ -127,6 +128,7 @@ step is what reads `TF_VAR_*`; apply runs the saved plan and never re-reads them
 | `TF_VAR_LOGPUSH_DESTINATION_SECRETS` | `logpush` | `logpush_jobs` | Yes, only when set | `{"audit_archive":"r2://<bucket>/audit/{DATE}?account-id=<id>&access-key-id=<key id>&secret-access-key=<secret>"}` |
 | `TF_VAR_LOGPUSH_OWNERSHIP_CHALLENGES` | `logpush` | `logpush_jobs` | Yes, only when set | `{"primary_http_requests":"<challenge token>"}` |
 | `TF_VAR_ORIGIN_PULL_CERTIFICATES` | `origin_pulls` | `certificate_key` references in `origin_pulls` | Yes, only when set | `{"api_origin":{"certificate":"-----BEGIN CERTIFICATE-----\n...","private_key":"-----BEGIN PRIVATE KEY-----\n..."}}` |
+| `TF_VAR_PAGES_PROJECT_SECRETS` | `pages` | `pages_projects`, then environment | Yes, only when set | `{"admin_portal":{"production":{"SESSION_SECRET":"<value>"}}}` |
 | `TF_VAR_WAN_IPSEC_TUNNEL_PSKS` | `wan` | `wan_ipsec_tunnels` | **No** - see below | `{"london_primary":"<psk>","london_secondary":"<psk>"}` |
 | `TF_VAR_WAN_BGP_MD5_KEYS` | `wan` | `wan_gre_tunnels` / `wan_ipsec_tunnels` | **No** - see below | `{"london_primary":"<md5 key>"}` |
 
@@ -149,6 +151,11 @@ Notes:
   than pasting. Both the certificate and its private key land in that layer's
   state in plain text, and the private key is an identity the origin has been
   told to trust.
+- **pages:** only needed where a project lists `secret_names`. Keyed by project
+  key, then `production` or `preview`, then variable name. The plan fails for a
+  declared name with no value and for a value nobody declares. Never use a
+  framework public prefix (`VITE_`, `NEXT_PUBLIC_`, ...) for a secret - the build
+  inlines it into browser JavaScript, and the plan refuses it.
 - **logpush:** a destination whose URI carries a credential (R2, Splunk HEC,
   Datadog, Azure SAS) goes in `TF_VAR_LOGPUSH_DESTINATION_SECRETS` and is left
   out of `logpush.tfvars`. One with no credential (S3, GCS) stays in
@@ -168,7 +175,8 @@ Notes:
 `account_governance`, `bulk_redirects`, `dns`, `gateway`, `lists`,
 `load_balancing`, `r2`, `rules`, `tunnels`, `waf`, `workers` and `zones` need
 only their `CLOUDFLARE_API_TOKEN`. So does `origin_pulls`, unless a zone in it
-uploads a certificate of its own. Workers secrets live in Cloudflare Secrets
+uploads a certificate of its own, and `pages`, unless a project lists
+`secret_names`. Workers secrets live in Cloudflare Secrets
 Store and are referenced by name in `workers.tfvars`.
 
 ---

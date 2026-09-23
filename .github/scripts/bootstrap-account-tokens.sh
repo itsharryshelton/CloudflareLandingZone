@@ -638,6 +638,36 @@ TOKEN_SPECS["terraform-turnstile-apply"]="$(cat <<JSON
 JSON
 )"
 
+# 9g. terraform-pages-apply
+PAGES_ACCT_PERMS="$(build_perm_array "account" "Cloudflare Pages:Edit|Pages Write|Cloudflare Pages Write")"
+PAGES_ZONE_PERMS="$(build_perm_array "zone" \
+  "DNS:Edit|DNS Write" \
+  "Zone:Read|Zone Read")"
+TOKEN_SPECS["terraform-pages-apply"]="$(cat <<JSON
+{
+  "name": "terraform-pages-apply",
+  "policies": [
+    {
+      "effect": "allow",
+      "permission_groups": $PAGES_ACCT_PERMS,
+      "resources": {
+        "$ACCOUNT_RESOURCE": "*"
+      }
+    },
+    {
+      "effect": "allow",
+      "permission_groups": $PAGES_ZONE_PERMS,
+      "resources": {
+        "$ACCOUNT_RESOURCE": {
+          "$ZONE_RESOURCE": "*"
+        }
+      }
+    }
+  ]
+}
+JSON
+)"
+
 # 10. terraform-zone-apply
 ZONE_PERMS="$(build_perm_array "zone" \
   "DNS:Edit|DNS Write" \
@@ -693,6 +723,7 @@ TOKEN_NAMES=(
   "terraform-loadbalancing-apply"
   "terraform-logpush-apply"
   "terraform-originpulls-apply"
+  "terraform-pages-apply"
   "terraform-r2-apply"
   "terraform-tags-apply"
   "terraform-tunnels-apply"
@@ -815,6 +846,7 @@ SECURITY WARNING & NEXT STEPS:
    gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-load_balancing-apply
    gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-logpush-apply
    gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-origin_pulls-apply
+   gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-pages-apply
    gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-r2-apply
    gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-tags-apply   (terraform-tags-apply)
    gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-tunnels-apply
