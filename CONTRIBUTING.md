@@ -53,6 +53,11 @@ to start.
 | `locals.tf` | Normalisation and mapping onto provider shaped values |
 | `main.tf` | Resource declarations, plus `lifecycle.precondition` for cross field rules |
 | `outputs.tf` | IDs and values other layers bind to |
+| `examples/basic/main.tf` | A root module calling `source = "../.."` with placeholder inputs. It is the fixture the published module repository's CI plans offline |
+
+An example must stay offline-plannable: no data sources, every input a literal,
+placeholders only. With no example, a module that has required inputs cannot be
+planned by its own CI at all.
 
 ### Where a guardrail goes
 
@@ -95,7 +100,7 @@ comment saying why it is duplicated.
 ## Adding a module
 
 1. Copy `modules/_TEMPLATE/` to `modules/<name>/`.
-2. Fill in the four files. Leave `versions.tf` alone.
+2. Fill in the four files and `examples/basic/main.tf`. Leave `versions.tf` alone.
 3. Document it in place. There are no module READMEs, on purpose: a separate
    document drifts from the code it describes. Every variable carries a
    `description` saying what it does and what it accepts, TFLint enforces that,
