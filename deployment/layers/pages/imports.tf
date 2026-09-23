@@ -40,12 +40,15 @@
 #   id = "${var.cloudflare_account_id}/${each.value}"
 # }
 #
+# The domain block takes objects rather than a "<key>/<hostname>" string to
+# split, because an import's `to` address may not call a function.
+#
 # import {
 #   for_each = {
-#     # "<logical key>/<hostname>" = "<existing project name>"
-#     # "marketing_site/www.example.com" = "marketing-site"
+#     # <any unique label> = { project = "<logical key in pages_projects>", hostname = "<custom domain>", name = "<existing project name>" }
+#     # marketing_www = { project = "marketing_site", hostname = "www.example.com", name = "marketing-site" }
 #   }
 #
-#   to = module.pages_project[split("/", each.key)[0]].cloudflare_pages_domain.this[split("/", each.key)[1]]
-#   id = "${var.cloudflare_account_id}/${each.value}/${split("/", each.key)[1]}"
+#   to = module.pages_project[each.value.project].cloudflare_pages_domain.this[each.value.hostname]
+#   id = "${var.cloudflare_account_id}/${each.value.name}/${each.value.hostname}"
 # }
