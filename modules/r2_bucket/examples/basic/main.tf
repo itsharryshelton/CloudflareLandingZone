@@ -5,7 +5,7 @@
 # account; keep them that way so the example stays customer-agnostic.
 
 terraform {
-  required_version = ">= 1.5.0"
+  required_version = ">= 1.12.0"
 
   required_providers {
     cloudflare = {

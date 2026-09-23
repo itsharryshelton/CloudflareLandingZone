@@ -9,7 +9,7 @@
 # module manages. A module with required inputs and no example is not planned.
 
 terraform {
-  required_version = ">= 1.5.0"
+  required_version = ">= 1.12.0"
 
   required_providers {
     cloudflare = {

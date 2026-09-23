@@ -39,9 +39,6 @@ locals {
   # qualified with the zone; anything already carrying a dot is left alone, so a
   # name from another zone stays wrong and is reported below rather than being
   # quietly turned into "api.other.example.com".
-  #
-  # length(split(".", x)) rather than strcontains: this module's floor is
-  # Terraform 1.5 and strcontains arrived in 1.6.
   hostname_qualified = [
     for idx, entry in var.hostnames : (
       contains(["@", var.zone_name], local.hostname_inputs[idx])

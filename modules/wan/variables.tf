@@ -139,10 +139,13 @@ variable "gre_tunnels" {
     error_message = "Each gre_tunnels[*].ttl, when set, must be between 1 and 255."
   }
 
+  # A conditional, not `||`: Terraform before 1.12 evaluates both sides of `||`,
+  # and contains() rejects a null argument. A conditional evaluates only the
+  # branch it takes, so an unset field is skipped whatever the version.
   validation {
     condition = alltrue([
       for tunnel in var.gre_tunnels :
-      tunnel.health_check == null || contains(["unidirectional", "bidirectional", ""], coalesce(try(tunnel.health_check.direction, ""), ""))
+      try(tunnel.health_check.direction, null) == null ? true : contains(["unidirectional", "bidirectional"], tunnel.health_check.direction)
     ])
     error_message = "Each gre_tunnels[*].health_check.direction, when set, must be \"unidirectional\" or \"bidirectional\"."
   }
@@ -150,7 +153,7 @@ variable "gre_tunnels" {
   validation {
     condition = alltrue([
       for tunnel in var.gre_tunnels :
-      tunnel.health_check == null || contains(["low", "mid", "high", ""], coalesce(try(tunnel.health_check.rate, ""), ""))
+      try(tunnel.health_check.rate, null) == null ? true : contains(["low", "mid", "high"], tunnel.health_check.rate)
     ])
     error_message = "Each gre_tunnels[*].health_check.rate, when set, must be \"low\", \"mid\" or \"high\"."
   }
@@ -158,7 +161,7 @@ variable "gre_tunnels" {
   validation {
     condition = alltrue([
       for tunnel in var.gre_tunnels :
-      tunnel.health_check == null || contains(["reply", "request", ""], coalesce(try(tunnel.health_check.type, ""), ""))
+      try(tunnel.health_check.type, null) == null ? true : contains(["reply", "request"], tunnel.health_check.type)
     ])
     error_message = "Each gre_tunnels[*].health_check.type, when set, must be \"reply\" or \"request\"."
   }
@@ -314,7 +317,7 @@ variable "ipsec_tunnels" {
   validation {
     condition = alltrue([
       for tunnel in var.ipsec_tunnels :
-      tunnel.psk == null || length(coalesce(tunnel.psk, "")) >= 16
+      tunnel.psk == null ? true : length(tunnel.psk) >= 16
     ])
     error_message = "Each ipsec_tunnels[*].psk, when set, must be at least 16 characters. A short pre-shared key is brute-forceable offline from a single captured IKE exchange; 32 or more random characters is the sane length. Leave psk unset to have Cloudflare generate one instead."
   }
@@ -327,10 +330,11 @@ variable "ipsec_tunnels" {
     error_message = "Each ipsec_tunnels[*].custom_remote_identity_label must be a single DNS label: lowercase letters, numbers and hyphens, not starting or ending with a hyphen. The module appends the account and Cloudflare's suffix to it."
   }
 
+  # A conditional, not `||`, for the reason given on gre_tunnels.
   validation {
     condition = alltrue([
       for tunnel in var.ipsec_tunnels :
-      tunnel.health_check == null || contains(["unidirectional", "bidirectional", ""], coalesce(try(tunnel.health_check.direction, ""), ""))
+      try(tunnel.health_check.direction, null) == null ? true : contains(["unidirectional", "bidirectional"], tunnel.health_check.direction)
     ])
     error_message = "Each ipsec_tunnels[*].health_check.direction, when set, must be \"unidirectional\" or \"bidirectional\"."
   }
@@ -338,7 +342,7 @@ variable "ipsec_tunnels" {
   validation {
     condition = alltrue([
       for tunnel in var.ipsec_tunnels :
-      tunnel.health_check == null || contains(["low", "mid", "high", ""], coalesce(try(tunnel.health_check.rate, ""), ""))
+      try(tunnel.health_check.rate, null) == null ? true : contains(["low", "mid", "high"], tunnel.health_check.rate)
     ])
     error_message = "Each ipsec_tunnels[*].health_check.rate, when set, must be \"low\", \"mid\" or \"high\"."
   }
@@ -346,7 +350,7 @@ variable "ipsec_tunnels" {
   validation {
     condition = alltrue([
       for tunnel in var.ipsec_tunnels :
-      tunnel.health_check == null || contains(["reply", "request", ""], coalesce(try(tunnel.health_check.type, ""), ""))
+      try(tunnel.health_check.type, null) == null ? true : contains(["reply", "request"], tunnel.health_check.type)
     ])
     error_message = "Each ipsec_tunnels[*].health_check.type, when set, must be \"reply\" or \"request\"."
   }

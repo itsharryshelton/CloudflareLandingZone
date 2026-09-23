@@ -239,7 +239,8 @@ Nothing needs pre-creating beyond the bucket itself. The first apply for a pair
 writes its state object; there is no bootstrap step and no import.
 
 Locking is `use_lockfile = true`, which uses S3 conditional writes - supported by
-R2, and the reason every layer requires Terraform >= 1.11. R2 has no DynamoDB
+R2, and needs Terraform 1.11 or newer (every layer requires 1.12, for the
+modules' sake - see CONTRIBUTING.md). R2 has no DynamoDB
 equivalent, so this plus the per-state-key `concurrency` group is the whole of the
 protection against two concurrent applies corrupting one key.
 

@@ -1,5 +1,5 @@
 terraform {
-  required_version = ">= 1.11.0"
+  required_version = ">= 1.12.0"
 
   required_providers {
     cloudflare = {
@@ -31,9 +31,9 @@ terraform {
   #
   # LOCKING: R2 has no DynamoDB equivalent, so two concurrent applies against one
   # state key can corrupt it. `use_lockfile = true` locks using S3 conditional
-  # writes, which R2 supports, and is why required_version above is 1.11. The
-  # pipeline also serialises per state key. See ../zones/terraform.tf for the full
-  # reasoning.
+  # writes, which R2 supports, and needs Terraform 1.11 or newer. The pipeline
+  # also serialises per state key. See ../zones/terraform.tf for the full
+  # reasoning, including why required_version is 1.12.
   #
   # backend "s3" {
   #   region                      = "auto"

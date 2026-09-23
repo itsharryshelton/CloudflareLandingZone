@@ -68,14 +68,17 @@ points at exactly one input.
 Put it in a `lifecycle.precondition` in `main.tf` if it needs another variable, a
 local, or a comparison across list items.
 
-In a module that is not a preference, it is the only option. Modules declare
-`required_version = ">= 1.5.0"` so they stay usable from an older root module, and
-validation blocks could not reference anything outside their own variable until
-Terraform 1.9.
+Modules and layers both declare `required_version = ">= 1.12.0"`. That floor is
+set by the modules, not the backend: guards such as `x == null || contains(list, x)`
+rely on `||` and `&&` short-circuiting, which Terraform only does from 1.12. Before
+1.12 both sides are evaluated, and the check fails on the very null it was meant to
+skip. If a guard must hold on an older Terraform, write it as a conditional
+(`x == null ? true : contains(list, x)`), which evaluates only the branch it takes.
 
-The layers are different, and worth understanding before you move a check. They
-require 1.11, so a validation block there *can* reference another variable. Cross
-variable checks still live in `preflight.tf`, on a `terraform_data` resource, for
+A validation block has been able to reference another variable since 1.9, so that
+is no longer a technical limit. Cross field checks in a module still go in a
+`lifecycle.precondition`, so that every one of them is in `main.tf`. Cross
+variable checks in a layer still live in `preflight.tf`, on a `terraform_data` resource, for
 two reasons: a `module` block cannot carry a `lifecycle` block at all, and keeping
 every cross cutting assertion in one file means a reader can see all of them
 without opening four others. `terraform_data` needs no credentials and makes no API
