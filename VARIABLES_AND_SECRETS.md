@@ -31,7 +31,7 @@ Not secret. Shared by every account and layer.
 |---|---|---|---|
 | `TF_BACKEND_BUCKET` | `yourorg-cloudflare-platform-tfstate` | R2 bucket that holds Terraform state | plan, apply, `state-forget`, `state-unlock` |
 | `TF_BACKEND_ENDPOINT` | `https://<state-account-id>.r2.cloudflarestorage.com` | S3-compatible endpoint for that bucket | plan, apply, `state-forget`, `state-unlock` |
-| `MODULES_APP_ID` | `1234567` | Numeric App ID of the modules-reader GitHub App (not the client ID or slug) | every workflow, `ci.yml` included |
+| `MODULES_APP_ID` | `1234567` | Numeric App ID of the modules-reader GitHub App (not the client ID or slug) | every workflow that runs `terraform init`: all but `secret-scanning.yml` |
 
 ## 2. Repository secrets
 
@@ -41,7 +41,7 @@ Shared by every account and layer.
 |---|---|---|
 | `R2_ACCESS_KEY_ID` | R2 API token ID, **Object Read & Write on the state bucket only** | plan, apply, `state-forget`, `state-unlock` |
 | `R2_SECRET_ACCESS_KEY` | That token's secret | plan, apply, `state-forget`, `state-unlock` |
-| `MODULES_APP_PRIVATE_KEY` | The modules-reader App's private key - the whole `.pem`, header and footer lines included | every workflow, `ci.yml` included |
+| `MODULES_APP_PRIVATE_KEY` | The modules-reader App's private key - the whole `.pem`, header and footer lines included | every workflow that runs `terraform init`: all but `secret-scanning.yml` |
 
 The GitHub App needs **Contents: Read-only** and nothing else, installed on the
 private modules repository only (`cloudflare-platform-modules` by default - the
@@ -83,7 +83,7 @@ the CSV once they are all uploaded.
 
 | Environment | Layer | Bootstrap token | Minimum scope |
 |---|---|---|---|
-| `<account>-plan` | all (plan only) | `terraform-plan` | Read-only, account and zone scope |
+| `<account>-plan` | all (plan only) | `terraform-plan` | Read-only: every `Read` permission group, at account and zone scope. That is how the bootstrap script builds it, and every layer added needs another product's Read |
 | `<account>-account_governance-apply` | `account_governance` | `terraform-accountgovernance-apply` | `Account Settings:Edit` |
 | `<account>-ai_gateway-apply` | `ai_gateway` | `terraform-aigateway-apply` | `AI Gateway:Edit` (the API names the same grant AI Gateway Write). Not `AI Gateway Run`. Can read and delete every gateway's logs - prompts and responses - as can the plan token's `AI Gateway:Read` |
 | `<account>-bulk_redirects-apply` | `bulk_redirects` | *not created - make by hand* | `Account Filter Lists:Edit`, `Account Rulesets:Edit` |
@@ -94,25 +94,40 @@ the CSV once they are all uploaded.
 | `<account>-load_balancing-apply` | `load_balancing` | `terraform-loadbalancing-apply` | `Account Load Balancers:Edit`, `Zone Load Balancers:Edit`, `Zone:Read` |
 | `<account>-logpush-apply` | `logpush` | `terraform-logpush-apply` | `Logs:Edit` (account + zone), `Zone:Read`; `Zero Trust: PII Read` for Access/Gateway/DEX datasets |
 | `<account>-origin_pulls-apply` | `origin_pulls` | `terraform-originpulls-apply` | `SSL and Certificates:Edit`, `Zone:Read` - notably *not* `Zone:Edit` and *not* `DNS:Edit` |
-| `<account>-pages-apply` | `pages` | `terraform-pages-apply` | `Cloudflare Pages:Edit`; `Zone:Read` + `DNS:Edit` if a custom domain names a `zone_key`. Nothing in Zero Trust - Access for a project is the `zerotrust` layer's. Can change what a production site serves, and read every plain env var
+| `<account>-pages-apply` | `pages` | `terraform-pages-apply` | `Cloudflare Pages:Edit`; `Zone:Read` + `DNS:Edit` if a custom domain names a `zone_key`. Nothing in Zero Trust - Access for a project is the `zerotrust` layer's. Can change what a production site serves, and read every plain env var |
 | `<account>-r2-apply` | `r2` | `terraform-r2-apply` | `Workers R2 Storage:Edit`; `Zone:Read` + `DNS:Edit` if a bucket has a custom domain |
 | `<account>-rules-apply` | `rules` | *not created - make by hand* | Not yet documented in the layer's `providers.tf`. Needs edit on the zone-level cache, late transform and origin ruleset phases, and `Zone:Read` |
 | `<account>-tags-apply` | none - the resource tags job | `terraform-tags-apply` | Resource Tagging write at account scope, plus zone scope for zone tags. Beta groups, found by name - never `Access: Tags` |
-| `<account>-tunnels-apply` | `tunnels` | `terraform-tunnels-apply` | `Cloudflare Tunnel:Edit`; `Zone:Read` + `DNS:Edit` if a hostname is published |
+| `<account>-tunnels-apply` | `tunnels` | `terraform-tunnels-apply` | `Cloudflare Tunnel:Edit`; `Zone:Read` + `DNS:Edit` if an ingress rule names a `zone_key` |
 | `<account>-turnstile-apply` | `turnstile` | `terraform-turnstile-apply` | `Turnstile:Edit` (the API names the same grant Turnstile Sites Write). Reaches widgets and nothing else - but reading a widget returns its secret key, so it is not a low-value credential |
 | `<account>-waf-apply` | `waf` | `terraform-waf-apply` | `Zone WAF:Edit`, `Zone:Read` |
 | `<account>-wan-apply` | `wan` | `terraform-wan-apply` | `Magic Transit:Edit` |
 | `<account>-workers-apply` | `workers` | `terraform-workers-apply` | `Workers Scripts:Edit`, `Workers KV Storage:Edit`, `Zone:Read`; `D1:Edit` if databases are declared; `Queues:Edit` if queues are declared; `Workers Routes:Edit` if routes are declared; `DNS:Edit` for a custom domain. `D1:Edit` also carries query execution over the D1 REST API, so it can read and rewrite the contents of every database in the account |
 | `<account>-zerotrust-apply` | `zerotrust` | `terraform-zerotrust-apply` | `Access: Organizations, Identity Providers, and Groups:Edit`, `Access: Apps and Policies:Edit`, `Access: Service Tokens:Edit` |
-| `<account>-zones-apply` | `zones` | `terraform-zone-apply` | `Zone:Edit`, `DNS:Edit`, `Zone Settings:Edit` |
+| `<account>-zones-apply` | `zones` | `terraform-zone-apply` | `Zone:Edit`, `DNS:Edit`, `Zone Settings:Edit`; `Bot Management:Edit` if bot management is configured. Managing rate plans needs `Billing:Read` + `Billing:Write`, on a separate token for that run |
 
 Scopes come from each layer's `providers.tf` where it documents them, and from
 the resources the layer manages where it does not.
 
-The bootstrap tokens are not an exact match for this column. Several are
-broader - notably `terraform-wan-apply`, `terraform-workers-apply` and
-`terraform-zerotrust-apply` - and `terraform-waf-apply` has no `Zone:Read`.
-Run the script with `DRY_RUN=1` to see exactly what each token would get.
+The bootstrap tokens are not an exact match for this column. Several are broader:
+
+- `terraform-wan-apply` adds Magic Firewall, Magic Network Monitoring and Magic WAN
+  to Magic Transit.
+- `terraform-zerotrust-apply` takes every Zero Trust and Access write group,
+  including the `Zero Trust:Edit` that `gateway` and `device_posture` hold.
+- `terraform-workers-apply` also carries `Pages:Edit`, `Workers R2 Storage:Edit`
+  and `Secrets Store:Edit`, among others. `Pages:Edit` undoes the split that gives
+  `pages` a layer of its own.
+- `terraform-r2-apply` adds R2 Data Catalog and R2 SQL.
+- The conditional grants above are granted unconditionally: `Zone:Read` and
+  `DNS:Edit` for `r2`, `tunnels` and `pages`, and `Zero Trust: PII Read` for
+  `logpush`.
+
+Two fall short of the column: `terraform-waf-apply` has no `Zone:Read`, and
+`terraform-workers-apply`, broad as it is, has no `Zone:Read` or `DNS:Edit` - the
+latter needed for a Worker custom domain. Run the script with
+`DRY_RUN=1` to see exactly what each token would get, and adjust by hand where the
+difference matters.
 
 ## 5. Layer secrets (`TF_VAR_*`)
 
@@ -124,14 +139,14 @@ step is what reads `TF_VAR_*`; apply runs the saved plan and never re-reads them
 
 | Secret name | Layer | Keyed like | Wired into the pipeline? | Example value |
 |---|---|---|---|---|
-| `TF_VAR_IDENTITY_PROVIDER_SECRETS` | `zerotrust` | `identity_providers` | Yes, on every plan - **must be set**, `{}` if none | `{"entra_id":"<client secret>"}` |
+| `TF_VAR_IDENTITY_PROVIDER_SECRETS` | `zerotrust` | `identity_providers` | Yes, on every plan - **must be set**; `{}` only with no OAuth-type provider | `{"entra_id":"<client secret>"}` |
 | `TF_VAR_DEVICE_POSTURE_INTEGRATION_SECRETS` | `device_posture` | `device_posture_integrations` | Yes, only when set | `{"intune":{"client_secret":"<client secret>"}}` |
 | `TF_VAR_LOGPUSH_DESTINATION_SECRETS` | `logpush` | `logpush_jobs` | Yes, only when set | `{"audit_archive":"r2://<bucket>/audit/{DATE}?account-id=<id>&access-key-id=<key id>&secret-access-key=<secret>"}` |
 | `TF_VAR_LOGPUSH_OWNERSHIP_CHALLENGES` | `logpush` | `logpush_jobs` | Yes, only when set | `{"primary_http_requests":"<challenge token>"}` |
 | `TF_VAR_ORIGIN_PULL_CERTIFICATES` | `origin_pulls` | `certificate_key` references in `origin_pulls` | Yes, only when set | `{"api_origin":{"certificate":"-----BEGIN CERTIFICATE-----\n...","private_key":"-----BEGIN PRIVATE KEY-----\n..."}}` |
 | `TF_VAR_PAGES_PROJECT_SECRETS` | `pages` | `pages_projects`, then environment | Yes, only when set | `{"admin_portal":{"production":{"SESSION_SECRET":"<value>"}}}` |
 | `TF_VAR_WAN_IPSEC_TUNNEL_PSKS` | `wan` | `wan_ipsec_tunnels` | **No** - see below | `{"london_primary":"<psk>","london_secondary":"<psk>"}` |
-| `TF_VAR_WAN_BGP_MD5_KEYS` | `wan` | `wan_gre_tunnels` / `wan_ipsec_tunnels` | **No** - see below | `{"london_primary":"<md5 key>"}` |
+| `TF_VAR_WAN_BGP_MD5_KEYS` | `wan` | the `wan_gre_tunnels` / `wan_ipsec_tunnels` entries that set `bgp_customer_asn` | **No** - see below | `{"<peering tunnel key>":"<md5 key>"}` |
 
 Notes:
 
@@ -140,16 +155,18 @@ Notes:
   secret. The plan fails for a secret keyed to something that is not declared.
 - **zerotrust:** the pipeline exports `TF_VAR_IDENTITY_PROVIDER_SECRETS` on
   every plan, set or not. Unset, it reaches Terraform as an empty string and the
-  `zerotrust` plan fails with `Missing expression`. With no identity provider
-  secrets, set it to `{}`.
+  `zerotrust` plan fails with `Missing expression`. `{}` is valid only on an
+  account that declares no OAuth-type identity provider: every `azureAD`, `oidc`,
+  `okta`, `google` and similar provider needs its secret here, or the plan fails.
 - **device_posture:** most integration types take `client_secret`; Uptycs takes
   `client_key` and `client_secret`; a custom integration takes
   `access_client_secret`.
 - **origin_pulls:** only needed where a zone uploads a client certificate of
   its own; a zone running on the certificate Cloudflare presents by default
   needs nothing here. PEM is line-structured, so the newlines have to survive -
-  build the value with `jq -n --rawfile cert x.crt --rawfile key x.key` rather
-  than pasting. Both the certificate and its private key land in that layer's
+  build the value with `jq -n --rawfile cert x.crt --rawfile key x.key
+  '{<certificate_key>: {certificate: $cert, private_key: $key}}'` rather than
+  pasting. Both the certificate and its private key land in that layer's
   state in plain text, and the private key is an identity the origin has been
   told to trust.
 - **pages:** only needed where a project lists `secret_names`. Keyed by project
@@ -164,8 +181,10 @@ Notes:
 - **wan:** neither WAN secret is exported by
   [`_terraform-run.yml`](.github/workflows/_terraform-run.yml). Add a
   conditional export to the plan step in your copy, the same way the
-  `device_posture` and `logpush` ones are done, before populating
-  `wan_ipsec_tunnels`. One PSK per tunnel, 32+ random characters, never reused.
+  `device_posture` and `logpush` ones are done, before supplying PSKs or MD5
+  keys. Until then each IPsec tunnel gets a PSK Cloudflare generates, visible
+  only in the dashboard. One PSK per tunnel, 32+ random characters (the plan
+  refuses fewer than 16), never reused.
 - The `<account>-plan` environment has no reviewer gate, so anyone who can
   dispatch a plan can reach these. Every one also lands in the saved plan and in
   that layer's state in plain text. Scope each credential as narrowly as its
@@ -174,8 +193,8 @@ Notes:
 ### Layers with nothing extra
 
 `account_governance`, `ai_gateway`, `bulk_redirects`, `dns`, `gateway`, `lists`,
-`load_balancing`, `r2`, `rules`, `tunnels`, `waf`, `workers` and `zones` need
-only their `CLOUDFLARE_API_TOKEN`. So does `origin_pulls`, unless a zone in it
+`load_balancing`, `r2`, `rules`, `tunnels`, `turnstile`, `waf`, `workers` and
+`zones` need only their `CLOUDFLARE_API_TOKEN`. So does `origin_pulls`, unless a zone in it
 uploads a certificate of its own, and `pages`, unless a project lists
 `secret_names`. Workers secrets live in Cloudflare Secrets
 Store and are referenced by name in `workers.tfvars`.
@@ -242,5 +261,7 @@ every layer reads it from there.
 | `MODULES_APP_PRIVATE_KEY has no -----BEGIN ... PRIVATE KEY----- line` or `is 1 line(s) long` | Re-set the secret by piping the whole `.pem` in                                                |
 | `Malformed API token` / `contains whitespace`                                                | Re-set the token by piping it in, from the token's own reveal view                             |
 | `Wrong credential type` / `cfk_ prefix`                                                      | That is a Global API Key. Create an API token instead.                                         |
+| `missing variable MODULES_APP_ID` / `missing secret MODULES_APP_PRIVATE_KEY`                 | Repository variable and secret ([sections 1](#1-repository-variables) and [2](#2-repository-secrets)) |
 | `Missing expression` on `<value for var.identity_provider_secrets>`                          | Set `TF_VAR_IDENTITY_PROVIDER_SECRETS` in `<account>-plan` - `{}` if there are none            |
 | `Token did not verify` (warning)                                                             | Token revoked, expired, or scoped to a different account                                       |
+| `Error acquiring the state lock` / `PreconditionFailed`                                      | A cancelled run left the lock behind - see [A cancelled run left the state locked](.github/workflows/README.md#a-cancelled-run-left-the-state-locked) |
