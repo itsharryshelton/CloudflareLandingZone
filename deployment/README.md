@@ -7,6 +7,7 @@ Everything you edit lives here. The modules under [../modules/](../modules/) sta
 ```deployment/
 ├── layers/                            # code, shared by every account
 │   ├── account_governance/            # own state: members, user groups, RBAC
+│   ├── ai_gateway/                    # own state: AI gateways, caching, rate and spend limits, DLP, guardrails, dynamic routes
 │   ├── bulk_redirects/                # own state: URL redirect lists and execution ruleset
 │   ├── device_posture/                # own state: device posture checks, MDM and EDR integrations
 │   ├── dns/                           # own state: per-zone DNS records
@@ -29,6 +30,7 @@ Everything you edit lives here. The modules under [../modules/](../modules/) sta
     ├── account_a/
     │   ├── account.tfvars             # account id       -> every layer
     │   ├── account_governance.tfvars  # dashboard access -> account_governance
+    │   ├── ai_gateway.tfvars          # LLM proxies      -> ai_gateway
     │   ├── bulk_redirects.tfvars      # URL redirects    -> bulk_redirects
     │   ├── device_posture.tfvars      # posture checks   -> device_posture
     │   ├── dns.tfvars                 # DNS records      -> dns
@@ -72,6 +74,7 @@ Tier 2: Foundational Zones & Account Services
 ├── gateway                            (account-scoped SWG policies, TLS decryption settings, root CA)
 ├── lists                              (account-scoped IP, ASN, and hostname lists; required before WAF)
 ├── turnstile                          (account-scoped widgets; attached to no zone, so nothing waits on it)
+├── ai_gateway                         (account-scoped AI gateways and routes; reached by URL, attached to no zone)
 └── wan                                (account-scoped Magic WAN tunnels and static routes)
 
 Tier 3: Zone-Dependent & Consumer Layers
@@ -90,7 +93,7 @@ Tier 3: Zone-Dependent & Consumer Layers
 
 Tier membership is derived directly from the Terraform source code - calling the `zone_base` module means Tier 2, resolving a zone with `data "cloudflare_zone"` means Tier 3 - except where the source cannot express the dependency at all. Those two layers declare their own tier in a `tier.tf` holding `locals { apply_tier = <n> }`, which `tf-matrix.sh` reads in preference to the derivation:
 - **Tier 1 (`account_governance`):** Account-wide permissions and resource-group scopes. Every downstream token is evaluated against what this layer applies, so it runs on its own first. Declared in `tier.tf`, because the dependency is on Cloudflare's authorisation decision rather than on any Terraform attribute.
-- **Tier 2 (`zones`, `bulk_redirects`, `device_posture`, `gateway`, `lists`, `turnstile`, `wan`):** `zones` creates the zone containers at Cloudflare. The remaining layers touch no zones, so nothing waits on them. `lists` is deliberately placed in Tier 2 so that named lists exist before `waf` references them, and `device_posture` so that a posture rule exists before a `zerotrust` Access policy requires it.
+- **Tier 2 (`zones`, `ai_gateway`, `bulk_redirects`, `device_posture`, `gateway`, `lists`, `turnstile`, `wan`):** `zones` creates the zone containers at Cloudflare. The remaining layers touch no zones, so nothing waits on them. `lists` is deliberately placed in Tier 2 so that named lists exist before `waf` references them, and `device_posture` so that a posture rule exists before a `zerotrust` Access policy requires it.
 - **Tier 3 (`dns`, `load_balancing`, `logpush`, `origin_pulls`, `pages`, `r2`, `rules`, `tunnels`, `waf`, `workers`, `zerotrust`):** These layers resolve zones dynamically via `data "cloudflare_zone"`, which fails at plan time until Tier 2 has created the zone. `tunnels` resolves one for the proxied CNAME behind each public hostname, `pages` one for the CNAME behind each custom domain, and `logpush` one for each zone-scoped job. `origin_pulls` resolves one per zone it configures, and belongs behind `zones` for a second reason: the zone's SSL mode has to be `full` or `strict` before authenticating to the origin means anything. `zerotrust` is included here by declaration in its own `tier.tf`, because Access applications are addressed by hostname and require the corresponding zone and DNS record to exist, yet the layer never reads a zone for the derivation to find.
 
 ## Why split this way
@@ -111,7 +114,7 @@ This design requires the Cloudflare API to be accessible at plan time for consum
 
 `account_governance` queries the API to resolve role, permission group, and resource group names to IDs. `zerotrust` queries the account's existing Zero Trust organisation to adopt the configured team name. `gateway` dynamically resolves Cloudflare's content categories, security categories, and application catalogues so that configuration files reference human-readable names like `"Microsoft 365"` rather than arbitrary IDs like `606`.
 
-`wan`, `bulk_redirects`, `lists`, `turnstile`, and `device_posture` are completely account-scoped and contain no zone data sources.
+`wan`, `bulk_redirects`, `lists`, `turnstile`, `ai_gateway`, and `device_posture` are completely account-scoped and contain no zone data sources.
 
 ## Config precedence
 
@@ -160,6 +163,7 @@ The pipeline maps variable files to layers dynamically. The table below lists th
 | Layer                | Required `-var-file` Arguments                                        | Sensitive Environment Variables                                                                                               |
 | ----------------------| -----------------------------------------------------------------------| -------------------------------------------------------------------------------------------------------------------------------|
 | `account_governance` | `account.tfvars`, `account_governance.tfvars`                         | None                                                                                                                          |
+| `ai_gateway`         | `account.tfvars`, `ai_gateway.tfvars`                                 | None (BYOK provider keys live in Secrets Store and are added outside Terraform)                                               |
 | `bulk_redirects`     | `account.tfvars`, `zones.tfvars`, `bulk_redirects.tfvars`             | None                                                                                                                          |
 | `device_posture`     | `account.tfvars`, `device_posture.tfvars`                             | `TF_VAR_device_posture_integration_secrets` (from the `<account>-plan` environment)                                           |
 | `dns`                | `account.tfvars`, `zones.tfvars`, `dns.tfvars`                        | None                                                                                                                          |
@@ -1321,6 +1325,75 @@ A project name is unique per account, so applying against a project created in t
 
 ---
 
+## AI Gateway
+
+The `ai_gateway` layer manages Cloudflare AI Gateway through [`modules/ai_gateway`](../modules/ai_gateway/), once per gateway. A gateway is a proxy between an application and its AI providers: it logs, caches, rate limits and applies DLP, guardrails and spend limits to every request sent through it, and its dynamic routes choose a model per request. It is account-scoped and attached to no zone - a client reaches it by URL - so the layer reads nothing and nothing reads it.
+
+```hcl
+# accounts/account_a/ai_gateway.tfvars
+ai_gateways = {
+  support_assistant = {
+    gateway_id = "support-assistant"
+    cache      = { ttl = 300 }
+    rate_limit = { limit = 600, interval = 60, technique = "sliding" }
+    guardrails = { prompt = { prompt_injection = "BLOCK", hate = "FLAG" } }
+    routes = {
+      support-default = {
+        elements = {
+          start   = { type = "start", outputs = { next = "primary" } }
+          primary = { type = "model", provider = "openai", model = "gpt-5-mini", retries = 1, timeout = 30000, outputs = { success = "end" } }
+          end     = { type = "end" }
+        }
+      }
+    }
+  }
+}
+```
+
+### The endpoint is the handover, and Terraform cannot complete it
+
+A gateway does nothing until an application's base URL points at it. `ai_gateway_endpoints` gives both forms: `base`, which takes the provider's path segment and its own API path (`<base>/openai/chat/completions`), and `openai_compat`, the OpenAI SDK base URL, where the model is `<provider>/<model>` or `dynamic/<route>`. Hand them to whoever owns the application.
+
+Every gateway is authenticated by default: requests must carry `cf-aig-authorization: Bearer <token>`, with a Cloudflare API token holding `AI Gateway Run`. This layer does not create that token - it is the application's credential - and Cloudflare cannot scope one to a single gateway, so any Run token can use every gateway on the account, BYOK keys included. `authentication = false` fails the plan unless `allow_unauthenticated_gateways` is set: the account ID and gateway ID in the URL are not secrets, so an unauthenticated gateway serves anyone who guesses the second. Routes, BYOK and Zero Data Retention need authentication on regardless, and the plan says so.
+
+### Logs are prompts
+
+`collect_logs` is on by default, as it is at Cloudflare, and a log is the full prompt and response of every request, kept with no time limit until `log_storage.max_logs` rotates it. Any token with `AI Gateway Read` can read them - including the shared `<account>-plan` token, which carries every Read group - and this layer's apply token can read and delete them. Cloudflare has no grant that reads a gateway's settings without its logs. For a gateway in front of anything sensitive, set `collect_logs = false`, or keep the data out with `dlp_policies`. `zero_data_retention` is not a logging switch: it only sends Unified Billing traffic to OpenAI and Anthropic endpoints that do not retain it.
+
+### A new gateway may need a second apply
+
+Cloudflare's create call does not take `dlp_policies`, `guardrails` or `spend_limits`; only its update call does. Provider 5.23 sends them on create regardless. If the API drops them, the gateway comes up without them - DLP and guardrails still recorded as applied, spend limits possibly failing the apply as an inconsistent result - and the next plan's refresh shows them as a change. The apply after that is the one that turns them on. Plan again after creating a gateway that declares any of the three, and apply what it shows, before pointing a client at it.
+
+### Dynamic routes
+
+A route is a graph of elements - `start`, `conditional`, `rate`, `model`, `end` - declared as a map keyed by element ID, each element's `outputs` naming the element that runs next. The plan checks the graph: one start, at least one end, no dangling or self-referencing outputs, nothing pointing back at the start, nothing unreachable. Percentage splits are not supported; the provider cannot represent their outputs.
+
+The API changes a route's elements by creating a new version and deploying it, and provider 5.23 only ever updates a route's name. So **any element change replaces the route**: it is deleted and recreated under the same name. Clients call it by name, as `dynamic/<name>`, so nothing needs redeploying, but requests to it fail for the seconds in between. Cloudflare's docs expect the providers a route calls to have BYOK keys stored on the gateway; adding those is outside Terraform.
+
+### Adopting gateways that already exist
+
+A gateway ID is unique per account, so applying against one created in the dashboard fails rather than duplicating it. `layers/ai_gateway/imports.tf` carries the API queries and commented `import` blocks for gateways (`<account_id>/<gateway_id>`) and routes (`<account_id>/<gateway_id>/<route_id>`). Read it first: an adopted gateway that already uses BYOK must set `secrets_store_id` or the apply unlinks its store, spend limit rules must keep their existing IDs as their keys, a route must be imported only with its elements copied exactly, and a gateway switched to Unified Billing in the dashboard is switched back by the first apply that changes it. `default` is the gateway Cloudflare creates on its own, and on most accounts it has to be imported rather than declared.
+
+### Governing defaults
+
+| Setting | Default | Effect |
+|---|---|---|
+| `default_authentication` | `true` | Callers need a token with `AI Gateway Run`. |
+| `default_collect_logs` | `true` | Cloudflare's default, and what analytics and Logpush are built on. Logs are full prompts and responses. |
+| `default_log_storage` | `10000000`, `DELETE_OLDEST` | What the API gives a gateway that states neither. `STOP_INSERTING` stops recording, and Logpush exporting, at the cap. Workers Free holds 100000 logs per account. |
+| `max_ai_gateways` | `20` | Cloudflare's Workers Paid ceiling, enforced before the API sees it (10 on Workers Free). |
+| `allow_unauthenticated_gateways` | `false` | A gateway with `authentication = false` fails the plan. |
+
+### Known gaps
+
+- Nothing here has been applied to a live account. Every guardrail has been fired and every resource planned offline against provider 5.23.0; how the API treats each field on the first real apply has not been seen.
+- `otel` and `stripe` are not managed. OTel exports every prompt and completion to a third-party collector and needs a credential; Stripe is undocumented beyond its API schema.
+- BYOK provider keys and provider configs have no Terraform resource (cloudflare/terraform-provider-cloudflare#7332), and the Logpush job for the AI Gateway dataset has no dataset value in the provider. Both are dashboard steps.
+- `workers_ai_billing_mode` can only be `postpaid` on provider 5.23 (#7331), and `log_classification` and `byok_only` do not exist in it yet. All need a provider bump.
+- The unit of a spend limit's `window` is not documented by Cloudflare. Verify it against a rule created in the dashboard before relying on one.
+
+---
+
 ## Adding a new account
 
 In enterprise and MSP environments, onboarding an account or tenant should follow isolated per-customer repository patterns rather than co-locating multiple clients in a single repository.
@@ -1350,9 +1423,10 @@ The Release Manager automates:
 Within your customer's dedicated deployment repository, you can manage multiple administrative accounts (for example: `production`, `staging`, `development`):
 
 1. Create a directory `accounts/<account_name>/`.
-2. Copy all twenty-two template `.tfvars` files from `accounts/account_a/`:
+2. Copy all twenty-three template `.tfvars` files from `accounts/account_a/`:
    - `account.tfvars`
    - `account_governance.tfvars`
+   - `ai_gateway.tfvars`
    - `bulk_redirects.tfvars`
    - `device_posture.tfvars`
    - `dns.tfvars`

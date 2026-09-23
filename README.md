@@ -69,6 +69,7 @@ Platform Layer (Central Governance)
 ├── gateway              (SWG egress filtering: DNS, network, and HTTP)
 ├── logpush              (Log streams: audit, Gateway and zone logs to a SIEM or R2 - Enterprise)
 ├── turnstile            (Turnstile widgets: the CAPTCHA replacement embedded in a form)
+├── ai_gateway           (AI Gateway: LLM traffic proxy - logging, caching, rate and spend limits, DLP, guardrails, dynamic routes)
 └── wan                  (Magic WAN tunnels, interconnects, static routes)
 
 Application Layer (Zone & Workload Scope)
