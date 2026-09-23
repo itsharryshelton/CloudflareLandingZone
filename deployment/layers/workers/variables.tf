@@ -243,9 +243,9 @@ variable "queues" {
       - `dead_letter_queue`     - a queue owned elsewhere, named directly.
       - `settings`              - batch_size, max_concurrency, max_retries,
                                   max_wait_time_ms, retry_delay and
-                                  visibility_timeout_ms. See the module's
-                                  `consumer` description for what each one does
-                                  and which consumer type it applies to.
+                                  visibility_timeout_ms. See the queue_consumer
+                                  module's `settings` description for what each
+                                  one does and which consumer type it applies to.
 
     WHAT A QUEUE IS FOR
     A producer writes and returns; the consumer runs later, retries on failure,

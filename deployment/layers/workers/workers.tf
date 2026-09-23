@@ -11,9 +11,12 @@
 # stays open by being written this way. A queue must exist before a Worker can be
 # given a binding that writes to it, and the Worker must exist before it can be
 # named as that queue's consumer - so the chain is queue, Worker, consumer.
-# Terraform derives it from the references alone: module.queues takes only
-# variable-derived values, module.worker_scripts reads its queue names back out,
-# and the consumer is passed the deployed Worker's name.
+#
+# That is three module calls, not two. `module.queues[binding.queue_key]` has a
+# key only known at evaluation, so Terraform makes it depend on everything inside
+# module.queues, not just queue_name. A consumer attached inside module.queues
+# would therefore make every Worker wait on a consumer that is waiting on a
+# Worker - a cycle, reported at validate.
 #
 # Downstream deployments pin an immutable tag instead of the local path - review root readme.md for more info:
 #   source = "git::https://github.com/yourorg/CloudflareLandingZone//modules/workers_kv_namespace?ref=v1.0.0"
@@ -53,8 +56,7 @@ module "queues" {
   queue_name = each.value.name
   settings   = each.value.settings
 
-  # The consumer is resolved separately from the queue itself - see locals.tf
-  consumer = try(local.queue_consumers[each.key], null)
+  # No consumer here: it is attached by module.queue_consumers, below.
 }
 
 module "worker_scripts" {
@@ -91,4 +93,24 @@ module "worker_scripts" {
   custom_domains = each.value.custom_domains
 
   cron_schedules = each.value.cron_schedules
+}
+
+module "queue_consumers" {
+  source = "../../../modules/queue_consumer"
+
+  for_each = local.queue_consumers
+
+  account_id = var.cloudflare_account_id
+
+  # Read from the queue module rather than the variable, so the queue is created
+  # before anything is attached to it.
+  queue_id   = module.queues[each.key].queue_id
+  queue_name = module.queues[each.key].queue_name
+
+  # worker_key -> deployed Worker name and dead_letter_queue_key -> queue name
+  # are resolved in locals.tf.
+  type              = each.value.type
+  script_name       = each.value.script_name
+  dead_letter_queue = each.value.dead_letter_queue
+  settings          = each.value.settings
 }

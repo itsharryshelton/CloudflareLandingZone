@@ -1,6 +1,6 @@
 # Applies the platform baseline, resolves logical keys to real IDs, loads any KV
 # data files, and derives the preflight assertions, so that workers.tf reads as
-# four plain module calls.
+# five plain module calls.
 
 locals {
   # Only zones a route or a custom domain actually targets are looked up, so a
@@ -78,14 +78,14 @@ locals {
 
   # Queues
   # Split in two, and the split is load-bearing rather than tidy. `queues` is
-  # derived from variables alone, so the queue itself can be created without
-  # waiting on anything; `queue_consumers` resolves logical keys through module
-  # outputs, which is what orders the consumer behind the Worker that serves it.
+  # derived from variables alone and feeds module.queues, so the queue itself can
+  # be created without waiting on anything; `queue_consumers` resolves logical
+  # keys through module outputs and feeds module.queue_consumers, which is what
+  # orders the consumer behind the Worker that serves it.
   #
-  # Putting them in one local would close a loop: a producer's queue binding
-  # reads module.queues, so a value feeding module.queues that also read
-  # module.worker_scripts would make the queue wait on a Worker that is waiting
-  # on the queue.
+  # Anything feeding module.queues must never read module.worker_scripts or
+  # module.queues: a producer's queue binding reads module.queues, and Terraform
+  # treats that as waiting on the whole module call - see workers.tf.
   queues = {
     for key, queue in var.queues : key => {
       name = queue.name

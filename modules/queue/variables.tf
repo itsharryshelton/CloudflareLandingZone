@@ -91,7 +91,9 @@ variable "consumer" {
   default     = null
   description = <<-EOT
     What reads the queue. Null declares a queue with no consumer at all, which
-    accepts messages and delivers none of them until retention expires.
+    accepts messages and delivers none of them until retention expires - or one
+    whose consumer is attached by the queue_consumer module, which is required
+    wherever the consuming Worker is deployed by the same layer (see main.tf).
 
     A queue has exactly one consumer. One Worker can consume several queues, and
     any number of Workers can produce to one, but two consumers on a single queue
@@ -104,9 +106,8 @@ variable "consumer" {
                            batches over HTTP on its own schedule.
       - script_name      : the consuming Worker, for type "worker". Cloudflare
                            rejects a consumer naming a Worker that does not exist
-                           yet, so the calling layer passes the name of the
-                           deployed Worker rather than the string from a variable
-                           file - that reference is what orders the two.
+                           yet, so it must already be deployed - by another
+                           layer or pipeline.
       - dead_letter_queue: name of another queue that receives a message once it
                            has failed max_retries times. Without one, a message
                            that keeps failing is dropped and nothing records it.

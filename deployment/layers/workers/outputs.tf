@@ -46,8 +46,8 @@ output "queues" {
     for key, queue in module.queues : key => {
       queue_id              = queue.queue_id
       queue_name            = queue.queue_name
-      consumer_script_name  = queue.consumer_script_name
-      dead_letter_queue     = queue.dead_letter_queue
+      consumer_script_name  = try(module.queue_consumers[key].script_name, null)
+      dead_letter_queue     = try(module.queue_consumers[key].dead_letter_queue, null)
       delivery_paused       = queue.delivery_paused
       producers_total_count = queue.producers_total_count
       consumers_total_count = queue.consumers_total_count

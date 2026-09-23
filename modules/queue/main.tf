@@ -8,10 +8,13 @@
 #
 # The consumer is a separate resource from the queue for the same reason it is a
 # separate API call: the queue has to exist before a consumer can be attached to
-# it, and the consuming Worker has to exist before it can be named. That gives
-# one ordering - queue, then Worker, then consumer - and keeping the two
-# resources apart is what lets Terraform derive it from the references rather
-# than from a depends_on somebody has to remember.
+# it, and the consuming Worker has to exist before it can be named.
+#
+# Only use `consumer` here where the consuming Worker is deployed outside the
+# calling layer. A layer that also deploys the Worker, and binds any Worker in
+# the same module call to one of these queues, must use the queue_consumer
+# module instead: Terraform orders a for_each module call as a whole, so a
+# consumer in here waiting on the Worker makes the Worker wait on itself.
 
 resource "cloudflare_queue" "this" {
   account_id = var.account_id
