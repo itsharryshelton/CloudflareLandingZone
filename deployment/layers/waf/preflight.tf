@@ -12,7 +12,12 @@ resource "terraform_data" "preflight" {
 
     precondition {
       condition     = length(local.waf_unknown_baseline_rules) == 0
-      error_message = "Unknown baseline rule name in ${join("; ", local.waf_unknown_baseline_rules)}. Available custom rules: ${join(", ", keys(local.waf_baseline_custom_rules))}. Available rate limits: ${join(", ", keys(local.waf_baseline_rate_limits))}. Available managed rulesets: ${join(", ", keys(local.waf_baseline_managed_rulesets))}."
+      error_message = "Unknown baseline rule name in ${join("; ", local.waf_unknown_baseline_rules)}. Available custom rules: ${join(", ", keys(local.waf_baseline_custom_rules))}. Available rate limits: ${join(", ", keys(local.waf_baseline_rate_limits))}. Available managed rulesets: ${join(", ", keys(local.waf_baseline_managed_rulesets))}. Available managed exceptions: ${join(", ", keys(local.waf_baseline_managed_exceptions))}."
+    }
+
+    precondition {
+      condition     = length(local.waf_idle_managed_exceptions) == 0
+      error_message = "A baseline managed exception has nothing to skip: ${join("; ", local.waf_idle_managed_exceptions)}. An exception only skips managed rulesets its own policy executes, and this policy executes none of the ones it targets - or, for html_submission without owasp_core, waf_html_submission_skip_rule_ids is empty. Add the managed ruleset to the policy or drop the exception."
     }
 
     precondition {

@@ -22,3 +22,8 @@ output "managed_rulesets_deployed" {
   value       = { for rule in local.managed_ruleset_rules : rule.description => rule.action_parameters.id }
   description = "The managed rulesets this module executes, description => Cloudflare ruleset ID. The quickest check that a zone is running the rulesets you think it is."
 }
+
+output "managed_exceptions" {
+  value       = { for rule in local.managed_exception_rules : rule.description => rule.expression }
+  description = "The exceptions placed ahead of the managed rulesets, description => expression. Empty when managed_exceptions is unset. Shows exactly which traffic a zone has exempted from Cloudflare's own rules."
+}

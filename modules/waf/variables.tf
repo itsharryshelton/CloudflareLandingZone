@@ -159,19 +159,22 @@ variable "custom_block_rules" {
     as narrowly as the case allows: pin the path, the method, and where possible
     the source, rather than skipping a whole hostname.
 
-    What to skip, broadest first:
+    What to skip:
       - `ruleset`  : only "current" is valid. Stops evaluating THIS ruleset, so
                      the tenant's own later rules do not run. Does not affect
                      managed rulesets.
       - `phases`   : whole phases. Accepted here: http_ratelimit,
                      http_request_firewall_managed, http_request_sbfm. Skipping
-                     http_request_firewall_managed is the usual fix for a managed
-                     rule that false-positives.
-      - `rulesets` : specific managed rulesets by ID. Narrower than skipping the
-                     whole managed phase, and preferable when you know which
-                     ruleset is firing.
+                     http_request_firewall_managed turns off EVERY managed
+                     ruleset for the request - the blunt fix for a managed rule
+                     that false-positives.
       - `products` : legacy, non-ruleset products. One or more of: waf,
                      rateLimit, uaBlock, bic, hot, securityLevel, zoneLockdown.
+      - `rulesets` : rejected. Cloudflare only accepts it in the phase that
+                     executes the rulesets being skipped. A managed ruleset or
+                     rule that false-positives is turned off with
+                     var.managed_exceptions, which keeps the rest of the
+                     managed rules running.
 
     Rules are evaluated in list order, and their resolved descriptions must be
     unique. A skip only affects what is evaluated after it, so its position in
@@ -205,12 +208,11 @@ variable "custom_block_rules" {
       for r in var.custom_block_rules :
       r.skip == null || anytrue([
         try(r.skip.ruleset, null) != null,
-        try(r.skip.rulesets, null) != null,
         try(r.skip.phases, null) != null,
         try(r.skip.products, null) != null,
       ])
     ])
-    error_message = "A skip rule must say what to skip: set at least one of skip.ruleset, skip.rulesets, skip.phases or skip.products."
+    error_message = "A skip rule must say what to skip: set at least one of skip.ruleset, skip.phases or skip.products."
   }
 
   validation {
@@ -218,7 +220,16 @@ variable "custom_block_rules" {
       for r in var.custom_block_rules :
       try(r.skip.ruleset, null) == null || try(r.skip.ruleset, "") == "current"
     ])
-    error_message = "skip.ruleset accepts only \"current\". To skip a specific managed ruleset, name its ID in skip.rulesets."
+    error_message = "skip.ruleset accepts only \"current\". To skip a specific managed ruleset, use managed_exceptions."
+  }
+
+  # Kept in the type so dropping it is not a breaking change; it would only ever
+  # fail at apply. Remove at the next major.
+  validation {
+    condition = alltrue([
+      for r in var.custom_block_rules : try(r.skip.rulesets, null) == null
+    ])
+    error_message = "skip.rulesets is not accepted in http_request_firewall_custom: Cloudflare only lets a skip name specific rulesets in the phase that executes them. Use managed_exceptions to skip specific managed rulesets or rules, or skip.phases = [\"http_request_firewall_managed\"] to skip every managed ruleset for the request."
   }
 
   validation {
@@ -421,9 +432,8 @@ variable "managed_rulesets" {
                               25 are Cloudflare's low, medium and high
                               sensitivities - a LOWER number blocks more traffic.
 
-    Turning a managed rule off for one endpoint is not done here: write a skip
-    rule in `custom_block_rules` naming the ruleset in `skip.rulesets`. That phase
-    is evaluated first, so the exception applies before these rules ever run.
+    Turning a managed rule off for one endpoint is not done here: that is an
+    exception, in var.managed_exceptions.
   EOT
 
   validation {
@@ -456,7 +466,7 @@ variable "managed_rulesets" {
         action == null || contains(["block", "challenge", "managed_challenge", "js_challenge", "log"], coalesce(action, "log"))
       ]
     ]))
-    error_message = "Managed ruleset override actions must be one of: block, challenge, managed_challenge, js_challenge, log. \"skip\" is not one of them - an exception to a managed ruleset is a skip rule in custom_block_rules, which is evaluated in an earlier phase."
+    error_message = "Managed ruleset override actions must be one of: block, challenge, managed_challenge, js_challenge, log. \"skip\" is not one of them - an exception to a managed ruleset belongs in managed_exceptions."
   }
 
   validation {
@@ -499,5 +509,118 @@ variable "managed_rulesets" {
       ]
     ]))
     error_message = "managed_rulesets[*].overrides.categories[*].category must be a non-empty Cloudflare rule tag (e.g. \"paranoia-level-2\", \"wordpress\")."
+  }
+}
+
+variable "managed_exceptions" {
+  type = list(object({
+    name        = string
+    expression  = string
+    description = optional(string)
+    enabled     = optional(bool, true)
+    logging     = optional(bool)
+    skip = object({
+      ruleset  = optional(string)
+      rulesets = optional(list(string))
+      rules    = optional(map(list(string)))
+    })
+  }))
+  default     = []
+  description = <<-EOT
+    WAF exceptions: skip rules placed at the top of the
+    http_request_firewall_managed entry point, ahead of every managed_rulesets
+    execute rule. This is how a managed rule that false-positives on one
+    endpoint is turned off for that endpoint and nowhere else.
+
+    It has to be this phase. A skip rule in custom_block_rules can only skip the
+    managed phase as a whole; Cloudflare accepts a skip naming individual
+    rulesets or rules only in the phase that executes them, and it only affects
+    the execute rules listed after it - which is why these always go first.
+
+    - `name`        - Label, used as the description when that is unset.
+    - `expression`  - Which requests the exception covers. Pin the host, the
+                      method and the path rather than exempting a whole
+                      hostname: everything this matches loses the protection
+                      being skipped.
+    - `description` - (Optional) Shown in the dashboard and audit logs. Must be
+                      unique across this entry point, execute rules included.
+    - `enabled`     - (Optional) Deploy the exception but leave it inactive.
+    - `logging`     - (Optional) Log requests the exception matches. Unset
+                      leaves Cloudflare's default.
+    - `skip`        - What to skip. Exactly one of:
+        - `ruleset`  : "current" - every managed ruleset executed after this.
+        - `rulesets` : managed ruleset IDs, each skipped whole.
+        - `rules`    : managed ruleset ID => IDs of rules in that ruleset. The
+                       narrowest option and the one to prefer, because the rest
+                       of the ruleset keeps protecting the endpoint. Rule IDs
+                       come from the Security Events log.
+
+    Every ruleset an exception names must also be in managed_rulesets. A zone
+    exception cannot reach anything this entry point does not execute - account
+    level managed rulesets included - so one naming anything else would match
+    nothing while reading as if it did.
+  EOT
+
+  validation {
+    condition = alltrue([
+      for e in var.managed_exceptions : trimspace(e.name) != "" && trimspace(e.expression) != ""
+    ])
+    error_message = "Each managed_exceptions entry must set a non-empty `name` and `expression`."
+  }
+
+  validation {
+    condition     = length(var.managed_exceptions) == 0 || length(var.managed_rulesets) > 0
+    error_message = "managed_exceptions is set but managed_rulesets is empty. An exception only skips managed rulesets this module executes, so with none it has nothing to act on."
+  }
+
+  # Cloudflare treats the three as alternative forms of the skip, not as options
+  # that combine.
+  validation {
+    condition = alltrue([
+      for e in var.managed_exceptions :
+      length([for target in [e.skip.ruleset, e.skip.rulesets, e.skip.rules] : target if target != null]) == 1
+    ])
+    error_message = "Each managed_exceptions entry must set exactly one of skip.ruleset, skip.rulesets or skip.rules. To skip whole rulesets and individual rules for the same traffic, write two exceptions."
+  }
+
+  validation {
+    condition = alltrue([
+      for e in var.managed_exceptions : e.skip.ruleset == null || e.skip.ruleset == "current"
+    ])
+    error_message = "managed_exceptions[*].skip.ruleset accepts only \"current\", which skips every managed ruleset executed after the exception."
+  }
+
+  validation {
+    condition = alltrue(flatten([
+      for e in var.managed_exceptions : concat(
+        [e.skip.rulesets == null || length(coalesce(e.skip.rulesets, [])) > 0],
+        [e.skip.rules == null || length(coalesce(e.skip.rules, {})) > 0],
+        [for rule_ids in coalesce(e.skip.rules, {}) : length(rule_ids) > 0],
+      )
+    ]))
+    error_message = "managed_exceptions[*].skip.rulesets, skip.rules and every rule list inside skip.rules must be non-empty. Cloudflare rejects an empty skip target rather than treating it as matching nothing."
+  }
+
+  validation {
+    condition = alltrue(flatten([
+      for e in var.managed_exceptions : [
+        for id in concat(
+          coalesce(e.skip.rulesets, []),
+          keys(coalesce(e.skip.rules, {})),
+          flatten(values(coalesce(e.skip.rules, {}))),
+        ) : can(regex("^[0-9a-f]{32}$", id))
+      ]
+    ]))
+    error_message = "managed_exceptions ruleset and rule IDs must be 32-character hexadecimal Cloudflare identifiers."
+  }
+
+  validation {
+    condition = alltrue(flatten([
+      for e in var.managed_exceptions : [
+        for id in concat(coalesce(e.skip.rulesets, []), keys(coalesce(e.skip.rules, {}))) :
+        contains([for ruleset in var.managed_rulesets : ruleset.id], id)
+      ]
+    ]))
+    error_message = "A managed_exceptions entry names a ruleset that is not in managed_rulesets. A zone exception only skips rulesets this entry point executes, so it would match nothing."
   }
 }

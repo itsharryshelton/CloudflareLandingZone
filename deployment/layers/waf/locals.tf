@@ -46,7 +46,48 @@ locals {
         [for name in policy.baseline_managed_rulesets : local.waf_baseline_managed_rulesets[name]],
         policy.managed_rulesets,
       )
+      managed_exceptions = concat(
+        [
+          for name, scope in policy.baseline_managed_exceptions : {
+            name = local.waf_baseline_managed_exceptions[name].name
+            expression = format(
+              "http.host in {%s} and (%s)",
+              join(" ", [for host in scope.hostnames : "\"${host}\""]),
+              local.waf_baseline_managed_exceptions[name].expression,
+            )
+            # Every use of an exception switches protection off, so it is logged
+            # rather than left to Cloudflare's default.
+            logging = true
+            skip    = { rules = local.waf_baseline_exception_targets[key][name] }
+          }
+          # Held back when there is nothing to skip, so the preflight reports why
+          # instead of the module's generic empty-skip validation.
+          if length(local.waf_baseline_exception_targets[key][name]) > 0
+        ],
+        policy.managed_exceptions,
+      )
     })
+  }
+
+  # Policy key => IDs of the managed rulesets it executes
+  waf_policy_managed_ruleset_ids = {
+    for key, policy in var.waf_policies : key => concat(
+      [for name in policy.baseline_managed_rulesets : local.waf_baseline_managed_rulesets[name].id],
+      [for ruleset in policy.managed_rulesets : ruleset.id],
+    )
+  }
+
+  # Policy key => baseline exception name => what it skips, narrowed to the
+  # rulesets that policy executes. The module rejects an exception naming any
+  # other, since it could never match.
+  waf_baseline_exception_targets = {
+    for key, policy in var.waf_policies : key => {
+      for name in keys(policy.baseline_managed_exceptions) : name => {
+        for ruleset_id, rule_ids in local.waf_baseline_managed_exceptions[name].rules : ruleset_id => rule_ids
+        if length(rule_ids) > 0 && contains(local.waf_policy_managed_ruleset_ids[key], ruleset_id)
+      }
+      if contains(keys(local.waf_baseline_managed_exceptions), name)
+    }
   }
 
   # Same ranking as ../../../modules/zone_rules/locals.tf. Duplicated rather than
@@ -94,7 +135,19 @@ locals {
         for name in policy.baseline_managed_rulesets : "${key}.baseline_managed_rulesets[\"${name}\"]"
         if !contains(keys(local.waf_baseline_managed_rulesets), name)
       ],
+      [
+        for name in keys(policy.baseline_managed_exceptions) : "${key}.baseline_managed_exceptions[\"${name}\"]"
+        if !contains(keys(local.waf_baseline_managed_exceptions), name)
+      ],
     )
+  ])
+
+  # A baseline exception selected on a policy that executes none of the rulesets
+  # it skips - an empty skip, which Cloudflare rejects.
+  waf_idle_managed_exceptions = flatten([
+    for key, targets in local.waf_baseline_exception_targets : [
+      for name, rules in targets : "${key} selects \"${name}\"" if length(rules) == 0
+    ]
   ])
 
   # Bot traffic asked for on a zone whose plan does not expose the verified bot
@@ -119,7 +172,7 @@ locals {
   # Baseline rules selected while the variable they depend on is empty
   waf_unsatisfied_baseline_rules = flatten([
     for key, policy in var.waf_policies : [
-      for name in policy.baseline_custom_rules :
+      for name in concat(policy.baseline_custom_rules, keys(policy.baseline_managed_exceptions)) :
       "${key} selects \"${name}\": ${local.waf_baseline_requirements[name].reason}"
       if contains(keys(local.waf_baseline_requirements), name)
       && !local.waf_baseline_requirements[name].satisfied

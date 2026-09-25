@@ -23,6 +23,10 @@ module "waf" {
   # Cloudflare's own rulesets, in http_request_firewall_managed
   managed_rulesets = each.value.managed_rulesets
 
+  # Skips placed ahead of those rulesets in the same entry point. A skip in
+  # custom_block_rules can only drop the whole managed phase.
+  managed_exceptions = each.value.managed_exceptions
+
   custom_ruleset_name = coalesce(
     each.value.custom_ruleset_name,
     "Custom rules - ${var.zones[each.value.zone_key].domain_name}",

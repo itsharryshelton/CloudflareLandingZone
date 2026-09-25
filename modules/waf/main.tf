@@ -60,12 +60,13 @@ resource "cloudflare_ruleset" "managed" {
   phase       = "http_request_firewall_managed"
   description = "Managed by Terraform (cloudflarelandingzone/modules/waf)."
 
-  rules = local.managed_ruleset_rules
+  # Exceptions, then execute rules
+  rules = local.all_managed_rules
 
   lifecycle {
     precondition {
-      condition     = length(distinct(local.managed_ruleset_labels)) == length(local.managed_ruleset_labels)
-      error_message = "Managed ruleset execute rules must be uniquely described: two entries in managed_rulesets resolve to the same description, which makes them indistinguishable in the Cloudflare dashboard and in audit logs. An entry with no description is labelled \"Execute managed ruleset <id>\"."
+      condition     = length(distinct(local.managed_rule_labels)) == length(local.managed_rule_labels)
+      error_message = "Managed rules must be uniquely described: two entries across managed_exceptions and managed_rulesets resolve to the same description, which makes them indistinguishable in the Cloudflare dashboard and in audit logs. An exception with no description is labelled by its name, and a managed ruleset with none as \"Execute managed ruleset <id>\"."
     }
   }
 }

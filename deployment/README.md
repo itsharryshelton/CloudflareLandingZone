@@ -337,7 +337,7 @@ waf_policies = {
 }
 ```
 
-The baseline catalogue is defined in `layers/waf/locals.waf.tf` and parameterised via variables: `waf_trusted_ip_ranges`, `waf_admin_paths`, `waf_blocked_countries` and `waf_ip_blocklist_name` for the custom rules, and `waf_managed_rules_action`, `waf_owasp_paranoia_level`, `waf_owasp_score_threshold` and `waf_owasp_action` for the managed rulesets. Beyond the catalogue, a policy takes the tenant's own `custom_block_rules` and `rate_limiting_rules`, and raw `managed_rulesets` IDs. An unknown baseline name fails the plan.
+The baseline catalogue is defined in `layers/waf/locals.waf.tf` and parameterised via variables: `waf_trusted_ip_ranges`, `waf_admin_paths`, `waf_blocked_countries` and `waf_ip_blocklist_name` for the custom rules, and `waf_managed_rules_action`, `waf_owasp_paranoia_level`, `waf_owasp_score_threshold` and `waf_owasp_action` for the managed rulesets, and `waf_html_submission_paths`, `waf_html_submission_methods` and `waf_html_submission_skip_rule_ids` for the managed exceptions. Beyond the catalogue, a policy takes the tenant's own `custom_block_rules`, `rate_limiting_rules` and `managed_exceptions`, and raw `managed_rulesets` IDs. An unknown baseline name fails the plan.
 
 ### Custom rules
 
@@ -369,9 +369,41 @@ All four count over a 60-second window, per client IP per data centre.
 
 `bot_traffic` sets an action - `allow`, `log`, `managed_challenge`, `js_challenge`, `challenge` or `block` - for verified bots in Cloudflare's `search`, `agent` and `training` categories, with per-category `category_overrides`. A bot that does not declare itself has no category and is unaffected. A zone below `bot_traffic_min_tier` (`pro`) fails the plan. Zone-wide Bot Fight Mode and bot management settings, `ai_bots_protection` included, belong to the `zones` layer.
 
+### Managed exceptions
+
+An exception turns off specific managed rules for narrowly scoped traffic, such as a route that accepts HTML by design, while every other managed rule keeps running. Exceptions are skip rules placed at the top of the `http_request_firewall_managed` entry point, ahead of the execute rules. A skip in `custom_block_rules` cannot do this: Cloudflare only accepts a skip naming individual rulesets or rules in the phase that executes them, so from the custom phase the only option is `skip.phases`, which drops every managed ruleset at once.
+
+```hcl
+# accounts/account_a/waf.tfvars
+waf_html_submission_paths = [
+  "/templates/new",
+  "/templates/[0-9]+",
+]
+
+waf_policies = {
+  primary = {
+    zone_key                  = "primary"
+    baseline_managed_rulesets = ["cloudflare_managed", "owasp_core"]
+    baseline_managed_exceptions = {
+      html_submission = { hostnames = ["app.example.com"] }
+    }
+  }
+}
+```
+
+| Name | Matches | Skips |
+|---|---|---|
+| `html_submission` | A `waf_html_submission_methods` request (`POST` by default) to a `waf_html_submission_paths` route on the listed `hostnames` | The OWASP anomaly verdict, and the Cloudflare Managed rules in `waf_html_submission_skip_rule_ids`. The rest of the Cloudflare Managed Ruleset, SQLi and RCE rules included, still runs. |
+
+The routes are application-specific, so `waf_html_submission_paths` has no platform default and is set per account. Each entry is a regular expression anchored at both ends, so it matches one route shape; anything in front of the route, such as a version or locale prefix, has to be part of the pattern.
+
+`hostnames` is required and should only name hosts behind Cloudflare Access: the exception relies on Access, not the WAF, to keep anonymous traffic away from these routes. An exception only skips rulesets its own policy executes, and one left with nothing to skip fails the plan. Exceptions are always logged, so they show in Security Events.
+
+`waf_html_submission_skip_rule_ids` starts empty, so out of the box the exception only skips the OWASP verdict. Add a Cloudflare Managed rule to it when Security Events shows it blocking a legitimate submission, taking the Rule ID from the event. Rule IDs are the same in every account, so the list can live in `layers/waf/defaults.auto.tfvars` or per account. Cloudflare keeps adding signatures, so expect to append to it over time. Do not widen the exception to a whole hostname.
+
 **Automatic Colocation Characteristic:** Cloudflare tracks zone-level rate limits per data centre colocation, rejecting rate limiting rules that omit `cf.colo.id` (API error 20155). The layer automatically appends `cf.colo.id` to all rate limiting rules, eliminating manual configuration errors.
 
-**Rule Evaluation Order:** the custom ruleset runs `bot_traffic` rules first, then the baseline, then the tenant's `custom_block_rules`, so a tenant rule - a skip included - cannot undo a baseline block that has already matched. Two exceptions: a `bot_traffic` `allow` is written as a skip of the rest of the custom ruleset, so matching bots are exempt from the baseline custom rules; and a tenant skip using `skip.phases` or `skip.rulesets` can skip the rate limiting and managed phases, where the baseline rate limits and managed rulesets run.
+**Rule Evaluation Order:** the custom ruleset runs `bot_traffic` rules first, then the baseline, then the tenant's `custom_block_rules`, so a tenant rule - a skip included - cannot undo a baseline block that has already matched. Two exceptions: a `bot_traffic` `allow` is written as a skip of the rest of the custom ruleset, so matching bots are exempt from the baseline custom rules; and a tenant skip using `skip.phases` can skip the rate limiting and managed phases, where the baseline rate limits and managed rulesets run. Managed exceptions sit in the managed phase itself, ahead of the managed rulesets.
 
 **Validation Guardrails:** A baseline rule selected without its input fails the plan: `waf_trusted_ip_ranges`, `waf_blocked_countries` or `waf_ip_blocklist_name`, per the table above. For example, enabling `block_admin_from_untrusted` with an empty `waf_trusted_ip_ranges` would generate a rule blocking all admin access globally, including internal operations. `waf_admin_paths` is not checked, so keep it non-empty: empty, the admin rules produce an expression Cloudflare rejects at apply.
 
@@ -382,6 +414,9 @@ All four count over a 60-second window, per client IP per data centre.
 | `waf_trusted_ip_ranges` | `[]` | Must be set before selecting any rule that reads it. |
 | `waf_blocked_countries` | `[]` | Must be set before selecting `geoblock_countries`. |
 | `waf_ip_blocklist_name` | `null` | Must be set before selecting `block_listed_ips`. |
+| `waf_html_submission_paths` | `[]` | Must be set before selecting `html_submission`. |
+| `waf_html_submission_methods` | `["POST"]` | Methods `html_submission` covers. Add `PUT` or `PATCH` for routes that take them. |
+| `waf_html_submission_skip_rule_ids` | `[]` | Cloudflare Managed rules `html_submission` skips. Append from Security Events. |
 | `default_zone_tier` | `"free"` | The plan assumed for a zone with no `zone_tier` in `zones.tfvars`, for the two tier gates below. |
 | `managed_rules_min_tier` | `"enterprise"` | Minimum zone plan for managed rulesets. |
 | `bot_traffic_min_tier` | `"pro"` | Minimum zone plan for `bot_traffic`. |

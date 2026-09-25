@@ -131,6 +131,36 @@ locals {
   # -------------------------------------------------------------------------
   # http_request_firewall_managed
   # -------------------------------------------------------------------------
+  # Exceptions and execute rules share this entry point's `rules` list, so both
+  # carry every action parameter either one uses: elements with different key
+  # sets cannot be typed as one list.
+  managed_parameter_shape = {
+    id        = null
+    version   = null
+    overrides = null
+    ruleset   = null
+    rulesets  = null
+    rules     = null
+  }
+
+  # A skip only affects the execute rules listed after it, so these go first.
+  managed_exception_rules = [
+    for exception in var.managed_exceptions : {
+      action      = "skip"
+      expression  = exception.expression
+      description = coalesce(exception.description, exception.name)
+      enabled     = exception.enabled
+
+      action_parameters = merge(local.managed_parameter_shape, {
+        ruleset  = exception.skip.ruleset
+        rulesets = exception.skip.rulesets
+        rules    = exception.skip.rules
+      })
+
+      logging = exception.logging == null ? null : { enabled = exception.logging }
+    }
+  ]
+
   # Cloudflare's own rulesets are executed rather than declared
   managed_ruleset_overrides = [
     for ruleset in var.managed_rulesets :
@@ -149,8 +179,9 @@ locals {
       expression  = ruleset.expression
       description = coalesce(ruleset.description, "Execute managed ruleset ${ruleset.id}")
       enabled     = ruleset.enabled
+      logging     = null
 
-      action_parameters = {
+      action_parameters = merge(local.managed_parameter_shape, {
         id      = ruleset.id
         version = ruleset.version
 
@@ -178,11 +209,13 @@ locals {
             }
           ]
         }
-      }
+      })
     }
   ]
 
+  all_managed_rules = concat(local.managed_exception_rules, local.managed_ruleset_rules)
+
   custom_rule_labels     = [for rule in local.all_custom_rules : rule.description]
   rate_limit_rule_labels = [for rule in var.rate_limiting_rules : rule.name]
-  managed_ruleset_labels = [for rule in local.managed_ruleset_rules : rule.description]
+  managed_rule_labels    = [for rule in local.all_managed_rules : rule.description]
 }
