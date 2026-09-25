@@ -16,6 +16,13 @@ waf_trusted_ip_ranges = [
 
 waf_blocked_countries = ["BY", "CU", "IR", "KP", "RU", "SY"]
 
+# Routes that accept HTML by design, needed by the html_submission exception
+# below. Regular expressions, each anchored to one route shape.
+# waf_html_submission_paths = [
+#   "/templates/new",
+#   "/templates/[0-9]+",
+# ]
+
 waf_policies = {
   primary = {
     zone_key = "primary"
@@ -41,6 +48,15 @@ waf_policies = {
       "cloudflare_managed",
       "owasp_core",
     ]
+
+    # WAF exceptions - only when a managed rule blocks legitimate traffic.
+    # Scope to hostnames behind Cloudflare Access: the exception switches the
+    # HTML injection checks off for those routes on these hosts.
+    # baseline_managed_exceptions = {
+    #   html_submission = {
+    #     hostnames = ["app.example.com"]
+    #   }
+    # }
 
     # Appended after the baseline rules, so it evaluates later.
     custom_block_rules = [

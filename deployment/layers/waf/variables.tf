@@ -139,6 +139,19 @@ variable "waf_policies" {
                                   (an application-specific one such as Drupal or
                                   WordPress); anything the whole estate should run
                                   belongs in the catalogue instead.
+    - `baseline_managed_exceptions` - (Optional) WAF exceptions from the catalogue in
+                                  locals.waf.tf, keyed by name - currently
+                                  `html_submission`. Each takes the `hostnames`
+                                  it applies to, and they are required: an exception
+                                  scoped only by path would cover every host on the
+                                  zone. Placed ahead of the managed rulesets, and
+                                  only skips the rulesets this policy executes.
+    - `managed_exceptions`      - (Optional) Tenant-specific WAF exceptions, appended
+                                  after the baseline ones. Same shape as the waf
+                                  module's managed_exceptions input. Use these, not a
+                                  skip in custom_block_rules, to turn off individual
+                                  managed rules or rulesets for narrowly scoped
+                                  traffic.
     - `custom_block_rules`      - (Optional) Tenant-specific firewall rules, appended after
                                   the baseline rules so they evaluate later. Actions are
                                   block, challenge, managed_challenge, js_challenge, log and
@@ -163,9 +176,12 @@ variable "waf_policies" {
     baseline_custom_rules     = optional(list(string), [])
     baseline_rate_limits      = optional(list(string), [])
     baseline_managed_rulesets = optional(list(string), [])
-    custom_ruleset_name       = optional(string)
-    rate_limit_ruleset_name   = optional(string)
-    managed_ruleset_name      = optional(string)
+    baseline_managed_exceptions = optional(map(object({
+      hostnames = list(string)
+    })), {})
+    custom_ruleset_name     = optional(string)
+    rate_limit_ruleset_name = optional(string)
+    managed_ruleset_name    = optional(string)
     bot_traffic = optional(object({
       search             = optional(string)
       agent              = optional(string)
@@ -224,6 +240,18 @@ variable "waf_policies" {
         })), [])
       }))
     })), [])
+    managed_exceptions = optional(list(object({
+      name        = string
+      expression  = string
+      description = optional(string)
+      enabled     = optional(bool, true)
+      logging     = optional(bool)
+      skip = object({
+        ruleset  = optional(string)
+        rulesets = optional(list(string))
+        rules    = optional(map(list(string)))
+      })
+    })), [])
   }))
   default = {}
 
@@ -235,6 +263,18 @@ variable "waf_policies" {
   validation {
     condition     = length(distinct([for p in var.waf_policies : p.zone_key])) == length(var.waf_policies)
     error_message = "Two waf_policies entries target the same zone_key. Cloudflare allows one entry-point ruleset per phase per zone, so the second would fight the first - merge them into one policy."
+  }
+
+  validation {
+    condition = alltrue(flatten([
+      for policy in var.waf_policies : [
+        for scope in values(policy.baseline_managed_exceptions) :
+        length(scope.hostnames) > 0 && alltrue([
+          for host in scope.hostnames : can(regex("^[a-z0-9-]+(\\.[a-z0-9-]+)+$", host))
+        ])
+      ]
+    ]))
+    error_message = "waf_policies[*].baseline_managed_exceptions[*].hostnames must list at least one hostname, each lowercase and fully qualified (e.g. app.example.com). Wildcards are not accepted: the exception matches http.host exactly."
   }
 }
 
@@ -434,5 +474,86 @@ variable "waf_owasp_action" {
       coalesce(var.waf_owasp_action, "log"),
     )
     error_message = "waf_owasp_action must be one of: block, challenge, managed_challenge, js_challenge, log - or null to leave Cloudflare's default alone."
+  }
+}
+
+# Managed exception parameters, read by the baseline_managed_exceptions
+# catalogue in locals.waf.tf.
+variable "waf_html_submission_paths" {
+  type        = list(string)
+  default     = []
+  description = <<-EOT
+    Routes that accept HTML in the request body by design, as regular
+    expressions. Read by the `html_submission` baseline exception, which
+    anchors them at both ends, so "/templates/[0-9]+" matches /templates/12 and
+    nothing longer. Anything in front of the route, such as a version or locale
+    prefix, has to be part of the pattern.
+
+    Deliberately empty in the platform defaults: the routes depend on the
+    application, so set them per account alongside the hostnames.
+
+    Every route listed here stops having its request bodies checked by the
+    skipped signatures on the hostnames a policy names, so keep each entry to
+    one route shape rather than a prefix.
+
+    The exception uses the `matches` operator, which Cloudflare offers on
+    Business and above.
+  EOT
+
+  validation {
+    condition     = alltrue([for path in var.waf_html_submission_paths : startswith(path, "/")])
+    error_message = "Each waf_html_submission_paths entry must start with \"/\"."
+  }
+
+  # Backslashes are excluded as well as quotes: inside a Cloudflare string
+  # literal they need escaping twice over, and a single one silently changes
+  # what the pattern matches.
+  validation {
+    condition = alltrue([
+      for path in var.waf_html_submission_paths : !strcontains(path, "\"") && !strcontains(path, "\\")
+    ])
+    error_message = "waf_html_submission_paths entries must not contain double quotes or backslashes - they are interpolated into a Cloudflare expression. Use character classes such as [0-9] instead of escapes."
+  }
+
+  validation {
+    condition     = alltrue([for path in var.waf_html_submission_paths : can(regexall(path, ""))])
+    error_message = "Each waf_html_submission_paths entry must be a valid regular expression."
+  }
+}
+
+variable "waf_html_submission_methods" {
+  type        = list(string)
+  default     = ["POST"]
+  description = <<-EOT
+    HTTP methods the `html_submission` baseline exception covers. A
+    form submits with POST; a JSON API may take PUT or PATCH. List only the
+    methods the routes really accept - a GET never carries the request body
+    these signatures are skipped for.
+  EOT
+
+  validation {
+    condition     = alltrue([for method in var.waf_html_submission_methods : contains(["POST", "PUT", "PATCH"], method)])
+    error_message = "waf_html_submission_methods entries must be POST, PUT or PATCH - the methods that carry a request body."
+  }
+}
+
+variable "waf_html_submission_skip_rule_ids" {
+  type        = list(string)
+  default     = []
+  description = <<-EOT
+    Cloudflare Managed Ruleset rule IDs that the `html_submission`
+    baseline exception skips. OWASP's verdict is skipped as well whenever the
+    policy runs OWASP, whatever is listed here.
+
+    Rule IDs are global, so the platform default in defaults.auto.tfvars is
+    shared by every account. Add to it from Security Events: filter on the
+    exception's hostnames and the Cloudflare Managed Ruleset, and take the
+    Rule ID of each signature that blocked a legitimate submission. Cloudflare adds
+    signatures over time, so expect this list to keep growing.
+  EOT
+
+  validation {
+    condition     = alltrue([for id in var.waf_html_submission_skip_rule_ids : can(regex("^[0-9a-f]{32}$", id))])
+    error_message = "waf_html_submission_skip_rule_ids entries must be 32-character hexadecimal Cloudflare rule IDs, as shown in Security Events."
   }
 }

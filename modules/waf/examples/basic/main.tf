@@ -46,4 +46,26 @@ module "waf" {
     agent    = "managed_challenge"
     training = "block"
   }
+
+  # The ruleset ID is a global constant, not account-specific. The rule ID is a
+  # placeholder: take the real one from the Security Events entry of the block.
+  managed_rulesets = [
+    {
+      id          = "efb7b8c949ac4650a09736fc376e9aee"
+      description = "Cloudflare Managed Ruleset"
+    },
+  ]
+
+  managed_exceptions = [
+    {
+      name       = "Template API accepts HTML by design"
+      expression = "http.host eq \"app.example.com\" and http.request.method eq \"POST\" and starts_with(http.request.uri.path, \"/templates/\")"
+      logging    = true
+      skip = {
+        rules = {
+          "efb7b8c949ac4650a09736fc376e9aee" = ["0123456789abcdef0123456789abcdef"]
+        }
+      }
+    },
+  ]
 }

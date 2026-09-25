@@ -1,10 +1,11 @@
 # Platform WAF baseline catalogue.
 #
 # The rules a deployment is likely to want on every zone, expressed once here and
-# opted into by name from `waf_policies[*].baseline_custom_rules` and
-# `baseline_rate_limits`. Nothing here is customer-specific: the addresses, paths
-# and country codes come from variables, so the same catalogue serves every
-# tenant.
+# opted into by name from `waf_policies[*].baseline_custom_rules`,
+# `baseline_rate_limits`, `baseline_managed_rulesets` and
+# `baseline_managed_exceptions`. Nothing here is customer-specific: the
+# addresses, paths, hostnames and country codes come from variables, so the same
+# catalogue serves every tenant.
 #
 # Adding a rule here: give it a stable name (the name is the operator-facing API
 # and appears in the Cloudflare dashboard), and if it depends on a variable being
@@ -138,6 +139,17 @@ locals {
   }
 
   # Cloudflare Managed Rulesets (http_request_firewall_managed)
+
+  # Global constants, the same in every account
+  waf_managed_ruleset_ids = {
+    cloudflare_managed = "efb7b8c949ac4650a09736fc376e9aee"
+    owasp_core         = "4814384a9e5d4991b9815dcfc25d2f1f"
+  }
+
+  # The only OWASP rule that acts: every other one adds to an anomaly score that
+  # this rule compares against the threshold.
+  waf_owasp_anomaly_rule_id = "6179ae15870a4bb7b2d480d4843b323c"
+
   waf_owasp_disabled_paranoia_levels = [
     for level in [2, 3, 4] : "paranoia-level-${level}"
     if level > var.waf_owasp_paranoia_level
@@ -152,7 +164,7 @@ locals {
 
   waf_baseline_managed_rulesets = {
     cloudflare_managed = {
-      id          = "efb7b8c949ac4650a09736fc376e9aee"
+      id          = local.waf_managed_ruleset_ids.cloudflare_managed
       version     = null
       expression  = "true"
       description = "Baseline - Cloudflare Managed Ruleset"
@@ -164,7 +176,7 @@ locals {
     }
 
     owasp_core = {
-      id          = "4814384a9e5d4991b9815dcfc25d2f1f"
+      id          = local.waf_managed_ruleset_ids.owasp_core
       version     = null
       expression  = "true"
       description = "Baseline - Cloudflare OWASP Core Ruleset"
@@ -182,7 +194,7 @@ locals {
         # OWASP is scored rather than per-rule
         rules = [
           {
-            id                = "6179ae15870a4bb7b2d480d4843b323c"
+            id                = local.waf_owasp_anomaly_rule_id
             action            = var.waf_owasp_action
             enabled           = null
             score_threshold   = var.waf_owasp_score_threshold
@@ -190,6 +202,31 @@ locals {
           }
         ]
       })
+    }
+  }
+
+  # Baseline WAF exceptions (http_request_firewall_managed, ahead of the managed
+  # rulesets). A policy supplies the hostnames each one covers, so an entry here
+  # carries only the method, the paths and what to skip. `rules` is keyed by
+  # ruleset, and a policy only skips the rulesets it executes.
+
+  # Anchored at both ends so each entry matches one route shape, never a prefix
+  waf_html_submission_path_regex = format("^(%s)$", join("|", var.waf_html_submission_paths))
+
+  waf_html_submission_method_set = "{${join(" ", [for method in var.waf_html_submission_methods : "\"${method}\""])}}"
+
+  waf_baseline_managed_exceptions = {
+    html_submission = {
+      # These routes accept exactly the markup injection signatures exist to
+      # catch. OWASP's verdict is skipped outright, since anomaly scoring cannot
+      # tell legitimate markup from an attack, but only the listed Cloudflare
+      # Managed rules are - the rest of that ruleset keeps running.
+      name       = "Baseline - HTML submission routes skip HTML injection signatures"
+      expression = "http.request.method in ${local.waf_html_submission_method_set} and http.request.uri.path matches \"${local.waf_html_submission_path_regex}\""
+      rules = {
+        (local.waf_managed_ruleset_ids.cloudflare_managed) = distinct(var.waf_html_submission_skip_rule_ids)
+        (local.waf_managed_ruleset_ids.owasp_core)         = [local.waf_owasp_anomaly_rule_id]
+      }
     }
   }
 
@@ -214,6 +251,10 @@ locals {
     block_listed_ips = {
       satisfied = var.waf_ip_blocklist_name != null
       reason    = "waf_ip_blocklist_name is unset, so this rule would reference a list called $unset. Cloudflare rejects a rule naming a list that does not exist, which fails the apply after some rules have already been written."
+    }
+    html_submission = {
+      satisfied = length(var.waf_html_submission_paths) > 0 && length(var.waf_html_submission_methods) > 0
+      reason    = "waf_html_submission_paths and waf_html_submission_methods must both be set. The routes are application-specific, so the platform ships no default, and an empty method set produces `in {}`, which Cloudflare rejects."
     }
   }
 }

@@ -46,3 +46,12 @@ managed_rules_min_tier = "enterprise"
 # OWASP tuning for Managed Ruleset
 waf_owasp_paranoia_level  = 1
 waf_owasp_score_threshold = 40
+
+# Deliberately empty. The routes that accept HTML depend on the application, so
+# set them per account next to the hostnames that use them.
+waf_html_submission_paths = []
+
+# Cloudflare Managed rules skipped by html_submission. Empty until Security
+# Events shows one blocking a legitimate submission; rule IDs are global, so an
+# ID added here applies to every account.
+waf_html_submission_skip_rule_ids = []

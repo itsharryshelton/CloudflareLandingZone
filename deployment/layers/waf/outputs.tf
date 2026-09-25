@@ -14,6 +14,11 @@ output "managed_rulesets" {
   value       = { for key, policy in module.waf : key => policy.managed_rulesets_deployed }
 }
 
+output "managed_exceptions" {
+  description = "Per-policy WAF exceptions as deployed, description => Cloudflare expression. Empty for a policy with none. Check this to see exactly which traffic is exempted from the managed rulesets."
+  value       = { for key, policy in module.waf : key => policy.managed_exceptions }
+}
+
 output "bot_traffic_rules" {
   description = "Per-policy bot traffic rules as deployed, rule description => Cloudflare expression. Empty for a policy with no bot_traffic. Check this to confirm which verified bot categories each behaviour resolved to before trusting an allow."
   value       = { for key, policy in module.waf : key => policy.bot_traffic_rules }
