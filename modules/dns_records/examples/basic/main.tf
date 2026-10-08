@@ -25,7 +25,8 @@ module "dns_records" {
   domain_name = "example.com"
 
   # "@", a relative label, an already-qualified name and an MX, so every branch
-  # of the name qualification and the priority rule are exercised.
+  # of the name qualification and the priority rule are exercised - plus a CNAME
+  # targeting "@", for the content normalisation.
   records = [
     {
       name    = "@"
@@ -36,7 +37,7 @@ module "dns_records" {
     {
       name    = "www"
       type    = "CNAME"
-      content = "example.com"
+      content = "@"
       proxied = true
       comment = "Marketing site"
     },

@@ -12,7 +12,10 @@ variable "domain_name" {
   type        = string
   description = "Apex domain for the zone (e.g. example.com)."
 
-  # Labels accept lowercase Unicode letters
+  # Labels accept lowercase Unicode letters, not just ASCII, so IDNs can be given
+  # in the form Cloudflare actually stores them. \p{Lo} and \p{M} cover scripts
+  # with no case distinction and combining marks; \p{Lu} stays excluded so the
+  # lowercase-only rule still holds.
   validation {
     condition     = can(regex("^([0-9\\p{Ll}\\p{Lo}\\p{M}]([0-9\\p{Ll}\\p{Lo}\\p{M}-]{0,61}[0-9\\p{Ll}\\p{Lo}\\p{M}])?\\.)+[\\p{Ll}\\p{Lo}]{2,}$", var.domain_name))
     error_message = "domain_name must be a valid apex domain (e.g. example.com), lowercase, no scheme or path."
@@ -23,7 +26,7 @@ variable "domain_name" {
   # proposes destroying the zone and its DNS records.
   validation {
     condition     = !can(regex("(^|\\.)xn--", var.domain_name))
-    error_message = "domain_name must use the Unicode form of an IDN (e.g. café-example.fr), not punycode - Cloudflare returns the Unicode name, so a punycode name drifts on every plan and forces the zone to be replaced."
+    error_message = "domain_name must use the Unicode form of an IDN (e.g. esl-séjours-linguistiques.fr), not punycode - Cloudflare returns the Unicode name, so a punycode name drifts on every plan and forces the zone to be replaced."
   }
 }
 
@@ -117,6 +120,11 @@ variable "zone_settings" {
     exactly what the deployment layers do, and the baseline used to disappear
     without a trace when they did.
 
+    Each key is one resource and one API read per zone per plan, against
+    Cloudflare's 1200-requests-per-5-minutes budget. At fleet scale that is the
+    dominant cost of this module, so pass settings that assert posture rather
+    than ones that restate a Cloudflare default.
+
     Only string-valued settings are supported by this variable; for
     numeric or object-valued settings (e.g. browser_cache_ttl), add a
     cloudflare_zone_setting resource directly. See:
@@ -152,12 +160,15 @@ variable "dns_records" {
                   module, because the Cloudflare API always returns FQDNs and a
                   relative name would otherwise show perpetual drift.
       - content : the record target (this replaced provider v4's `value` field).
+                  For CNAME, MX, NS and PTR the module sends it the way
+                  Cloudflare stores it - "@" as the apex, the hostname in lower
+                  case - so either spelling plans clean.
       - ttl     : seconds; 1 means "automatic" and is required when proxied = true.
       - proxied : route the record through Cloudflare's proxy. Only valid for
                   A, AAAA and CNAME records.
       - priority: required for MX / SRV / URI record types.
-    Records are keyed on type/name/content, so reordering the list never forces a
-    replacement. Duplicate combinations fail the plan.
+    Records are keyed on type/name/content as written, so reordering the list
+    never forces a replacement. Duplicate combinations fail the plan.
   EOT
 
   validation {
