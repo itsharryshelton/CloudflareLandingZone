@@ -56,12 +56,15 @@ variable "records" {
                   module, because the Cloudflare API always returns FQDNs and a
                   relative name would otherwise show perpetual drift.
       - content : the record target (this replaced provider v4's `value` field).
+                  For CNAME, MX, NS and PTR the module sends it the way
+                  Cloudflare stores it - "@" as the apex, the hostname in lower
+                  case - so either spelling plans clean.
       - ttl     : seconds; 1 means "automatic" and is required when proxied = true.
       - proxied : route the record through Cloudflare's proxy. Only valid for
                   A, AAAA and CNAME records.
       - priority: required for MX / SRV / URI record types.
-    Records are keyed on type/name/content, so reordering the list never forces a
-    replacement. Duplicate combinations fail the plan.
+    Records are keyed on type/name/content as written, so reordering the list
+    never forces a replacement. Duplicate combinations fail the plan.
   EOT
 
   validation {
