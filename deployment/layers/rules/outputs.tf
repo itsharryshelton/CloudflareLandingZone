@@ -5,6 +5,7 @@ output "rule_policies" {
       cache_ruleset_id     = try(module.cache_rules[key].ruleset_id, null)
       transform_ruleset_id = try(module.transform_rules[key].ruleset_id, null)
       origin_ruleset_id    = try(module.origin_rules[key].ruleset_id, null)
+      redirect_ruleset_id  = try(module.redirect_rules[key].ruleset_id, null)
     }
   }
 }
@@ -17,6 +18,11 @@ output "cache_rule_order" {
 output "origin_rule_order" {
   description = "Origin rule descriptions per policy, in evaluation order. The FIRST match wins in this phase, the opposite of the cache phase."
   value       = { for key, policy in module.origin_rules : key => policy.rule_order }
+}
+
+output "redirect_rule_order" {
+  description = "Single Redirect descriptions per policy, in evaluation order. The FIRST match redirects, so a broad rule above a specific one hides it."
+  value       = { for key, policy in module.redirect_rules : key => policy.rule_order }
 }
 
 output "resolved_zone_ids" {
