@@ -4,7 +4,9 @@ locals {
     if contains([for p in var.rule_policies : p.zone_key], key)
   }
 
-  # One module instance per phase, but only for the policies that actually use it
+  # One module instance per phase, but only for the policies that actually use
+  # that phase - an empty ruleset is not created, so a policy that only sets
+  # cache rules never appears in the transform or origin state at all.
   cache_policies = {
     for key, policy in var.rule_policies : key => policy
     if length(policy.cache_rules) > 0
@@ -20,7 +22,30 @@ locals {
     if length(policy.origin_rules) > 0
   }
 
-  # `acknowledge_public_response` is this layer's field, not Cloudflare's
+  redirect_policies = {
+    for key, policy in var.rule_policies : key => policy
+    if length(policy.redirect_rules) > 0
+  }
+
+  # Only the zones that need one are enumerated.
+  zones_with_redirect_rules = {
+    for key, zone in var.zones : key => zone
+    if contains([for p in local.redirect_policies : p.zone_key], key)
+  }
+
+  # Policy key => the ID of the zone's existing http_request_dynamic_redirect
+  # entry point, or null where it has none. Drives the import in imports.tf.
+  existing_redirect_entrypoints = {
+    for key, policy in local.redirect_policies : key => one([
+      for ruleset in data.cloudflare_rulesets.this[policy.zone_key].rulesets : ruleset.id
+      if ruleset.phase == "http_request_dynamic_redirect" && ruleset.kind == "zone"
+    ])
+    if contains(keys(var.zones), policy.zone_key)
+  }
+
+  # `acknowledge_public_response` is this layer's field, not Cloudflare's - see
+  # the precondition below. Stripped here so the module keeps a schema that is
+  # exactly the provider's.
   cache_rules_for_module = {
     for key, policy in local.cache_policies : key => [
       for rule in policy.cache_rules : {
@@ -49,12 +74,14 @@ locals {
     if !contains(keys(var.zones), policy.zone_key)
   ]
 
-  # A policy that names a zone and configures nothing
+  # A policy that names a zone and configures nothing. Legal, and silently does
+  # nothing, which is the problem: it reads as coverage that is not there.
   empty_policies = [
     for key, policy in var.rule_policies : key
     if length(policy.cache_rules) == 0
     && length(policy.transform_rules) == 0
     && length(policy.origin_rules) == 0
+    && length(policy.redirect_rules) == 0
   ]
 
   unguarded_cache_rules = flatten([

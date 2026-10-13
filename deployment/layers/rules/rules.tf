@@ -1,9 +1,15 @@
-# Cache, transform and origin rulesets, per zone.
+# Cache, transform, origin and redirect rulesets, per zone.
+#
+# Four modules rather than one, because Cloudflare treats each phase as a
+# separate entry-point ruleset with its own schema - and because a zone that
+# needs only cache rules should not carry state for the other three.
 #
 # Downstream deployments pin an immutable tag instead of the local path:
 #   source = "git::https://github.com/Your-Org/cloudflare-platform-modules//cache_rules?ref=v1.0.0"
 
-# http_request_cache_settings.
+# http_request_cache_settings. Last matching rule wins in this phase, so the
+# order within each policy's cache_rules list is the order of precedence,
+# backwards: broad rules first, exceptions after.
 module "cache_rules" {
   source = "git::https://github.com/Your-Org/cloudflare-platform-modules//cache_rules"
 
@@ -18,7 +24,9 @@ module "cache_rules" {
   )
 }
 
-# http_request_late_transform.
+# http_request_late_transform. Request headers to the origin, applied after the
+# security phases have run - so nothing set here can be matched by a WAF rule,
+# and nothing set here can be used to evade one.
 module "transform_rules" {
   source = "git::https://github.com/Your-Org/cloudflare-platform-modules//transform_rules"
 
@@ -33,7 +41,8 @@ module "transform_rules" {
   )
 }
 
-# http_request_origin.
+# http_request_origin. First matching rule wins here, the opposite of the cache
+# phase.
 module "origin_rules" {
   source = "git::https://github.com/Your-Org/cloudflare-platform-modules//origin_rules"
 
@@ -45,5 +54,23 @@ module "origin_rules" {
   ruleset_name = coalesce(
     each.value.origin_ruleset_name,
     "Origin rules - ${var.zones[each.value.zone_key].domain_name}",
+  )
+}
+
+# http_request_dynamic_redirect. Single Redirects, for targets a Bulk Redirect
+# cannot build. First match wins, and this phase runs before the WAF and before
+# the account's Bulk Redirects, so a rule here shadows any Bulk row for the same
+# URL.
+module "redirect_rules" {
+  source = "git::https://github.com/Your-Org/cloudflare-platform-modules//redirect_rules"
+
+  for_each = local.redirect_policies
+  zone_id  = data.cloudflare_zone.this[each.value.zone_key].id
+
+  rules = each.value.redirect_rules
+
+  ruleset_name = coalesce(
+    each.value.redirect_ruleset_name,
+    "Single redirects - ${var.zones[each.value.zone_key].domain_name}",
   )
 }

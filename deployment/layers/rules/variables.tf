@@ -1,12 +1,15 @@
 # Layer rules - inputs.
 #
-# The three zone ruleset phases that shape traffic rather than block it: cache
-# settings, request header transforms, and origin selection. Holds its own state,
-# so an apply here can never propose destroying a zone.
+# The four zone ruleset phases that shape traffic rather than block it: cache
+# settings, request header transforms, origin selection and Single Redirects.
+# Holds its own state, so an apply here can never propose destroying a zone.
 #
 # Deliberately NOT here:
 #   http_request_firewall_custom, http_ratelimit  - layers/waf
-#   http_request_redirect                         - layers/bulk_redirects
+#   http_request_redirect (account, Bulk)         - layers/bulk_redirects
+# Cloudflare permits one entry-point ruleset per phase per zone, so each phase has
+# exactly one owning layer. Adding a phase to the wrong layer means two layers
+# fight over one ruleset and the last apply wins.
 #
 # Config files:
 #   accounts/<account>/account.tfvars - the account ID, shared with every layer
@@ -38,9 +41,9 @@ variable "zones" {
 
 variable "rule_policies" {
   description = <<-EOT
-    A map of traffic rule policies, one per zone that needs cache, transform or
-    origin rules, keyed by a logical key. A zone with no policy gets no rulesets
-    at all, which costs nothing.
+    A map of traffic rule policies, one per zone that needs cache, transform,
+    origin or redirect rules, keyed by a logical key. A zone with no policy gets
+    no rulesets at all, which costs nothing.
 
     - `zone_key`        - The key of the zone this policy binds to. Taken from `var.zones`.
     - `cache_rules`     - (Optional) http_request_cache_settings. What Cloudflare stores
@@ -49,13 +52,21 @@ variable "rule_policies" {
                           the origin. Late, so a WAF rule cannot match on what they set.
     - `origin_rules`    - (Optional) http_request_origin. Where a matching request is
                           actually sent.
+    - `redirect_rules`  - (Optional) http_request_dynamic_redirect. Single Redirects, for
+                          targets built from the request, such as a fixed parameter
+                          appended to the request's own query string. Fixed
+                          source-to-target pairs belong in layers/bulk_redirects.
     - `*_ruleset_name`  - (Optional) Dashboard display names, one per phase.
 
     ORDERING DIFFERS BY PHASE, which is the thing most likely to catch someone
     out. In the cache phase Cloudflare applies every matching rule and the LAST
-    one wins, so exceptions go after the broad rules. In the origin phase the
-    FIRST match wins. Getting this backwards produces a config that reads
-    correctly and behaves inversely.
+    one wins, so exceptions go after the broad rules. In the origin and redirect
+    phases the FIRST match wins. Getting this backwards produces a config that
+    reads correctly and behaves inversely.
+
+    Redirect rules run before the WAF and before Bulk Redirects. A request they
+    match is redirected without the WAF seeing it, and they win over any Bulk
+    Redirect for the same URL.
 
     SECURITY. Cache rules decide what Cloudflare stores and serves to the next
     visitor, so caching a response that varies per user leaks one user's data to
@@ -70,7 +81,10 @@ variable "rule_policies" {
     text in Terraform state and printed in every plan, so it ends up in state
     storage, CI logs and pull request output. Origin rules silently change which
     server answers for a hostname, with nothing in the URL or the response to say
-    so, which means the destination has to be an origin you control.
+    so, which means the destination has to be an origin you control. A redirect
+    target must never take its scheme or host from request input (query string,
+    header, path): that is an open redirect, a link on your domain that sends a
+    visitor wherever an attacker chooses.
   EOT
 
   type = map(object({
@@ -79,6 +93,7 @@ variable "rule_policies" {
     cache_ruleset_name     = optional(string)
     transform_ruleset_name = optional(string)
     origin_ruleset_name    = optional(string)
+    redirect_ruleset_name  = optional(string)
 
     cache_rules = optional(list(object({
       name        = string
@@ -180,6 +195,18 @@ variable "rule_policies" {
       sni = optional(object({
         value = string
       }))
+    })), [])
+
+    redirect_rules = optional(list(object({
+      name        = string
+      expression  = string
+      description = optional(string)
+      enabled     = optional(bool, true)
+
+      target_url            = optional(string)
+      target_url_expression = optional(string)
+      status_code           = optional(number, 302)
+      preserve_query_string = optional(bool, false)
     })), [])
   }))
   default = {}
