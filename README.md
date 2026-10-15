@@ -153,7 +153,7 @@ CFLZ uses GitHub Actions driven strictly by GitOps workflows. Terraform is execu
 
 | Workflow                                                       | Trigger                          | Touches Cloudflare? | Can change anything?              |
 | ----------------------------------------------------------------| ----------------------------------| ---------------------| -----------------------------------|
-| [`ci.yml`](.github/workflows/ci.yml)                           | Every PR, every push to `main`, manual | No            | A git tag only: offline validation & linting, then a patch tag on a green push to `main` |
+| [`ci.yml`](.github/workflows/ci.yml)                           | Every PR, every push to `main`, manual | No            | A git tag only: offline validation & linting, then a release tag on a green push to `main` (`#major` / `#minor` in a commit message since the last tag, else patch) |
 | [`secret-scanning.yml`](.github/workflows/secret-scanning.yml) | Every PR, push to `main`, manual | No                  | No                                |
 | [`terraform-plan.yml`](.github/workflows/terraform-plan.yml)   | Manual dispatch only             | Reads               | No                                |
 | [`terraform-apply.yml`](.github/workflows/terraform-apply.yml) | Manual dispatch only             | Reads & writes      | Yes, after human approval         |
