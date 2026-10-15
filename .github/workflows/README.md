@@ -4,7 +4,7 @@ Six workflows, plus one reusable definition the Terraform ones share.
 
 | Workflow                                     | Trigger                                | Touches Cloudflare? | Can change anything? |
 | ----------------------------------------------| ----------------------------------------| ---------------------| ----------------------|
-| [`ci.yml`](ci.yml)                           | every PR, every push to `main`, manual | no                  | a git tag only: a green push to `main` publishes the next patch tag |
+| [`ci.yml`](ci.yml)                           | every PR, every push to `main`, manual | no                  | a git tag only: a green push to `main` publishes the next tag (`#major` / `#minor` in a commit message since the last tag, else patch) |
 | [`secret-scanning.yml`](secret-scanning.yml) | every PR, every push to `main`, manual | no                  | no                   |
 | [`terraform-plan.yml`](terraform-plan.yml)   | manual only                            | reads               | no                   |
 | [`terraform-apply.yml`](terraform-apply.yml) | manual only                            | reads + writes      | yes, after approval  |

@@ -549,8 +549,11 @@ jobs:
           python-version: '3.12'
       - run: python3 .github/scripts/cf-api-throttle-test.py
 
+  # Bump size is a human decision, read from commit messages since the last tag:
+  # #major or #minor, otherwise patch. All commits are read, not just HEAD, because
+  # a run cancelled by a newer push to main never tagged its commits.
   release-tag:
-    name: publish patch tag
+    name: publish release tag
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: [fmt, lint, validate, offline-plan, config-guard, throttle]
@@ -561,19 +564,38 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Compute and push the next patch tag
+      - name: Compute and push the next tag
         run: |
           set -euo pipefail
           git fetch --tags --quiet
+
+          # A re-run of this job must not stack a second tag on the same commit.
+          if [[ -n "$(git tag --points-at HEAD --list 'v*')" ]]; then
+            echo "HEAD is already tagged: $(git tag --points-at HEAD --list 'v*' | tr '\n' ' ')"
+            exit 0
+          fi
+
           latest="$(git tag --list 'v*' --sort=-v:refname | head -n1)"
+          bump=patch
           if [[ -z "$latest" ]]; then
             next="v1.0.0"
           else
-            base="${latest#v}"
-            IFS='.' read -r major minor patch <<<"$base"
-            next="v${major}.${minor}.$((patch + 1))"
+            # Full messages, not subjects: a merge commit's subject is
+            # "Merge pull request #N from ...", and the PR title is in its body.
+            msgs="$(git log --format=%B "${latest}..HEAD")"
+            if grep -qiE '#major([^[:alnum:]_]|$)' <<<"$msgs"; then
+              bump=major
+            elif grep -qiE '#minor([^[:alnum:]_]|$)' <<<"$msgs"; then
+              bump=minor
+            fi
+            IFS='.' read -r major minor patch <<<"${latest#v}"
+            case "$bump" in
+              major) next="v$((major + 1)).0.0" ;;
+              minor) next="v${major}.$((minor + 1)).0" ;;
+              patch) next="v${major}.${minor}.$((patch + 1))" ;;
+            esac
           fi
-          echo "latest: ${latest:-none} -> next: $next"
+          echo "latest: ${latest:-none} -> next: $next ($bump)"
 
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
