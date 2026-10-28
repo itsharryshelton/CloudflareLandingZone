@@ -19,5 +19,10 @@ resource "terraform_data" "preflight" {
       condition     = length(local.unguarded_cache_rules) == 0
       error_message = "These cache rules set cache = true without excluding authenticated traffic: ${join("; ", local.unguarded_cache_rules)}. cache = true overrides the checks that keep a response carrying a session cookie out of the shared cache, so a page rendered for one signed-in user can be served to the next. Either gate the expression on the session cookie (the usual form is `and not http.cookie contains \"SESS\"`), or set acknowledge_public_response = true on the rule to record that these responses are the same for every visitor."
     }
+
+    precondition {
+      condition     = length(local.unacknowledged_unencrypted_origins) == 0
+      error_message = "These configuration rules take encryption off the connection to the origin: ${join("; ", local.unacknowledged_unencrypted_origins)}. flexible fetches from the origin over plain HTTP and off drops HTTPS for the visitor too, while a flexible visitor still sees a padlock. If the origin serves HTTPS with any certificate at all, use ssl = \"full\" instead. Otherwise set acknowledge_unencrypted_origin = true on the rule to record that this traffic crosses the network unencrypted."
+    }
   }
 }

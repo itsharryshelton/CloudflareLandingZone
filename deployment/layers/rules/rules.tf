@@ -1,8 +1,8 @@
-# Cache, transform, origin and redirect rulesets, per zone.
+# Cache, transform, origin, redirect and configuration rulesets, per zone.
 #
-# Four modules rather than one, because Cloudflare treats each phase as a
+# Five modules rather than one, because Cloudflare treats each phase as a
 # separate entry-point ruleset with its own schema - and because a zone that
-# needs only cache rules should not carry state for the other three.
+# needs only cache rules should not carry state for the other four.
 #
 # Downstream deployments pin an immutable tag instead of the local path:
 #   source = "git::https://github.com/Your-Org/cloudflare-platform-modules//cache_rules?ref=v1.0.0"
@@ -72,5 +72,23 @@ module "redirect_rules" {
   ruleset_name = coalesce(
     each.value.redirect_ruleset_name,
     "Single redirects - ${var.zones[each.value.zone_key].domain_name}",
+  )
+}
+
+# http_config_settings. Configuration Rules override zone settings, owned by
+# layers/zones, for the requests they match - chiefly one hostname's SSL mode
+# instead of lowering the whole zone's. Every matching rule applies and the
+# last wins, as in the cache phase.
+module "config_rules" {
+  source = "git::https://github.com/Your-Org/cloudflare-platform-modules//config_rules"
+
+  for_each = local.config_policies
+  zone_id  = data.cloudflare_zone.this[each.value.zone_key].id
+
+  rules = local.config_rules_for_module[each.key]
+
+  ruleset_name = coalesce(
+    each.value.config_ruleset_name,
+    "Configuration rules - ${var.zones[each.value.zone_key].domain_name}",
   )
 }

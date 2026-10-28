@@ -19,7 +19,7 @@ deployment/
 │   ├── origin_pulls/                  # own state: Authenticated Origin Pulls, client certificates, per-hostname edge-to-origin mTLS
 │   ├── pages/                         # own state: Pages projects, branch deployment rules, bindings, custom domains
 │   ├── r2/                            # own state: buckets, CORS, lifecycle, retention, domains
-│   ├── rules/                         # own state: cache rules, transform rules, origin rules
+│   ├── rules/                         # own state: cache, transform, origin, redirect and configuration rules
 │   ├── tunnels/                       # own state: Cloudflare Tunnels, public hostnames, private network routes
 │   ├── turnstile/                     # own state: Turnstile widgets, the sitekey and secret a form is protected by
 │   ├── waf/                           # own state: firewall custom rules, rate limiting, managed rulesets, bot traffic rules
@@ -87,7 +87,7 @@ Tier 3: Zone-Dependent & Consumer Layers
 ├── origin_pulls                       (resolves zone IDs; enables Authenticated Origin Pulls and uploads client certificates)
 ├── pages                              (resolves zone IDs; writes the proxied CNAME behind each custom domain)
 ├── r2                                 (provisions buckets; binds custom domains to existing zones)
-├── rules                              (resolves zone IDs; manages cache, transform, and origin rules)
+├── rules                              (resolves zone IDs; manages cache, transform, origin, redirect and configuration rules)
 ├── tunnels                            (resolves zone IDs; publishes tunnel hostnames as proxied CNAMEs)
 ├── waf                                (resolves zone IDs; consumes account lists created in Tier 2)
 ├── workers                            (resolves zone IDs; binds script routes and custom domains; provisions KV, D1 and queues)
@@ -1020,7 +1020,7 @@ A row sets exactly one of `ip`, `asn` or `hostname` (`{ url_hostname, exclude_ex
 
 ## Rules
 
-The `rules` layer manages zone-level traffic modification phases: Cache Rules (`http_request_cache_settings`), Transform Rules (`http_request_late_transform`), and Origin Rules (`http_request_origin`).
+The `rules` layer manages zone-level traffic modification phases: Cache Rules (`http_request_cache_settings`), Transform Rules (`http_request_late_transform`), Origin Rules (`http_request_origin`), Single Redirects (`http_request_dynamic_redirect`), and Configuration Rules (`http_config_settings`).
 
 ```hcl
 # accounts/account_a/rules.tfvars
@@ -1070,6 +1070,16 @@ rule_policies = {
         }
       },
     ]
+
+    config_rules = [
+      {
+        # The zone runs strict, and this origin has no certificate for its name
+        # yet. Remove the rule once it does.
+        name       = "Temporary SSL full - app.example.com"
+        expression = "http.host eq \"app.example.com\""
+        ssl        = "full"
+      },
+    ]
   }
 }
 ```
@@ -1079,13 +1089,16 @@ Rule evaluation behaviour differs by phase:
 - **Cache Rules:** Cloudflare evaluates all matching rules and the **last** matching rule takes precedence. Broad caching rules should be placed first, followed by specific bypass exceptions.
 - **Origin Rules:** Cloudflare evaluates rules in order and stops at the **first** match. Specific overrides must precede general rules.
 - **Transform Rules:** request header changes only, in `http_request_late_transform`, after the security phases. A header set or removed here cannot influence a WAF rule, and a WAF rule cannot match on it; it changes only what the origin receives. URL rewrites and response header changes are not managed by this layer.
+- **Configuration Rules:** every matching rule applies, and the **last** one wins for a setting two rules both set. A rule overrides the zone's own settings, which the `zones` layer owns, for the requests it matches and nothing else. Only `ssl` (`off`, `flexible`, `full`, `strict`) is supported so far. The use it exists for is one proxied hostname whose origin cannot yet present a certificate valid for its name, which `strict` answers with a 526: set that hostname to `full` rather than lowering the whole zone, and remove the rule once the certificate is valid. Only proxied hostnames are affected. A zone may hold 10 configuration rules on Free, 25 on Pro, 50 on Business and 300 on Enterprise.
 
 Each module owns its phase's entry-point ruleset for the zone. Values in these rules reach state and plan output, so they must never hold a credential.
 
 ### Guardrails
 - An enabled cache rule with `cache = true` whose expression mentions neither a cookie nor `authorization` fails the plan unless it sets `acknowledge_public_response = true`, because it would cache one visitor's response for the next. The first example rule passes only because it tests `http.cookie`.
-- Two `rule_policies` entries for the same zone fail the plan, as do a policy with no rules, a cache rule that sets nothing, a header operation with both or neither of `value` and `expression` (`remove` takes neither), and an origin rule that sets none of `host_header`, `origin` and `sni`.
+- An enabled config rule with `ssl = "flexible"` or `ssl = "off"` fails the plan unless it sets `acknowledge_unencrypted_origin = true`, because the connection to the origin is then plain HTTP while a `flexible` visitor still sees a padlock. `full` is not gated, but it accepts any origin certificate, so keep it to the one hostname that needs it.
+- Two `rule_policies` entries for the same zone fail the plan, as do a policy with no rules, a cache rule that sets nothing, a header operation with both or neither of `value` and `expression` (`remove` takes neither), an origin rule that sets none of `host_header`, `origin` and `sni`, and a config rule that sets no setting or an `ssl` outside `off`, `flexible`, `full` and `strict`.
 - There is no plan-tier gate. The origin port and SNI overrides are Enterprise features, and on a lower plan Cloudflare rejects the whole origin ruleset at apply - the example's `port = 8443` included, on a `business` zone.
+- A zone that already has an `http_request_dynamic_redirect` or `http_config_settings` entry point, made in the dashboard or by an earlier tool, has it imported rather than created over, because creating a second one fails with `20217`. The same apply replaces its rules with the policy's. Any rule that plan shows being removed is a live redirect or setting override made outside Terraform, so carry it into `redirect_rules` or `config_rules`, or confirm it is unwanted, before applying. See `layers/rules/imports.tf`.
 
 ---
 

@@ -27,10 +27,19 @@ locals {
     if length(policy.redirect_rules) > 0
   }
 
-  # Only the zones that need one are enumerated.
-  zones_with_redirect_rules = {
+  config_policies = {
+    for key, policy in var.rule_policies : key => policy
+    if length(policy.config_rules) > 0
+  }
+
+  # Only the zones that need one are enumerated: those with a phase whose
+  # existing entry point imports.tf adopts.
+  zones_with_adopted_phases = {
     for key, zone in var.zones : key => zone
-    if contains([for p in local.redirect_policies : p.zone_key], key)
+    if contains(concat(
+      [for p in local.redirect_policies : p.zone_key],
+      [for p in local.config_policies : p.zone_key],
+    ), key)
   }
 
   # Policy key => the ID of the zone's existing http_request_dynamic_redirect
@@ -39,6 +48,15 @@ locals {
     for key, policy in local.redirect_policies : key => one([
       for ruleset in data.cloudflare_rulesets.this[policy.zone_key].rulesets : ruleset.id
       if ruleset.phase == "http_request_dynamic_redirect" && ruleset.kind == "zone"
+    ])
+    if contains(keys(var.zones), policy.zone_key)
+  }
+
+  # The same for http_config_settings.
+  existing_config_entrypoints = {
+    for key, policy in local.config_policies : key => one([
+      for ruleset in data.cloudflare_rulesets.this[policy.zone_key].rulesets : ruleset.id
+      if ruleset.phase == "http_config_settings" && ruleset.kind == "zone"
     ])
     if contains(keys(var.zones), policy.zone_key)
   }
@@ -68,6 +86,20 @@ locals {
     ]
   }
 
+  # Likewise `acknowledge_unencrypted_origin`.
+  config_rules_for_module = {
+    for key, policy in local.config_policies : key => [
+      for rule in policy.config_rules : {
+        name        = rule.name
+        expression  = rule.expression
+        description = rule.description
+        enabled     = rule.enabled
+
+        ssl = rule.ssl
+      }
+    ]
+  }
+
   # Preflight checks here
   dangling_zone_keys = [
     for key, policy in var.rule_policies : "rule_policies.${key}.zone_key = \"${policy.zone_key}\""
@@ -82,6 +114,7 @@ locals {
     && length(policy.transform_rules) == 0
     && length(policy.origin_rules) == 0
     && length(policy.redirect_rules) == 0
+    && length(policy.config_rules) == 0
   ]
 
   unguarded_cache_rules = flatten([
@@ -92,6 +125,17 @@ locals {
       && !rule.acknowledge_public_response
       && !strcontains(lower(rule.expression), "cookie")
       && !strcontains(lower(rule.expression), "authorization")
+    ]
+  ])
+
+  # full still encrypts to the origin; flexible and off do not, and under
+  # flexible the visitor's padlock looks the same as ever.
+  unacknowledged_unencrypted_origins = flatten([
+    for key, policy in var.rule_policies : [
+      for rule in policy.config_rules : "${key}: \"${rule.name}\" (ssl = ${rule.ssl})"
+      if contains(["flexible", "off"], coalesce(rule.ssl, "unset"))
+      && rule.enabled
+      && !rule.acknowledge_unencrypted_origin
     ]
   ])
 }

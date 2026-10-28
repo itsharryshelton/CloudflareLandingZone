@@ -6,6 +6,7 @@ output "rule_policies" {
       transform_ruleset_id = try(module.transform_rules[key].ruleset_id, null)
       origin_ruleset_id    = try(module.origin_rules[key].ruleset_id, null)
       redirect_ruleset_id  = try(module.redirect_rules[key].ruleset_id, null)
+      config_ruleset_id    = try(module.config_rules[key].ruleset_id, null)
     }
   }
 }
@@ -23,6 +24,11 @@ output "origin_rule_order" {
 output "redirect_rule_order" {
   description = "Single Redirect descriptions per policy, in evaluation order. The FIRST match redirects, so a broad rule above a specific one hides it."
   value       = { for key, policy in module.redirect_rules : key => policy.rule_order }
+}
+
+output "config_rule_order" {
+  description = "Configuration rule descriptions per policy, in evaluation order. Every matching rule applies and the LAST one wins for a setting two rules both set, as in the cache phase."
+  value       = { for key, policy in module.config_rules : key => policy.rule_order }
 }
 
 output "resolved_zone_ids" {

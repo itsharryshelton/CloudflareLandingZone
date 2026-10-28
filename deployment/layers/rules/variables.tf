@@ -1,12 +1,15 @@
 # Layer rules - inputs.
 #
-# The four zone ruleset phases that shape traffic rather than block it: cache
-# settings, request header transforms, origin selection and Single Redirects.
+# The five zone ruleset phases that shape traffic rather than block it: cache
+# settings, request header transforms, origin selection, Single Redirects and
+# per-request overrides of zone settings (Configuration Rules).
 # Holds its own state, so an apply here can never propose destroying a zone.
 #
 # Deliberately NOT here:
 #   http_request_firewall_custom, http_ratelimit  - layers/waf
 #   http_request_redirect (account, Bulk)         - layers/bulk_redirects
+#   zone-wide settings such as the SSL mode       - layers/zones; a config rule
+#                                                   here overrides them per request
 # Cloudflare permits one entry-point ruleset per phase per zone, so each phase has
 # exactly one owning layer. Adding a phase to the wrong layer means two layers
 # fight over one ruleset and the last apply wins.
@@ -42,8 +45,8 @@ variable "zones" {
 variable "rule_policies" {
   description = <<-EOT
     A map of traffic rule policies, one per zone that needs cache, transform,
-    origin or redirect rules, keyed by a logical key. A zone with no policy gets
-    no rulesets at all, which costs nothing.
+    origin, redirect or configuration rules, keyed by a logical key. A zone with
+    no policy gets no rulesets at all, which costs nothing.
 
     - `zone_key`        - The key of the zone this policy binds to. Taken from `var.zones`.
     - `cache_rules`     - (Optional) http_request_cache_settings. What Cloudflare stores
@@ -56,13 +59,17 @@ variable "rule_policies" {
                           targets built from the request, such as a fixed parameter
                           appended to the request's own query string. Fixed
                           source-to-target pairs belong in layers/bulk_redirects.
+    - `config_rules`    - (Optional) http_config_settings. Zone settings overridden for
+                          the requests a rule matches. Today that is `ssl` only: one
+                          hostname's SSL mode, for an origin whose certificate cannot
+                          pass the zone's mode yet.
     - `*_ruleset_name`  - (Optional) Dashboard display names, one per phase.
 
     ORDERING DIFFERS BY PHASE, which is the thing most likely to catch someone
-    out. In the cache phase Cloudflare applies every matching rule and the LAST
-    one wins, so exceptions go after the broad rules. In the origin and redirect
-    phases the FIRST match wins. Getting this backwards produces a config that
-    reads correctly and behaves inversely.
+    out. In the cache and config phases Cloudflare applies every matching rule
+    and the LAST one wins, so exceptions go after the broad rules. In the origin
+    and redirect phases the FIRST match wins. Getting this backwards produces a
+    config that reads correctly and behaves inversely.
 
     Redirect rules run before the WAF and before Bulk Redirects. A request they
     match is redirected without the WAF seeing it, and they win over any Bulk
@@ -85,6 +92,13 @@ variable "rule_policies" {
     target must never take its scheme or host from request input (query string,
     header, path): that is an open redirect, a link on your domain that sends a
     visitor wherever an attacker chooses.
+
+    A config rule's `ssl` below strict weakens the connection to the origin for
+    every request it matches, and under `full` or `flexible` the visitor's
+    padlock looks no different. `full` accepts any origin certificate, so scope
+    it to one hostname and remove it once the certificate is valid. `flexible`
+    and `off` send the origin connection in plain HTTP; an enabled rule setting
+    either fails the plan unless it sets `acknowledge_unencrypted_origin = true`.
   EOT
 
   type = map(object({
@@ -94,6 +108,7 @@ variable "rule_policies" {
     transform_ruleset_name = optional(string)
     origin_ruleset_name    = optional(string)
     redirect_ruleset_name  = optional(string)
+    config_ruleset_name    = optional(string)
 
     cache_rules = optional(list(object({
       name        = string
@@ -207,6 +222,16 @@ variable "rule_policies" {
       target_url_expression = optional(string)
       status_code           = optional(number, 302)
       preserve_query_string = optional(bool, false)
+    })), [])
+
+    config_rules = optional(list(object({
+      name        = string
+      expression  = string
+      description = optional(string)
+      enabled     = optional(bool, true)
+
+      ssl                            = optional(string)
+      acknowledge_unencrypted_origin = optional(bool, false)
     })), [])
   }))
   default = {}

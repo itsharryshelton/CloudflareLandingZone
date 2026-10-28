@@ -48,6 +48,7 @@ cloudflare/cloudflare provider            configured by the layer, never by the 
 | `bulk_redirect_list` | `bulk_redirects` | One redirect list, and optionally its rows |
 | `bulk_redirect_ruleset` | `bulk_redirects` | The account's `http_request_redirect` entry-point ruleset |
 | `cache_rules` | `rules` | One zone's `http_request_cache_settings` entry-point ruleset |
+| `config_rules` | `rules` | One zone's `http_config_settings` entry-point ruleset (Configuration Rules, such as a per-hostname SSL mode) |
 | `d1_database` | `workers` | One D1 database |
 | `device_posture` | `device_posture` | Device posture rules and service provider integrations |
 | `dns_records` | `dns` | One zone's DNS records |
