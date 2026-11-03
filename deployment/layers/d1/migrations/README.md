@@ -8,12 +8,17 @@ migrations/
 ```
 
 `<database_key>` is the logical key from `d1_databases` in an account tree - the
-same key a `d1` binding uses - so nothing here carries a database name or a UUID.
-After every successful `workers` apply,
+same key a `d1` binding in the `workers` layer uses - so nothing here carries a
+database name or a UUID. After every successful `d1` apply,
 [`d1-migrations.sh`](../../../../.github/scripts/d1-migrations.sh) reads the
 `d1_databases` output, finds the directory matching each key and applies whatever
 has not run yet. A database with no directory here is skipped; a directory naming
 no database fails the run rather than being quietly ignored.
+
+The `d1` layer applies in tier 2 and `workers` in tier 3, so a migration lands
+before the Worker code that depends on it is deployed. Write migrations so the
+Worker version already running keeps working against the new schema: add a
+column before the code reads it, and drop one only after the code has stopped.
 
 Migrations live in the layer rather than in an account tree for the same reason
 Worker source does: they are code, they are reviewed as code, and two accounts
@@ -71,7 +76,7 @@ It is committed without the executable bit, so call it with `bash`:
 
 ```bash
 CLOUDFLARE_API_TOKEN=... CLOUDFLARE_ACCOUNT_ID=... DRY_RUN=1 \
-  bash .github/scripts/d1-migrations.sh deployment/layers/workers
+  bash .github/scripts/d1-migrations.sh deployment/layers/d1
 ```
 
 It needs jq, terraform and npx (wrangler 4 is fetched through npx), and it reads

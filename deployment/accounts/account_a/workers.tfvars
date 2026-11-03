@@ -1,8 +1,10 @@
-# Account: account_a - Workers and Workers KV. Consumed by the workers layer only.
+# Account: account_a - Workers, Workers KV and queues. Consumed by the workers
+# layer only. D1 databases are declared in d1.tfvars and bound here by key.
 #
 #   terraform -chdir=layers/workers plan \
 #     -var-file=../../accounts/account_a/account.tfvars \
 #     -var-file=../../accounts/account_a/zones.tfvars \
+#     -var-file=../../accounts/account_a/d1.tfvars \
 #     -var-file=../../accounts/account_a/workers.tfvars
 #
 # Worker scripts reside in deployment/layers/workers/scripts/ and are referenced by
@@ -21,21 +23,6 @@ kv_namespaces = {
 
   cache = {
     title = "account-a-cache"
-  }
-}
-
-# ---------------------------------------------------------------------------
-# D1 databases
-# ---------------------------------------------------------------------------
-# Terraform owns the database and the binding. The schema inside it comes from
-# layers/workers/migrations/<key>/ - so this database's tables are in
-# migrations/telemetry/ - applied after every apply by
-# .github/scripts/d1-migrations.sh. A migration is an ordered one-way change,
-# which is not what a plan reconciling desired state does.
-d1_databases = {
-  telemetry = {
-    name                  = "account-a-telemetry"
-    primary_location_hint = "weur"
   }
 }
 
@@ -132,6 +119,8 @@ worker_scripts = {
         queue_key = "telemetry"
       },
       {
+        # A key from d1.tfvars. The d1 layer creates the database; this layer
+        # finds it by name.
         name            = "TELEMETRY_DB"
         type            = "d1"
         d1_database_key = "telemetry"

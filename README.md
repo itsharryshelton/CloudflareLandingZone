@@ -75,13 +75,14 @@ Platform Layer (Central Governance)
 └── wan                  (Magic WAN IPsec and GRE tunnels, BGP, static routes)
 
 Application Layer (Zone & Workload Scope)
+├── d1                   (D1 databases and their schema migrations, bound by key from workers)
 ├── zones                (Zone lifecycle, rate plans, TLS posture and settings, bot management)
 │   ├── dns              (DNS records)
 │   ├── waf              (Firewall rules, rate limiting, managed rulesets, bot traffic rules)
 │   ├── rules            (Cache, request header transform, origin, redirect and configuration rules)
 │   ├── load_balancing   (Health monitors, origin pools, failover logic)
 │   ├── origin_pulls     (Authenticated Origin Pulls: edge-to-origin mTLS, zone-wide and per hostname)
-│   ├── workers          (Workers, KV, D1, queues, routes, custom domains, cron triggers)
+│   ├── workers          (Workers, KV, queues, D1 bindings, routes, custom domains, cron triggers)
 │   ├── pages            (Pages projects: Jamstack front ends, branch deploys, bindings, custom domains)
 │   └── r2               (Buckets, CORS, lifecycle and retention rules, custom domains)
 ```
@@ -184,7 +185,7 @@ CFLZ uses GitHub Actions driven strictly by GitOps workflows. Terraform is execu
 | [.github/workflows/README.md](.github/workflows/README.md) | Pipeline, environments, token scopes, security notes                             |
 | [CONTRIBUTING.md](CONTRIBUTING.md)                         | Changing the Terraform rather than the configuration                             |
 | [modules/README.md](modules/README.md)                     | What the modules are, the rules for calling and writing one, and how they are published |
-| [deployment/layers/workers/migrations/README.md](deployment/layers/workers/migrations/README.md) | D1 schema migrations: naming, and how the pipeline applies them |
+| [deployment/layers/d1/migrations/README.md](deployment/layers/d1/migrations/README.md) | D1 schema migrations: naming, and how the pipeline applies them |
 | [deployment/layers/workers/data/kv/README.md](deployment/layers/workers/data/kv/README.md) | KV data: what Terraform owns, and bulk datasets loaded after apply |
 | [deployment/layers/origin_pulls/ca/README.md](deployment/layers/origin_pulls/ca/README.md) | The vendored Cloudflare Origin Pull CA, and refreshing it |
 

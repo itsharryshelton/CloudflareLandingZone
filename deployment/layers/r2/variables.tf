@@ -318,8 +318,8 @@ variable "allow_bucket_wide_object_expiry" {
 variable "resource_tags" {
   description = <<-EOT
     Cloudflare resource tags. The same file reaches every layer that tags - zones,
-    zerotrust, r2 and workers - and each reads `defaults`, `allowed_values` and
-    its own section, ignoring the rest. Declared in full everywhere because
+    zerotrust, r2, workers and d1 - and each reads `defaults`, `allowed_values`
+    and its own section, ignoring the rest. Declared in full everywhere because
     Terraform rejects a .tfvars attribute the type does not declare.
 
     - `defaults`       - (Optional) Tags for every resource of every type.

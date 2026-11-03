@@ -1,5 +1,5 @@
 -- Schema for the `telemetry` D1 database, written by the queue consumer in
--- scripts/queues/telemetry_processor.js.
+-- layers/workers/scripts/queues/telemetry_processor.js.
 --
 -- `id` is the queue message ID rather than a generated key, which is what makes
 -- the consumer's INSERT OR IGNORE idempotent: Queues delivers at least once, so

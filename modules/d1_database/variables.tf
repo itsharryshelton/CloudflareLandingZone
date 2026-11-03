@@ -38,8 +38,9 @@ variable "primary_location_hint" {
     The primary is where every write is executed, so this is a latency decision
     for the workload that writes rather than for the one that reads - reads can
     be served nearer the visitor by `read_replication_mode`. Cloudflare honours
-    the hint at creation only; changing it later does nothing to a database that
-    already exists.
+    the hint at creation only, so changes to it after creation are ignored: it
+    neither moves nor replaces a database that already exists. Moving one means
+    exporting the data and creating a new database.
   EOT
 
   validation {

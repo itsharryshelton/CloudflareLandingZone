@@ -1,11 +1,12 @@
 # Workers and the state behind them: one namespace per kv_namespaces entry, one
-# database per d1_databases entry, one queue per queues entry, and one Worker per
-# worker_scripts entry with its bindings, routes, custom domains and cron
-# triggers.
+# queue per queues entry, and one Worker per worker_scripts entry with its
+# bindings, routes, custom domains and cron triggers.
 #
 # Storage is declared first and referenced by key, so a binding is written as
 # `kv_namespace_key = "config"` and Terraform works out the ordering. Nothing in
 # an account tree ever carries a namespace ID, a database UUID or a queue ID.
+# D1 databases are the exception to "declared here": the d1 layer owns them, and
+# a d1_database_key is resolved by name in d1_lookup.tf.
 #
 # Ordering around queues is worth knowing about, because it is a loop that only
 # stays open by being written this way. A queue must exist before a Worker can be
@@ -36,14 +37,17 @@ module "kv_namespaces" {
   max_managed_pairs = each.value.max_managed_pairs
 }
 
-module "d1_databases" {
-  source                = "../../../modules/d1_database"
-  for_each              = local.d1_databases
-  account_id            = var.cloudflare_account_id
-  name                  = each.value.name
-  jurisdiction          = each.value.jurisdiction
-  primary_location_hint = each.value.primary_location_hint
-  read_replication_mode = each.value.read_replication_mode
+# D1 databases moved to the d1 layer. This drops them from this state without
+# deleting them: the d1 layer, which applies first, has already adopted each
+# one by name. Without `destroy = false`, removing the module block would plan
+# the destroy of every database and every row in it. Delete this block once
+# every account has applied this layer since the move.
+removed {
+  from = module.d1_databases
+
+  lifecycle {
+    destroy = false
+  }
 }
 
 module "queues" {
@@ -83,9 +87,10 @@ module "worker_scripts" {
   observability       = each.value.observability
   tail_consumers      = each.value.tail_consumers
 
-  # kv_namespace_key -> namespace ID, d1_database_key -> database UUID,
-  # queue_key -> queue name and worker_key -> Worker name are resolved in
-  # locals.tf; everything else is passed through as written.
+  # kv_namespace_key -> namespace ID, d1_database_key -> database UUID (looked
+  # up by name in d1_lookup.tf), queue_key -> queue name and worker_key ->
+  # Worker name are resolved in locals.tf; everything else is passed through as
+  # written.
   bindings = each.value.bindings
 
   # zone_key -> zone ID, resolved by name in zone_lookup.tf.

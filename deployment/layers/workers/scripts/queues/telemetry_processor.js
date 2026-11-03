@@ -21,10 +21,12 @@
  * with how many retries and into which dead letter queue - is declared on the
  * queue in workers.tfvars, not here. A queue has exactly one consumer.
  *
- * The table is created by a migration, not by Terraform and not by this Worker:
- * ../../migrations/<database_key>/0001_initial_schema.sql, applied after every
- * apply by .github/scripts/d1-migrations.sh. The columns this file reads and
- * writes - id, occurred, kind, payload - are defined there.
+ * The database is declared in accounts/<account>/d1.tfvars and created by the
+ * d1 layer. Its table is created by a migration, not by Terraform and not by
+ * this Worker: layers/d1/migrations/<database_key>/0001_initial_schema.sql,
+ * applied by .github/scripts/d1-migrations.sh after every d1 apply - which runs
+ * before this Worker is deployed. The columns this file reads and writes - id,
+ * occurred, kind, payload - are defined there.
  */
 
 const MAX_PAYLOAD_BYTES = 32 * 1024;

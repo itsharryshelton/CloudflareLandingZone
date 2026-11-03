@@ -28,10 +28,6 @@ default_observability = {
 # `wrangler kv bulk put` step against the namespace_id this layer outputs.
 default_max_managed_kv_pairs = 500
 
-# D1 placement and replication stay at the account default
-default_d1_primary_location_hint = null
-default_d1_read_replication_mode = null
-
 # Queue retention stays at Cloudflare's four days
 default_queue_message_retention_period = null
 
@@ -42,4 +38,3 @@ allow_disabled_observability      = false
 
 allow_queues_without_consumer                  = false
 allow_queue_consumer_without_dead_letter_queue = false
-allow_replicated_d1_in_jurisdiction            = false
