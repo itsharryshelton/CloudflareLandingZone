@@ -5,8 +5,10 @@
 #                                     cron triggers
 #   Account Workers KV Storage:Edit   the namespaces, and any pairs this layer
 #                                     manages
-#   Account D1:Edit                   the databases, but not the rows in them -
-#                                     a migration step needs its own token
+#   Account D1:Read                   so data.cloudflare_d1_databases can
+#                                     resolve a d1_database_key to its UUID.
+#                                     The databases themselves belong to the
+#                                     d1 layer and its token
 #   Account Queues:Edit               the queues and their consumers
 #   Zone Workers Routes:Edit          only if var.worker_scripts declares routes
 #   Zone:Read                         so data.cloudflare_zone can resolve a zone

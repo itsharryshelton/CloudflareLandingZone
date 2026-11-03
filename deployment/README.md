@@ -10,6 +10,7 @@ deployment/
 │   ├── account_governance/            # own state: members, user groups, RBAC
 │   ├── ai_gateway/                    # own state: AI gateways, caching, rate and spend limits, DLP, guardrails, dynamic routes
 │   ├── bulk_redirects/                # own state: URL redirect lists and execution ruleset
+│   ├── d1/                            # own state: D1 databases; schema migrations applied after apply
 │   ├── device_posture/                # own state: device posture checks, MDM and EDR integrations
 │   ├── dns/                           # own state: per-zone DNS records
 │   ├── gateway/                       # own state: SWG egress filtering, TLS inspection, root CA
@@ -24,7 +25,7 @@ deployment/
 │   ├── turnstile/                     # own state: Turnstile widgets, the sitekey and secret a form is protected by
 │   ├── waf/                           # own state: firewall custom rules, rate limiting, managed rulesets, bot traffic rules
 │   ├── wan/                           # own state: Magic WAN IPsec and GRE tunnels, BGP, static routes
-│   ├── workers/                       # own state: Worker scripts, KV namespaces, D1 databases, queues, routes, crons
+│   ├── workers/                       # own state: Worker scripts, KV namespaces, queues, D1 bindings, routes, crons
 │   ├── zerotrust/                     # own state: Zero Trust organisation, IdPs, Access groups, policies, applications, service tokens
 │   └── zones/                         # own state: zones, TLS posture, settings, bot management
 └── accounts/                          # config, one tree per Cloudflare account
@@ -33,6 +34,7 @@ deployment/
     │   ├── account_governance.tfvars  # dashboard access -> account_governance
     │   ├── ai_gateway.tfvars          # LLM proxies      -> ai_gateway
     │   ├── bulk_redirects.tfvars      # URL redirects    -> bulk_redirects
+    │   ├── d1.tfvars                  # D1 inventory     -> d1, workers
     │   ├── device_posture.tfvars      # posture checks   -> device_posture
     │   ├── dns.tfvars                 # DNS records      -> dns
     │   ├── gateway.tfvars             # egress filtering -> gateway
@@ -43,12 +45,12 @@ deployment/
     │   ├── pages.tfvars               # Jamstack sites   -> pages
     │   ├── r2.tfvars                  # object storage   -> r2
     │   ├── rules.tfvars               # traffic rules    -> rules
-    │   ├── tags.tfvars                # resource tags    -> zones, zerotrust, r2, workers
+    │   ├── tags.tfvars                # resource tags    -> zones, zerotrust, r2, workers, d1
     │   ├── tunnels.tfvars             # Cloudflare Tunnel -> tunnels
     │   ├── turnstile.tfvars           # Turnstile widgets -> turnstile
     │   ├── waf.tfvars                 # firewall rules   -> waf
     │   ├── wan.tfvars                 # site tunnels     -> wan
-    │   ├── workers.tfvars             # edge compute, KV, D1, queues -> workers
+    │   ├── workers.tfvars             # edge compute, KV, queues -> workers
     │   ├── zerotrust.tfvars           # Access posture   -> zerotrust
     │   ├── zone_config.tfvars         # zone settings    -> zones
     │   └── zones.tfvars               # zone inventory   -> zones, bulk_redirects, dns, waf, lb, logpush, origin_pulls, pages, r2, rules, tunnels, workers
@@ -73,6 +75,7 @@ Tier 1: Platform Authorisation
 Tier 2: Foundational Zones & Account Services
 ├── zones                              (provisions zone containers, rate plans, and baseline TLS posture)
 ├── bulk_redirects                     (account-scoped redirect lists and rules; independent of zones)
+├── d1                                 (account-scoped databases and their migrations; required before workers)
 ├── device_posture                     (account-scoped posture checks and MDM/EDR integrations; required before zerotrust)
 ├── gateway                            (account-scoped SWG policies, TLS decryption settings, root CA)
 ├── lists                              (account-scoped IP, ASN, and hostname lists; required before WAF)
@@ -90,13 +93,13 @@ Tier 3: Zone-Dependent & Consumer Layers
 ├── rules                              (resolves zone IDs; manages cache, transform, origin, redirect and configuration rules)
 ├── tunnels                            (resolves zone IDs; publishes tunnel hostnames as proxied CNAMEs)
 ├── waf                                (resolves zone IDs; consumes account lists created in Tier 2)
-├── workers                            (resolves zone IDs; binds script routes and custom domains; provisions KV, D1 and queues)
+├── workers                            (resolves zone IDs and D1 names; binds script routes and custom domains; provisions KV and queues)
 └── zerotrust                          (Access hostnames require valid, proxied DNS records)
 ```
 
 Tier membership is derived directly from the Terraform source code - calling the `zone_base` module means Tier 2, resolving a zone with `data "cloudflare_zone"` means Tier 3 - except where the source cannot express the dependency at all. Those two layers declare their own tier in a `tier.tf` holding `locals { apply_tier = <n> }`, which `tf-matrix.sh` reads in preference to the derivation:
 - **Tier 1 (`account_governance`):** Account-wide permissions and resource-group scopes. Every downstream token is evaluated against what this layer applies, so it runs on its own first. Declared in `tier.tf`, because the dependency is on Cloudflare's authorisation decision rather than on any Terraform attribute.
-- **Tier 2 (`zones`, `ai_gateway`, `bulk_redirects`, `device_posture`, `gateway`, `lists`, `turnstile`, `wan`):** `zones` creates the zone containers at Cloudflare. The remaining layers touch no zones, so nothing waits on them. `lists` is deliberately placed in Tier 2 so that named lists exist before `waf` references them, and `device_posture` so that a posture rule exists before a `zerotrust` Access policy requires it.
+- **Tier 2 (`zones`, `ai_gateway`, `bulk_redirects`, `d1`, `device_posture`, `gateway`, `lists`, `turnstile`, `wan`):** `zones` creates the zone containers at Cloudflare. The remaining layers touch no zones, so nothing waits on them. `lists` is deliberately placed in Tier 2 so that named lists exist before `waf` references them, `device_posture` so that a posture rule exists before a `zerotrust` Access policy requires it, and `d1` so that a database and its migrations exist before `workers` looks it up by name and deploys code against it.
 - **Tier 3 (`dns`, `load_balancing`, `logpush`, `origin_pulls`, `pages`, `r2`, `rules`, `tunnels`, `waf`, `workers`, `zerotrust`):** These layers resolve zones dynamically via `data "cloudflare_zone"`, which fails at plan time until Tier 2 has created the zone. `tunnels` resolves one for the proxied CNAME behind each public hostname, `pages` one per zone a custom domain's `zone_key` names, and `logpush` one for each zone-scoped job. `origin_pulls` resolves one per zone it configures, and belongs behind `zones` for a second reason: the zone's SSL mode has to be `full` or `strict` before authenticating to the origin means anything. `zerotrust` is included here by declaration in its own `tier.tf`, because Access applications are addressed by hostname and require the corresponding zone and DNS record to exist, yet the layer never reads a zone for the derivation to find.
 
 ## Why split this way
@@ -177,6 +180,7 @@ The pipeline maps variable files to layers dynamically. The table below lists th
 | `account_governance` | `account.tfvars`, `account_governance.tfvars`                         | None                                                                                                                          |
 | `ai_gateway`         | `account.tfvars`, `ai_gateway.tfvars`                                 | None (BYOK provider keys live in Secrets Store and are added outside Terraform)                                               |
 | `bulk_redirects`     | `account.tfvars`, `zones.tfvars`, `bulk_redirects.tfvars`             | None                                                                                                                          |
+| `d1`                 | `account.tfvars`, `d1.tfvars`, `tags.tfvars`                          | None                                                                                                                          |
 | `device_posture`     | `account.tfvars`, `device_posture.tfvars`                             | `TF_VAR_device_posture_integration_secrets` (from the `<account>-plan` environment)                                           |
 | `dns`                | `account.tfvars`, `zones.tfvars`, `dns.tfvars`                        | None                                                                                                                          |
 | `gateway`            | `account.tfvars`, `gateway.tfvars`                                    | None                                                                                                                          |
@@ -191,11 +195,11 @@ The pipeline maps variable files to layers dynamically. The table below lists th
 | `turnstile`          | `account.tfvars`, `turnstile.tfvars`                                  | None (Cloudflare issues the widget secret, and it lands in this layer's state)                                                |
 | `waf`                | `account.tfvars`, `zones.tfvars`, `waf.tfvars`                        | None                                                                                                                          |
 | `wan`                | `account.tfvars`, `wan.tfvars`                                        | `TF_VAR_wan_ipsec_tunnel_psks`, `TF_VAR_wan_bgp_md5_keys` (not yet exported by the pipeline)                                  |
-| `workers`            | `account.tfvars`, `zones.tfvars`, `workers.tfvars`, `tags.tfvars`     | None (Worker secrets use Secrets Store)                                                                                       |
+| `workers`            | `account.tfvars`, `zones.tfvars`, `d1.tfvars`, `workers.tfvars`, `tags.tfvars` | None (Worker secrets use Secrets Store)                                                                                       |
 | `zerotrust`          | `account.tfvars`, `zerotrust.tfvars`, `tags.tfvars`                   | `TF_VAR_identity_provider_secrets` (from the `<account>-plan` environment; must be set, `{}` only if no OAuth-type provider is declared) |
 | `zones`              | `account.tfvars`, `zones.tfvars`, `zone_config.tfvars`, `tags.tfvars` | None                                                                                                                          |
 
-Like `zones.tfvars`, `tags.tfvars` reaches several layers: it assigns `resource_tags`, which `zones`, `zerotrust`, `r2` and `workers` each declare and each read their own section of. The layers resolve and output the tags; a pipeline job writes them after apply, because the provider has no tagging resource yet. See [Resource tags](../.github/workflows/README.md#resource-tags).
+Like `zones.tfvars`, `tags.tfvars` reaches several layers: it assigns `resource_tags`, which `zones`, `zerotrust`, `r2`, `workers` and `d1` each declare and each read their own section of. `d1.tfvars` works the same way as `zones.tfvars`: it is the D1 inventory, the `d1` layer creates what it lists, and `workers` resolves a binding's key against it by name - so it must assign `d1_databases` and nothing else, or it stops reaching `workers`. The layers resolve and output the tags; a pipeline job writes them after apply, because the provider has no tagging resource yet. See [Resource tags](../.github/workflows/README.md#resource-tags).
 
 ### Remote state
 
@@ -232,7 +236,8 @@ Keys are scoped locally to each account tree: `primary` in `account_a` is comple
 - `waf` and `rules`: two policies for the same zone; an unknown baseline name or a baseline missing its input; managed rulesets or bot traffic below the zone tier they need; a cache rule that could cache a personalised response.
 - `load_balancing`, `pages`, `r2`, `tunnels`, `workers`: a hostname outside the zone its `zone_key` names.
 - `r2`: public `.r2.dev` access, wildcard CORS, or a bucket-wide deleting lifecycle rule.
-- `workers`: a queue that dead letters into itself; a queue with no consumer, or a consumer with no dead letter queue; a D1 database in a `jurisdiction` with read replication on; a `secret_text` binding; a Worker with no compatibility date or with observability off.
+- `workers`: a queue that dead letters into itself; a queue with no consumer, or a consumer with no dead letter queue; a D1 binding to a database the `d1` layer has not created; a `secret_text` binding; a Worker with no compatibility date or with observability off.
+- `d1`: a database in a `jurisdiction` with read replication on, or an existing database adopted under a different jurisdiction from the one declared.
 - `wan`: a static route to an unmanaged tunnel or next hop, a prefix reachable over one tunnel, a public or default route, or a tunnel with health checks off.
 - `tunnels`: a route naming an undeclared tunnel, a public or default private network route, or an origin with TLS verification off.
 - `logpush`: a zone-scoped job on a zone below Enterprise, a dataset pushed from the wrong scope, or a credential committed in a Logpush destination.
@@ -1162,9 +1167,9 @@ A row's `source_url` is a hostname and path, with no scheme or query string; `ta
 
 ---
 
-## Workers, KV, D1 & Queues
+## Workers, KV & Queues
 
-The `workers` layer manages Cloudflare Workers scripts, Workers KV namespaces, D1 databases, queues, script bindings, routes, custom domains, and cron triggers.
+The `workers` layer manages Cloudflare Workers scripts, Workers KV namespaces, queues, script bindings, routes, custom domains, and cron triggers. It binds D1 databases but does not create them: those belong to the [`d1` layer](#d1).
 
 ```hcl
 # accounts/account_a/workers.tfvars
@@ -1205,19 +1210,12 @@ worker_scripts = {
 
 A Worker can also take `custom_domains = [{ zone_key = "primary", hostname = "api.example.com" }]` and `cron_schedules = ["*/30 * * * *"]`. A custom domain must sit inside its zone, must not also be a record in `dns.tfvars`, and cannot share a host with a route. A cron expression has five fields, runs in UTC, and needs a `scheduled()` handler in the script.
 
-### Serverless State: D1 & Queues
+### Serverless State: Queues & D1 Bindings
 
-D1 databases and queues are declared in the same file and bound by logical key, so no account tree carries a database UUID or a queue ID.
+Queues are declared in the same file as the Workers that use them, and D1 databases in `d1.tfvars`. Both are bound by logical key, so no account tree carries a database UUID or a queue ID.
 
 ```hcl
 # accounts/account_a/workers.tfvars - the same file as above: these Workers go in its one worker_scripts map
-d1_databases = {
-  telemetry = {
-    name                  = "account-a-telemetry"
-    primary_location_hint = "weur"
-  }
-}
-
 queues = {
   telemetry = {
     name = "account-a-telemetry"
@@ -1251,6 +1249,7 @@ worker_scripts = {
     bindings = [
       # Producer side: this Worker writes to the queue.
       { name = "TELEMETRY_QUEUE", type = "queue", queue_key = "telemetry" },
+      # A key from d1.tfvars, resolved to the database's UUID by name.
       { name = "TELEMETRY_DB", type = "d1", d1_database_key = "telemetry" },
     ]
   }
@@ -1259,17 +1258,14 @@ worker_scripts = {
 
 - **Producer and consumer are declared in different places.** A producer is a `queue` binding on the Worker that writes; the consumer is declared on the queue, because Cloudflare gives a queue exactly one. A Worker may consume several queues, and any number of Workers may produce to one.
 - **Ordering is derived, not declared.** A queue must exist before a Worker can bind it, and the Worker must exist before it can be named as that queue's consumer. The layer creates the queue from variables alone (`queue` module) and attaches the consumer separately, from the deployed Worker's name (`queue_consumer` module), so Terraform works out `queue -> Worker -> consumer` from the references without a `depends_on`. The consumer has to be its own module call: Terraform treats `module.queues[key]` as depending on everything inside that module, so a consumer inside it would leave the Worker waiting on itself.
-- **D1 schema is not Terraform's.** The layer owns the database and the binding; tables come from migrations. A migration is an ordered one-way change, which is not what a plan reconciling desired state does.
-
-  Migrations live in the layer at `migrations/<database_key>/0001_initial_schema.sql`, keyed by the same logical key a binding uses. After every successful `workers` apply, [`d1-migrations.sh`](../.github/scripts/d1-migrations.sh) reads the `d1_databases` output, applies whatever has not run yet and records it in a `d1_migrations` table inside each database, so a re-run is a no-op. File names are validated before anything is applied, a directory naming a database the account does not declare fails the run, and a migration that removes data is called out in the log. See [migrations/README.md](layers/workers/migrations/README.md).
-- **A database's name, jurisdiction and location hint are set at creation.** A replaced D1 database is a new, empty one, so read a plan proposing a replacement as a plan to lose the data, and export first. `read_replication_mode` is the exception: it changes in place, though turning it off takes up to 24 hours to take effect.
+- **A D1 binding is looked up, not created.** `d1_database_key` names an entry in `d1.tfvars`, which this layer is also given. Only databases a binding names are looked up (`d1_lookup.tf`), by exact name, without reading the `d1` layer's state. A database that is declared but not created yet fails the plan by name: apply `d1` first, which the pipeline does by running it a tier earlier.
 
 ### Architectural Standards
 - **External Source Files:** each Worker is one ready-to-run JavaScript file under `deployment/layers/workers/scripts/` (`worker_source_dir`), named by `script_file` relative to that directory. It is uploaded unmodified: there is no bundling or TypeScript compile, and files it imports are not uploaded. Build a TypeScript or multi-file Worker first and commit the output. Script source code is not embedded directly in `.tfvars`.
 - **Content Hashing:** the layer passes each script by path with its `filesha256()` as `content_sha256`. The source never enters state; the hash is what makes an edit show up in a plan.
 - **Secrets Store Integration:** Production secrets are bound using Cloudflare Secrets Store references rather than plain-text environment variables, preventing credential exposure in Terraform state. The store and its secrets are created outside Terraform, in the dashboard or with wrangler; the account tree names the store by ID and the secret by name.
 - **Workers KV Scalability:** Terraform manages at most `default_max_managed_kv_pairs` (500) pairs per namespace, from `pairs` or a `pairs_file`; a namespace can override it with `max_managed_pairs`, and going over fails the plan. A larger dataset goes in `layers/workers/data/bulk/`, and `kv-bulk-load.sh` loads it after every apply. See [data/kv/README.md](layers/workers/data/kv/README.md).
-- **Data Planes Stay Out Of State:** KV pairs beyond configuration, D1 rows and queue messages are all loaded or produced outside Terraform. The layer owns the container and the binding; the pipeline and the application own the contents.
+- **Data Planes Stay Out Of State:** KV pairs beyond configuration and queue messages are loaded or produced outside Terraform. The layer owns the container and the binding; the pipeline and the application own the contents.
 
 ### Guardrails
 
@@ -1282,7 +1278,6 @@ Set in `layers/workers/defaults.auto.tfvars`; an account can override one in its
 | `allow_disabled_observability` | `false` | Fails the plan if a Worker's resolved `observability.enabled` is false. Turning off `logs_enabled` or `invocation_logs`, or sampling at 0, is not caught. Sample with `head_sampling_rate` where the concern is volume. |
 | `allow_queues_without_consumer` | `false` | Fails the plan if a queue has nothing reading it. Producers keep succeeding while the backlog ages out at the retention period, with nothing raising an error. A queue another queue dead letters into is exempt. |
 | `allow_queue_consumer_without_dead_letter_queue` | `false` | Fails the plan if a consumer has no dead letter queue, in which case a message that fails `max_retries` times is deleted with no copy to examine. |
-| `allow_replicated_d1_in_jurisdiction` | `false` | Fails the plan if a database restricted to a `jurisdiction` also has read replication on, which keeps a copy of the data in every supported region. |
 
 ### Governing defaults
 
@@ -1291,11 +1286,66 @@ Set in `layers/workers/defaults.auto.tfvars`; an account can override one in its
 | `default_compatibility_date` | `"2026-01-01"` | Pins every Worker that sets no date of its own, and is what satisfies `allow_unpinned_compatibility_date`. Bumping it redeploys all of those Workers in one plan. |
 | `default_observability` | `enabled`, `logs_enabled` and `invocation_logs` all `true` | Merged field by field into each Worker's own `observability`. |
 | `default_max_managed_kv_pairs` | `500` | Ceiling on the pairs Terraform manages per namespace. |
-| `default_d1_read_replication_mode` | `null` | Setting it to `"auto"` trips `allow_replicated_d1_in_jurisdiction` for every database with a `jurisdiction`. |
 | `default_queue_message_retention_period` | `null` | Cloudflare's own default, 4 days. A queue may set 60 to 1209600 seconds. |
-| `default_logpush`, `default_usage_model`, `default_placement_mode`, `default_compatibility_flags`, `default_d1_primary_location_hint` | `false`, `null`, `null`, `[]`, `null` | Applied to a Worker or database that sets none of its own. |
+| `default_logpush`, `default_usage_model`, `default_placement_mode`, `default_compatibility_flags` | `false`, `null`, `null`, `[]` | Applied to a Worker that sets none of its own. |
 
-The plan also fails, with no override, for a key that names nothing (`zone_key`, `kv_namespace_key`, `d1_database_key`, `queue_key`, a binding's or consumer's `worker_key`, `dead_letter_queue_key`), a queue that dead letters into itself, a missing script or `pairs_file`, a route pattern or custom domain claimed by two Workers, and two Worker, queue or D1 names that differ only in case.
+The plan also fails, with no override, for a key that names nothing (`zone_key`, `kv_namespace_key`, `d1_database_key`, `queue_key`, a binding's or consumer's `worker_key`, `dead_letter_queue_key`), a D1 binding to a database that does not exist yet, a queue that dead letters into itself, a missing script or `pairs_file`, a route pattern or custom domain claimed by two Workers, and two Worker or queue names that differ only in case.
+
+---
+
+## D1
+
+The `d1` layer manages D1 databases - Cloudflare's serverless SQLite - and applies their schema migrations after every apply. A Worker binds a database by key in the `workers` layer; this layer only creates it.
+
+```hcl
+# accounts/account_a/d1.tfvars - read by the d1 and workers layers
+d1_databases = {
+  telemetry = {
+    name                  = "account-a-telemetry"
+    primary_location_hint = "weur"
+  }
+}
+```
+
+Each entry takes `name`, and optionally `primary_location_hint` (`wnam`, `enam`, `weur`, `eeur`, `apac`, `oc`), `jurisdiction` (`eu`, `fedramp`, `us`) and `read_replication_mode` (`auto`, `disabled`).
+
+`d1.tfvars` is an inventory, like `zones.tfvars`: the pipeline gives it to both layers, so it must assign `d1_databases` and nothing else. A `d1`-only setting placed in it stops the file reaching `workers`, and every D1 binding then fails its plan. Override a default or guardrail below in a file of its own, such as `d1_settings.tfvars`.
+
+### Architectural Standards
+- **Own State, Own Token:** a `workers` apply redeploys scripts far more often than a database changes, and never has a database in its plan. Only this layer's token holds `D1:Edit`; the `workers` token needs `D1:Read` to resolve a name.
+- **Applied Before Workers:** `d1` resolves no zone, so it is derived into tier 2, and `workers` into tier 3. A new database, and any migration added alongside it, exist before the Worker code that uses them is deployed. Write migrations so the Worker version already running keeps working against the new schema.
+- **Schema Is Not Terraform's:** the layer owns the database; tables come from migrations. A migration is an ordered one-way change, which is not what a plan reconciling desired state does.
+
+  Migrations live in the layer at `migrations/<database_key>/0001_initial_schema.sql`, keyed by the same logical key a binding uses. After every successful `d1` apply, [`d1-migrations.sh`](../.github/scripts/d1-migrations.sh) reads the `d1_databases` output, applies whatever has not run yet and records it in a `d1_migrations` table inside each database, so a re-run is a no-op. File names are validated before anything is applied, a directory naming a database the account does not declare fails the run, and a migration that removes data is called out in the log. See [migrations/README.md](layers/d1/migrations/README.md).
+- **Existing Databases Are Adopted:** every declared name is looked up, and a database that already exists under it is imported rather than created again (`imports.tf`) - one made with `wrangler d1 create`, one this layer lost from state, or one the `workers` layer owned before this layer existed. No UUID is written anywhere; the import ID is built from the lookup. An adopted database must already have the declared `jurisdiction`, or the plan fails rather than replacing it.
+- **Name and Jurisdiction Are Fixed at Creation:** changing either replaces the database, and a replaced D1 database is a new, empty one - read a plan proposing a replacement as a plan to lose the data, and export first. Renaming a key does the same. `primary_location_hint` only steers where a database is created, so a later change to it is ignored. `read_replication_mode` changes in place, though turning it off takes up to 24 hours to take effect.
+
+### Guardrails
+
+Set in `layers/d1/defaults.auto.tfvars`.
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `allow_replicated_d1_in_jurisdiction` | `false` | Fails the plan if a database restricted to a `jurisdiction` also has read replication on, which keeps a copy of the data in every supported region. |
+
+### Governing defaults
+
+| Setting | Default | Effect |
+| --- | --- | --- |
+| `default_d1_read_replication_mode` | `null` | Setting it to `"auto"` trips `allow_replicated_d1_in_jurisdiction` for every database with a `jurisdiction`. |
+| `default_d1_primary_location_hint` | `null` | Applied to a database that sets none of its own. Cloudflare places it near where it is first written from. |
+
+The plan also fails, with no override, for two entries sharing a name (case-insensitive), and for an existing database adopted under a different jurisdiction from the one declared.
+
+### Moving from the `workers` layer
+
+D1 databases were declared in `workers.tfvars` before this layer existed. The move keeps every database and every row:
+
+1. Move the `d1_databases` block from `accounts/<account>/workers.tfvars` into a new `accounts/<account>/d1.tfvars`, unchanged. Move any `default_d1_*` or `allow_replicated_d1_in_jurisdiction` override out of `workers.tfvars` into a file of its own; the `workers` layer no longer declares them.
+2. Create the `<account>-d1-apply` environment with a `D1:Edit` token (`bootstrap-environments.sh` and `bootstrap-account-tokens.sh` both cover it). The `workers` token can drop to `D1:Read`.
+3. Apply. `d1` runs first and adopts each existing database by name, with no change to it. `workers` then drops the databases from its own state through the `removed` block in `workers.tf`, which has `destroy = false`, and resolves each binding to the same UUID as before, so no Worker changes.
+
+Read both plans before approving. The `d1` plan should show one import per database and nothing else - except, where `d1.tfvars` sets no `read_replication_mode`, an in-place change of the imported `read_replication` to null; set the mode the database already has (`"disabled"` unless somebody turned replicas on) to avoid it. The `workers` plan should say each database "will no longer be managed by Terraform, but will not be destroyed". A destroy or replacement of a `cloudflare_d1_database` in either is a reason to stop.
 
 ---
 
@@ -1666,11 +1716,12 @@ The Release Manager automates:
 Within your customer's dedicated deployment repository, you can manage multiple administrative accounts (for example: `production`, `staging`, `development`):
 
 1. Create a directory `accounts/<account_name>/`.
-2. Copy all twenty-three template `.tfvars` files from `accounts/account_a/`:
+2. Copy all twenty-four template `.tfvars` files from `accounts/account_a/`:
    - `account.tfvars`
    - `account_governance.tfvars`
    - `ai_gateway.tfvars`
    - `bulk_redirects.tfvars`
+   - `d1.tfvars`
    - `device_posture.tfvars`
    - `dns.tfvars`
    - `gateway.tfvars`

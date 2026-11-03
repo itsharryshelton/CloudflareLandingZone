@@ -2,11 +2,12 @@
 
 # d1-migrations.sh <layer_dir>
 #
-# Applies the committed SQL migrations to the D1 databases the workers layer has
-# just created.
+# Applies the committed SQL migrations to the D1 databases the d1 layer has just
+# created or adopted. The d1 layer applies in tier 2, ahead of the workers layer,
+# so the schema is in place before any Worker that reads it is deployed.
 #
 #   $ CLOUDFLARE_API_TOKEN=... CLOUDFLARE_ACCOUNT_ID=... \
-#       .github/scripts/d1-migrations.sh deployment/layers/workers
+#       .github/scripts/d1-migrations.sh deployment/layers/d1
 #
 # WHY THIS IS NOT TERRAFORM
 # -------------------------
@@ -16,17 +17,17 @@
 # proposes to destroy. Modelling `CREATE TABLE` as a Terraform resource gets you
 # a plan that offers to drop a table because somebody deleted a file.
 #
-# So the layer owns the database and the binding, and the schema is applied here,
+# So the layer owns the database, and the schema is applied here,
 # against the database_id the layer outputs. wrangler keeps a `d1_migrations`
 # table inside each database recording which files it has run, which is what
 # makes a re-run of this script a no-op rather than a second application.
 #
 # WHERE THE FILES LIVE
 # --------------------
-#   deployment/layers/workers/migrations/<database_key>/0001_initial_schema.sql
+#   deployment/layers/d1/migrations/<database_key>/0001_initial_schema.sql
 #
 # <database_key> is the logical key from `d1_databases` in an account tree - the
-# same key a binding uses - so nothing here needs a database name or a UUID, and
+# same key a workers-layer binding uses - so nothing here needs a database name or a UUID, and
 # adding a migration is a file rather than an edit to this script.
 #
 # Migrations sit in the layer rather than in an account tree for the same reason

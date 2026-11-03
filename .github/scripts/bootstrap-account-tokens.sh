@@ -460,7 +460,7 @@ JSON
 WORKERS_ACCT_PERMS="$(build_perm_array "account" \
   "Account Settings:Read|Account Settings Read" \
   "Cloudflare Agents:Edit|CF Agents:Edit|Cloudflare Agents Write|CF Agents Write|Agents Write|Cloudflare Agents Read" \
-  "D1:Edit|D1 Write" \
+  "D1:Read|D1 Read" \
   "Pages:Edit|Pages Write" \
   "Queues:Edit|Queues Write" \
   "Secrets Store:Edit|Secrets Store Write" \
@@ -686,6 +686,27 @@ TOKEN_SPECS["terraform-aigateway-apply"]="$(cat <<JSON
 JSON
 )"
 
+# 9i. terraform-d1-apply
+# D1:Edit covers the databases, the name lookup that adopts existing ones, and
+# the post-apply migrations, which run as queries. It also reads and writes every
+# row on the account, which is why the workers token only gets D1:Read.
+D1_ACCT_PERMS="$(build_perm_array "account" "D1:Edit|D1 Write")"
+TOKEN_SPECS["terraform-d1-apply"]="$(cat <<JSON
+{
+  "name": "terraform-d1-apply",
+  "policies": [
+    {
+      "effect": "allow",
+      "permission_groups": $D1_ACCT_PERMS,
+      "resources": {
+        "$ACCOUNT_RESOURCE": "*"
+      }
+    }
+  ]
+}
+JSON
+)"
+
 # 10. terraform-zone-apply
 ZONE_PERMS="$(build_perm_array "zone" \
   "DNS:Edit|DNS Write" \
@@ -736,6 +757,7 @@ TOKEN_NAMES=(
   "terraform-plan"
   "terraform-accountgovernance-apply"
   "terraform-aigateway-apply"
+  "terraform-d1-apply"
   "terraform-deviceposture-apply"
   "terraform-dns-apply"
   "terraform-gateway-apply"
@@ -860,6 +882,7 @@ SECURITY WARNING & NEXT STEPS:
    gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-plan
    gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-account_governance-apply
    gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-ai_gateway-apply
+   gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-d1-apply
    gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-device_posture-apply
    gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-dns-apply
    gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-gateway-apply

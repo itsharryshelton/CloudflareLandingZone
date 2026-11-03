@@ -2,10 +2,12 @@
 # variable validation cannot compare two variables, so they live on a state-only
 # resource from Terraform's built-in provider. No credentials, no API calls.
 #
-# Every condition here reads var.* or local.worker_baseline, never the resolved
-# local.worker_scripts: that one carries module outputs, which are unknown until
-# apply, and a precondition on an unknown value is deferred to apply - which is
-# after the operator has stopped looking at the plan.
+# Every condition here reads var.*, local.worker_baseline or a data source,
+# never the resolved local.worker_scripts: that one carries module outputs,
+# which are unknown until apply, and a precondition on an unknown value is
+# deferred to apply - which is after the operator has stopped looking at the
+# plan. Data sources are read at plan time, so the D1 lookup is safe to assert
+# on.
 
 resource "terraform_data" "preflight" {
   input = {
@@ -34,7 +36,12 @@ resource "terraform_data" "preflight" {
 
     precondition {
       condition     = length(local.dangling_d1_database_keys) == 0
-      error_message = "A binding references a D1 database that this layer does not declare: ${join("; ", local.dangling_d1_database_keys)}. Valid keys: ${join(", ", keys(var.d1_databases))}. A database created elsewhere can still be bound - pass its database_id directly instead."
+      error_message = "A binding references a D1 database that is not in var.d1_databases: ${join("; ", local.dangling_d1_database_keys)}. Valid keys: ${join(", ", keys(var.d1_databases))}. Both this layer and the d1 layer must be given the same accounts/<account>/d1.tfvars, which must assign d1_databases and nothing else - a d1-only setting in it stops the file reaching this layer. A database created outside the d1 layer can still be bound - pass its database_id directly instead."
+    }
+
+    precondition {
+      condition     = length(local.unresolved_d1_databases) == 0
+      error_message = "These D1 databases are bound by a Worker but do not exist at Cloudflare yet: ${join("; ", local.unresolved_d1_databases)}. The d1 layer creates them, and applies in an earlier tier than this one; apply it for this account first. A hand-dispatched plan of every layer shows this for any database added in the same change."
     }
 
     precondition {
@@ -65,11 +72,6 @@ resource "terraform_data" "preflight" {
     precondition {
       condition     = length(local.consumers_without_dead_letter_queue) == 0
       error_message = "These queue consumers have no dead letter queue: ${join("; ", local.consumers_without_dead_letter_queue)}. A message that fails max_retries times is deleted, with no error and no copy to look at - the batch that broke the consumer is the one nobody can examine. Add dead_letter_queue_key pointing at another entry in var.queues, or set allow_queue_consumer_without_dead_letter_queue = true where the messages are genuinely disposable."
-    }
-
-    precondition {
-      condition     = length(local.replicated_d1_in_jurisdiction) == 0
-      error_message = "These D1 databases are restricted to a jurisdiction and have read replication on: ${join("; ", local.replicated_d1_in_jurisdiction)}. Replication keeps a copy of the data in every supported region, which is the opposite of what the jurisdiction was set to achieve. Set read_replication_mode = \"disabled\" on the database, check default_d1_read_replication_mode, or set allow_replicated_d1_in_jurisdiction = true if the jurisdiction was a latency preference rather than a compliance requirement."
     }
 
     precondition {

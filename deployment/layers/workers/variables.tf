@@ -1,13 +1,15 @@
 # Layer workers - inputs.
 #
 # Cloudflare Workers and the state they sit on: the scripts, what they are
-# allowed to reach, the KV namespaces, D1 databases and queues behind them, and
-# the routes, custom domains and cron triggers that invoke them. Holds its own
-# state, so an apply here can never propose destroying a zone.
+# allowed to reach, the KV namespaces and queues behind them, and the routes,
+# custom domains and cron triggers that invoke them. D1 databases are bound
+# here but owned by the d1 layer. Holds its own state, so an apply here can
+# never propose destroying a zone or a database.
 #
 # Config files:
 #   accounts/<account>/account.tfvars - the account ID, shared with every layer
 #   accounts/<account>/zones.tfvars   - the zone inventory, shared with every layer
+#   accounts/<account>/d1.tfvars      - the D1 inventory, shared with the d1 layer
 #   accounts/<account>/workers.tfvars - the scripts and the storage they bind,
 #                                       consumed only here
 #
@@ -128,41 +130,20 @@ variable "kv_namespaces" {
 
 variable "d1_databases" {
   description = <<-EOT
-    D1 databases, keyed by a logical key. A Worker binding refers to a database by
-    that key, so no account tree ever carries a database UUID.
+    D1 inventory: logical key => database. The same file the d1 layer is
+    given, so the keys mean the same thing in both.
 
-    - `name`                  - Database name, as the dashboard and
-                                `wrangler d1` show it. Unique within the account.
-    - `primary_location_hint` - (Optional) Region the primary is placed in: wnam,
-                                enam, weur, eeur, apac or oc. Falls back to
-                                `var.default_d1_primary_location_hint`. Honoured
-                                at creation only.
-    - `jurisdiction`          - (Optional) Data residency restriction: eu,
-                                fedramp or us. Fixed at creation, and not the
-                                same thing as a location hint - this one is a
-                                constraint rather than a preference.
-    - `read_replication_mode` - (Optional) "auto" or "disabled". Falls back to
-                                `var.default_d1_read_replication_mode`.
+    This layer does not create databases. It looks up only the databases a
+    binding's `d1_database_key` references, to get their UUIDs (see
+    d1_lookup.tf), which keeps the two layers' states independent. The d1 layer
+    applies first, so a database is there to be found by the time this layer
+    plans.
 
-    SCHEMA AND DATA ARE NOT MANAGED HERE
-    Terraform owns the database and the binding; the tables inside it belong to
-    the application. A migration is an ordered, one-way change that has to be
-    applied in sequence, which is not what a plan reconciling desired state does.
-
-    Migrations are committed to this layer, in a directory named for the same key
-    used here:
-
-      layers/workers/migrations/<key>/0001_initial_schema.sql
-
-    .github/scripts/d1-migrations.sh applies them after every apply, against the
-    ID this layer outputs. See layers/workers/migrations/README.md.
-
-    EVERY FIELD HERE IS REPLACE-ON-CHANGE
-    Cloudflare fixes the name, jurisdiction and location when the database is
-    created. Editing any of them destroys the database and creates another, and a
-    destroyed D1 database takes every row with it - there is no snapshot and no
-    undo. A plan that proposes replacing a database is a plan to lose its data;
-    read it as such and export first.
+    - `name` - Database name. The only field this layer reads; the rest are
+               declared so the shared inventory file can carry them for the d1
+               layer. Terraform rejects a .tfvars attribute that the variable
+               type does not declare, so omitting one here would break this
+               layer's run.
   EOT
   type = map(object({
     name                  = string
@@ -174,36 +155,7 @@ variable "d1_databases" {
 
   validation {
     condition     = alltrue([for key in keys(var.d1_databases) : can(regex("^[a-z0-9_]+$", key))])
-    error_message = "d1_databases keys must be lowercase alphanumeric with underscores - they become Terraform resource addresses and state keys."
-  }
-
-  validation {
-    condition     = length(distinct([for database in var.d1_databases : lower(database.name)])) == length(var.d1_databases)
-    error_message = "Two d1_databases entries share a name. A D1 database name is unique within an account, so the second create is refused after the first has been made."
-  }
-
-  validation {
-    condition = alltrue([
-      for database in var.d1_databases :
-      database.primary_location_hint == null || contains(["wnam", "enam", "weur", "eeur", "apac", "oc"], coalesce(database.primary_location_hint, "wnam"))
-    ])
-    error_message = "Each d1_databases[*].primary_location_hint must be null or one of: wnam, enam, weur, eeur, apac, oc."
-  }
-
-  validation {
-    condition = alltrue([
-      for database in var.d1_databases :
-      database.jurisdiction == null || contains(["eu", "fedramp", "us"], coalesce(database.jurisdiction, "eu"))
-    ])
-    error_message = "Each d1_databases[*].jurisdiction must be null or one of: eu, fedramp, us."
-  }
-
-  validation {
-    condition = alltrue([
-      for database in var.d1_databases :
-      database.read_replication_mode == null || contains(["auto", "disabled"], coalesce(database.read_replication_mode, "auto"))
-    ])
-    error_message = "Each d1_databases[*].read_replication_mode must be null, \"auto\" or \"disabled\"."
+    error_message = "d1_databases keys must be lowercase alphanumeric with underscores."
   }
 }
 
@@ -395,7 +347,8 @@ variable "worker_scripts" {
                              namespace's ID. Use this rather than `namespace_id`
                              so no account tree carries a hex string.
       - `d1_database_key`  - a key from `var.d1_databases`, resolved to that
-                             database's UUID, for a `d1` binding.
+                             database's UUID by name, for a `d1` binding. The
+                             database itself is created by the d1 layer.
       - `queue_key`        - a key from `var.queues`, resolved to that queue's
                              name, for a `queue` binding. This is the producer
                              side: a Worker with this binding writes to the
@@ -723,47 +676,6 @@ variable "default_max_managed_kv_pairs" {
   }
 }
 
-variable "default_d1_primary_location_hint" {
-  type        = string
-  default     = null
-  description = <<-EOT
-    Region given to any D1 database that names none: wnam, enam, weur, eeur, apac
-    or oc. Null lets Cloudflare place each database where it is first written
-    from.
-
-    The primary executes every write, so a fleet-wide value is worth setting where
-    the writing workload lives in one place. Cloudflare honours it at creation
-    only - changing it later moves nothing, and the database has to be recreated
-    to land somewhere else.
-  EOT
-
-  validation {
-    condition     = var.default_d1_primary_location_hint == null || contains(["wnam", "enam", "weur", "eeur", "apac", "oc"], coalesce(var.default_d1_primary_location_hint, "wnam"))
-    error_message = "default_d1_primary_location_hint must be null or one of: wnam, enam, weur, eeur, apac, oc."
-  }
-}
-
-variable "default_d1_read_replication_mode" {
-  type        = string
-  default     = null
-  description = <<-EOT
-    Read replication given to any D1 database that says nothing about it: "auto",
-    "disabled", or null to leave the account default alone.
-
-    "auto" costs nothing extra and does nothing on its own - a Worker only reads
-    from a replica when it uses the D1 Sessions API, and a replica is eventually
-    consistent. Set it fleet-wide only where the Workers reading these databases
-    are written for it; a database under a `jurisdiction` is the case where it
-    actively works against the configuration, which
-    `allow_replicated_d1_in_jurisdiction` gates.
-  EOT
-
-  validation {
-    condition     = var.default_d1_read_replication_mode == null || contains(["auto", "disabled"], coalesce(var.default_d1_read_replication_mode, "auto"))
-    error_message = "default_d1_read_replication_mode must be null, \"auto\" or \"disabled\"."
-  }
-}
-
 variable "default_queue_message_retention_period" {
   type        = number
   default     = null
@@ -882,32 +794,15 @@ variable "allow_queue_consumer_without_dead_letter_queue" {
   EOT
 }
 
-variable "allow_replicated_d1_in_jurisdiction" {
-  type        = bool
-  default     = false
-  description = <<-EOT
-    Whether a D1 database under a `jurisdiction` may also have read replication
-    turned on.
-
-    A jurisdiction is set because something requires the data to stay in one
-    place. Read replication asks Cloudflare to keep a copy of that data in every
-    supported region and serve reads from the nearest - the two are answers to
-    opposite questions, and the replication is the one that happens quietly.
-
-    Left false, a database declaring both fails the plan by name. Turn it on only
-    where the jurisdiction was a latency preference rather than a compliance
-    requirement, in which case `primary_location_hint` says what was actually
-    meant.
-  EOT
-}
-
 # Resource tags (accounts/<account>/tags.tfvars)
 variable "resource_tags" {
   description = <<-EOT
     Cloudflare resource tags. The same file reaches every layer that tags - zones,
-    zerotrust, r2 and workers - and each reads `defaults`, `allowed_values` and
-    its own section, ignoring the rest. Declared in full everywhere because
-    Terraform rejects a .tfvars attribute the type does not declare.
+    zerotrust, r2, workers and d1 - and each reads `defaults`, `allowed_values`
+    and its own section, ignoring the rest. Declared in full everywhere because
+    Terraform rejects a .tfvars attribute the type does not declare. This layer
+    reads `kv_namespaces`, `queues` and `worker_scripts`; `d1_databases` is the
+    d1 layer's.
 
     - `defaults`       - (Optional) Tags for every resource of every type.
     - `allowed_values` - (Optional) Tag key => the only values it may take, so

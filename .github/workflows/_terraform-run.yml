@@ -545,10 +545,10 @@ jobs:
           retention-days: ${{ inputs.plan_retention_days }}
           if-no-files-found: error
 
-      # D1 migrations and bulk KV data are both applied after apply, if used,
-      # and both go through wrangler
+      # D1 migrations (d1 layer) and bulk KV data (workers layer) are both
+      # applied after apply, if used, and both go through wrangler
       - name: Setup Node for wrangler
-        if: inputs.mode == 'apply' && inputs.layer == 'workers'
+        if: inputs.mode == 'apply' && (inputs.layer == 'workers' || inputs.layer == 'd1')
         uses: actions/setup-node@v6
         with:
           node-version: '22'
@@ -558,11 +558,12 @@ jobs:
       # of its own because only this job can read the state, and the state is
       # the only thing that knows the database IDs.
       #
-      # Ahead of the KV load and after the tag export, on the same reasoning:
-      # a failure here should not cost the run its tags, and a database with a
-      # missing table is a worse thing to leave behind than a stale dataset.
+      # After the tag export, so a failure here does not cost the run its tags.
+      # The d1 layer applies in tier 2 and workers in tier 3, so a failed
+      # migration stops the run before any Worker needing the new schema is
+      # deployed.
       - name: Apply D1 migrations
-        if: inputs.mode == 'apply' && inputs.layer == 'workers'
+        if: inputs.mode == 'apply' && inputs.layer == 'd1'
         run: |
           set -euo pipefail
           # Same derivation the token check above uses - the account ID is a fact
@@ -601,7 +602,7 @@ jobs:
           echo "### Applied \`${{ inputs.account }}\` / \`${{ inputs.layer }}\` — ${{ job.status }}" \
             >>"$GITHUB_STEP_SUMMARY"
 
-      # Runs after the D1 migrations and the KV load, both of which talk to
+      # Runs after the D1 migrations or the KV load, both of which talk to
       # Cloudflare through wrangler
       - name: Stop the rate limiter and report what it absorbed
         if: always()

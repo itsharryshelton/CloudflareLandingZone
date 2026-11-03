@@ -1,6 +1,6 @@
 # Applies the platform baseline, resolves logical keys to real IDs, loads any KV
 # data files, and derives the preflight assertions, so that workers.tf reads as
-# five plain module calls.
+# four plain module calls.
 
 locals {
   # Only zones a route or a custom domain actually targets are looked up, so a
@@ -16,6 +16,31 @@ locals {
   referenced_zones = {
     for key, zone in var.zones : key => zone
     if contains(local.referenced_zone_keys, key)
+  }
+
+  # D1 is looked up the same way: only databases a binding names, so Workers
+  # with no d1 binding cost no API call. A key naming nothing in var.d1_databases
+  # is left to the preflight message rather than looked up.
+  referenced_d1_keys = distinct(flatten([
+    for script in var.worker_scripts : [
+      for binding in script.bindings : binding.d1_database_key
+      if binding.d1_database_key != null
+    ]
+  ]))
+
+  referenced_d1_databases = {
+    for key, database in var.d1_databases : key => database
+    if contains(local.referenced_d1_keys, key)
+  }
+
+  # Database key => UUID, or null where the d1 layer has not created it yet. The
+  # list endpoint's name filter is a search, not an exact match, so the exact
+  # name is picked out here.
+  d1_database_ids = {
+    for key, database in local.referenced_d1_databases : key => one([
+      for found in data.cloudflare_d1_databases.this[key].result : (found.uuid != null ? found.uuid : found.id)
+      if found.name == database.name
+    ])
   }
 
   # KV data files
@@ -57,22 +82,6 @@ locals {
       )
 
       max_managed_pairs = namespace.max_managed_pairs != null ? namespace.max_managed_pairs : var.default_max_managed_kv_pairs
-    }
-  }
-
-  # D1
-  d1_databases = {
-    for key, database in var.d1_databases : key => {
-      name = database.name
-
-      primary_location_hint = database.primary_location_hint != null ? database.primary_location_hint : var.default_d1_primary_location_hint
-      read_replication_mode = database.read_replication_mode != null ? database.read_replication_mode : var.default_d1_read_replication_mode
-
-      # No fleet default on purpose. A jurisdiction is a compliance decision about
-      # one database's data, and one applied to every database by a file nobody
-      # re-reads is how a database ends up restricted for no reason anybody can
-      # name - or unrestricted for the same reason.
-      jurisdiction = database.jurisdiction
     }
   }
 
@@ -181,7 +190,7 @@ locals {
           namespace_id = binding.kv_namespace_key != null ? try(module.kv_namespaces[binding.kv_namespace_key].namespace_id, null) : binding.namespace_id
           service      = binding.worker_key != null ? try(var.worker_scripts[binding.worker_key].name, null) : binding.service
 
-          database_id = binding.d1_database_key != null ? try(module.d1_databases[binding.d1_database_key].database_id, null) : binding.database_id
+          database_id = binding.d1_database_key != null ? try(local.d1_database_ids[binding.d1_database_key], null) : binding.database_id
           queue_name  = binding.queue_key != null ? try(module.queues[binding.queue_key].queue_name, null) : binding.queue_name
 
           bucket_name    = binding.bucket_name
@@ -261,6 +270,14 @@ locals {
     ]
   ]))
 
+  # In the inventory and bound here, but not at Cloudflare yet: the d1 layer
+  # has not applied it. Left alone, the binding would go up with a null UUID and
+  # fail the upload mid-apply, naming neither the key nor the layer to run.
+  unresolved_d1_databases = [
+    for key, id in local.d1_database_ids : "d1_databases.${key} (\"${var.d1_databases[key].name}\")"
+    if id == null
+  ]
+
   dangling_queue_keys = distinct(flatten([
     for key, script in var.worker_scripts : [
       for binding in script.bindings :
@@ -324,14 +341,6 @@ locals {
     if queue.consumer != null
     && try(queue.consumer.dead_letter_queue_key, null) == null
     && try(queue.consumer.dead_letter_queue, null) == null
-  ]
-
-  # D1. Replication is resolved rather than read from var, so a database that
-  # inherits "auto" from the fleet default is caught as well as one that asks for
-  # it.
-  replicated_d1_in_jurisdiction = var.allow_replicated_d1_in_jurisdiction ? [] : [
-    for key, database in local.d1_databases : "d1_databases.${key} (\"${database.name}\", jurisdiction \"${database.jurisdiction}\")"
-    if database.jurisdiction != null && database.read_replication_mode == "auto"
   ]
 
   # Source and data files. Terraform reads these at plan time, so a missing one

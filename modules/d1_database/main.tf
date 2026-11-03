@@ -9,8 +9,8 @@
 # owns what is inside it.
 #
 # Every attribute Cloudflare accepts here is fixed at creation. Changing the
-# name, the jurisdiction or the location replaces the database, and a replaced D1
-# database is an empty one - there is no export taken first.
+# name or the jurisdiction replaces the database, and a replaced D1 database is
+# an empty one - there is no export taken first.
 
 resource "cloudflare_d1_database" "this" {
   account_id = var.account_id
@@ -21,6 +21,13 @@ resource "cloudflare_d1_database" "this" {
   read_replication      = local.read_replication
 
   lifecycle {
+    # The API never returns the hint, so an imported database holds null in
+    # state, and provider 5.23 marks the attribute replace-on-change: adopting a
+    # database whose config names a hint would plan a destroy of every row. The
+    # hint only steers placement at creation, so ignoring later drift loses
+    # nothing - create still sends it.
+    ignore_changes = [primary_location_hint]
+
     precondition {
       condition     = length(local.location_hint_outside_jurisdiction) == 0
       error_message = "The primary region asked for is outside the jurisdiction the database is restricted to: ${join(", ", local.location_hint_outside_jurisdiction)}. Cloudflare resolves this by refusing the create, after the apply has started. Drop the hint, or pick one inside the jurisdiction: eu takes weur or eeur, us and fedramp take wnam or enam."

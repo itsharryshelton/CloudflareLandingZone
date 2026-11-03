@@ -1,12 +1,12 @@
 # Account: account_a - Cloudflare resource tags. Consumed by the zones,
-# zerotrust, r2 and workers layers, each of which tags only the resources it
+# zerotrust, r2, workers and d1 layers, each of which tags only the resources it
 # owns, from its own section below.
 #
 # Precedence, later wins:
 #   defaults -> <type>.defaults -> <type>.resources[<key>] -> pipeline keys
 #
 # - Resource keys are the logical keys from zones.tfvars, zerotrust.tfvars,
-#   r2.tfvars and workers.tfvars - not names, not IDs.
+#   r2.tfvars, workers.tfvars and d1.tfvars - not names, not IDs.
 # - A null value drops a key an earlier level set.
 # - `managed-by` and `layer` are set by the pipeline on every resource and
 #   cannot be set here.

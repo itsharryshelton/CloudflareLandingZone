@@ -62,7 +62,7 @@ Terraform source, so adding an account, a layer or a module needs no edit here:
   | Tier | Layers | Why it is here |
   |---|---|---|
   | 1 | `account_governance` | Account-wide permissions and resource-group scope. Every later tier's token is evaluated against what this applies, so it goes out on its own and first. |
-  | 2 | `zones`, `ai_gateway`, `bulk_redirects`, `device_posture`, `gateway`, `lists`, `turnstile`, `wan` | `zones` *creates* zones. The rest touch no zone at all, so nothing waits on them - they ride along in this tier rather than being ordered against each other. `lists` must land before `waf`, and `device_posture` before `zerotrust`, whose Access policies name its rules; both do by being a tier earlier. |
+  | 2 | `zones`, `ai_gateway`, `bulk_redirects`, `d1`, `device_posture`, `gateway`, `lists`, `turnstile`, `wan` | `zones` *creates* zones. The rest touch no zone at all, so nothing waits on them - they ride along in this tier rather than being ordered against each other. `lists` must land before `waf`, `device_posture` before `zerotrust`, whose Access policies name its rules, and `d1` before `workers`, which finds each database it binds by name and needs its migrations applied; all three do by being a tier earlier. |
   | 3 | `dns`, `load_balancing`, `logpush`, `origin_pulls`, `pages`, `r2`, `rules`, `tunnels`, `waf`, `workers`, `zerotrust` | Resolve a zone with `data "cloudflare_zone"`, which fails at plan time until tier 2 has created it. `r2` is here because a bucket can be served from a custom domain, even where no bucket currently is; `tunnels` for the same reason, since a tunnel's public hostname needs a CNAME in its zone; `pages` likewise, for the CNAME behind each custom domain; `logpush` because a zone-scoped job is created against its zone, even on an account whose jobs are all account-scoped; `origin_pulls` because Authenticated Origin Pulls is configured on a zone, and only means anything once that zone's SSL mode is `full` or `strict`. `zerotrust` is here by its own `tier.tf` instead: Access applications are addressed by hostname, so they need the zone to exist even though the layer never reads one. |
 
   Tier 2 and 3 membership is **derived from the Terraform source** - `zone_base`
@@ -101,7 +101,7 @@ Terraform still decides what they are:
    account-wide defaults, the values a key may take, and per-type defaults and
    per-resource tags keyed by the same logical keys as the other tfvars. Its
    header carries the precedence rules.
-2. **Each tagging layer** - `zones`, `zerotrust`, `r2`, `workers` - declares that
+2. **Each tagging layer** - `zones`, `zerotrust`, `r2`, `workers`, `d1` - declares that
    variable, validates the shared settings and its own section at plan time
    (unknown resource keys, malformed tag keys, values outside
    `allowed_values`), and outputs the complete tag set of every resource it
@@ -203,14 +203,16 @@ paces itself.
 The post-apply [`d1-migrations.sh`](../scripts/d1-migrations.sh) *does*: it runs
 on the same credential the apply has just spent its budget on, at the worst
 moment to be at the front of a 429 backoff, and one request per migration is not
-a volume the limiter costs anything. The workers job sets
+a volume the limiter costs anything. The d1 job sets
 `CLOUDFLARE_API_BASE_URL` for that step, which is wrangler's equivalent of the
 provider's `CLOUDFLARE_BASE_URL` - while the limiter is running, so `api_rps: 0`
 leaves the migrations unpaced too.
 
-Both post-apply steps run only after a successful apply, in the `workers` apply
-job: the resource tag export first, then the D1 migrations, then the KV load. A
-failed migration step skips the KV load for that run.
+Both post-apply steps run only after a successful apply, each after the resource
+tag export: the D1 migrations in the `d1` apply job, the KV load in the
+`workers` one. `d1` applies in tier 2 and `workers` in tier 3, so the schema is
+in place before a Worker that reads it is deployed, and a failed migration stops
+the run before tier 3 starts.
 
 ### Credential handling
 
@@ -362,7 +364,8 @@ one needs.
 | `account_a-ai_gateway-apply`         | **required** | `AI Gateway:Edit` at account scope, and nothing else - the API refers to the same grant as AI Gateway Write. Not `AI Gateway Run`: the pipeline never sends traffic through a gateway. Not a low-value token either - it can read and delete every gateway's logs, which are prompts and responses, and so can the plan token's `AI Gateway:Read` |
 | `account_a-pages-apply`              | **required** | `Cloudflare Pages:Edit` at account scope; `Zone:Read` and `DNS:Edit` at zone scope only where a custom domain names a `zone_key`, for its CNAME. Nothing in Zero Trust - Access for a project is written by the `zerotrust` token. Wider than it reads: it can repoint a production site's Git source or Direct Upload any build to it |
 | `account_a-rules-apply`              | **required** | Edit on the zone-level cache, late transform, origin, dynamic redirect and config settings ruleset phases, and `Zone:Read` - one permission group per phase, listed in the layer's `providers.tf`. Origin rules need **Zone > Origin Rules > Edit** specifically. Without it, creating a zone's first `http_request_origin` ruleset fails with `403 request is not authorized`, while cache rules in the same apply still succeed. Single Redirects need **Zone > Single Redirect > Edit** (the API calls it Dynamic URL Redirects Write), which can redirect any URL on the zones the token covers. Configuration Rules need **Zone > Config Rules > Edit** (the API calls it Config Settings Write), which can lower the SSL mode for any hostname on the zones the token covers, without `Zone Settings:Edit` |
-| `account_a-workers-apply`            | **required** | `Workers Scripts:Edit`, `Workers KV Storage:Edit` at account scope, and `Zone:Read`; plus `D1:Edit` and `Queues:Edit` where the layer declares databases or queues, `Workers Routes:Edit` only if a Worker declares routes, and `DNS:Edit` only for a custom domain. `D1:Edit` is the widest of these: it carries query execution over the D1 REST API, which is what the post-apply migrations step uses and also what lets the token read or rewrite any database in the account |
+| `account_a-workers-apply`            | **required** | `Workers Scripts:Edit`, `Workers KV Storage:Edit` at account scope, and `Zone:Read`; plus `Queues:Edit` where the layer declares queues, `D1:Read` where a Worker binds a D1 database (to resolve its key by name), `Workers Routes:Edit` only if a Worker declares routes, and `DNS:Edit` only for a custom domain |
+| `account_a-d1-apply`                 | **required** | `D1:Edit` at account scope, and nothing else. The widest grant its size suggests: it carries query execution over the D1 REST API, which is what the post-apply migrations step uses and also what lets the token read or rewrite any database in the account |
 | `account_a-tags-apply`               | none         | Resource Tagging write at account scope, plus zone scope for zone tags, and nothing else. Used by the `resource tags` job, not by a layer. The groups are in beta and not in Cloudflare's published list, so `bootstrap-account-tokens.sh` finds them by name - and never takes `Access: Tags`, a different feature |
 
 …and the same for `account_b`. Each token is scoped to **one account and one

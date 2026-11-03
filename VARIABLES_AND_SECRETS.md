@@ -87,6 +87,7 @@ the CSV once they are all uploaded.
 | `<account>-account_governance-apply` | `account_governance` | `terraform-accountgovernance-apply` | `Account Settings:Edit` |
 | `<account>-ai_gateway-apply` | `ai_gateway` | `terraform-aigateway-apply` | `AI Gateway:Edit` (the API names the same grant AI Gateway Write). Not `AI Gateway Run`. Can read and delete every gateway's logs - prompts and responses - as can the plan token's `AI Gateway:Read` |
 | `<account>-bulk_redirects-apply` | `bulk_redirects` | *not created - make by hand* | `Account Filter Lists:Edit`, `Account Rulesets:Edit` |
+| `<account>-d1-apply` | `d1` | `terraform-d1-apply` | `D1:Edit`. Also runs the post-apply migrations, which are queries over the D1 REST API, so it can read and rewrite the contents of every database in the account |
 | `<account>-device_posture-apply` | `device_posture` | `terraform-deviceposture-apply` | `Zero Trust:Edit` |
 | `<account>-dns-apply` | `dns` | `terraform-dns-apply` | `DNS:Edit`, `Zone:Read` |
 | `<account>-gateway-apply` | `gateway` | `terraform-gateway-apply` | `Zero Trust:Edit` |
@@ -102,7 +103,7 @@ the CSV once they are all uploaded.
 | `<account>-turnstile-apply` | `turnstile` | `terraform-turnstile-apply` | `Turnstile:Edit` (the API names the same grant Turnstile Sites Write). Reaches widgets and nothing else - but reading a widget returns its secret key, so it is not a low-value credential |
 | `<account>-waf-apply` | `waf` | `terraform-waf-apply` | `Zone WAF:Edit`, `Zone:Read` |
 | `<account>-wan-apply` | `wan` | `terraform-wan-apply` | `Magic Transit:Edit` |
-| `<account>-workers-apply` | `workers` | `terraform-workers-apply` | `Workers Scripts:Edit`, `Workers KV Storage:Edit`, `Zone:Read`; `D1:Edit` if databases are declared; `Queues:Edit` if queues are declared; `Workers Routes:Edit` if routes are declared; `DNS:Edit` for a custom domain. `D1:Edit` also carries query execution over the D1 REST API, so it can read and rewrite the contents of every database in the account |
+| `<account>-workers-apply` | `workers` | `terraform-workers-apply` | `Workers Scripts:Edit`, `Workers KV Storage:Edit`, `Zone:Read`; `D1:Read` if a Worker binds a D1 database, to resolve its key by name - the databases are the `d1` layer's; `Queues:Edit` if queues are declared; `Workers Routes:Edit` if routes are declared; `DNS:Edit` for a custom domain |
 | `<account>-zerotrust-apply` | `zerotrust` | `terraform-zerotrust-apply` | `Access: Organizations, Identity Providers, and Groups:Edit`, `Access: Apps and Policies:Edit`, `Access: Service Tokens:Edit` |
 | `<account>-zones-apply` | `zones` | `terraform-zone-apply` | `Zone:Edit`, `DNS:Edit`, `Zone Settings:Edit`; `Bot Management:Edit` if bot management is configured. Managing rate plans needs `Billing:Read` + `Billing:Write`, on a separate token for that run |
 
@@ -192,7 +193,7 @@ Notes:
 
 ### Layers with nothing extra
 
-`account_governance`, `ai_gateway`, `bulk_redirects`, `dns`, `gateway`, `lists`,
+`account_governance`, `ai_gateway`, `bulk_redirects`, `d1`, `dns`, `gateway`, `lists`,
 `load_balancing`, `r2`, `rules`, `tunnels`, `turnstile`, `waf`, `workers` and
 `zones` need only their `CLOUDFLARE_API_TOKEN`. So does `origin_pulls`, unless a zone in it
 uploads a certificate of its own, and `pages`, unless a project lists
