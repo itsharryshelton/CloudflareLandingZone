@@ -13,7 +13,7 @@ waf_trusted_ip_ranges = [
   "198.51.100.0/24",
 ]
 
-# A regulated market example, so this customer geoblocks. Note that layers/waf/defaults.auto.tfvars leaves waf_blocked_countries empty on purpose - geoblocking is a per-customer regulatory decision, not a platform default.
+# A regulated market example, so this customer geoblocks with its own list. Setting waf_blocked_countries here replaces the platform list in layers/waf/defaults.auto.tfvars entirely; omit it to inherit that list instead.
 waf_blocked_countries = ["CN", "RU", "IR", "KP"]
 
 waf_policies = {

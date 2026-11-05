@@ -30,9 +30,35 @@ waf_admin_paths = [
 # Deliberately empty. Populate per account with the real corporate egress ranges; not here.
 waf_trusted_ip_ranges = []
 
-# Deliberately empty. Geoblocking is a per-customer regulatory decision, so set it
-# in the account that needs it rather than defaulting it on for everyone.
-waf_blocked_countries = []
+# Platform geoblock list for the geoblock_countries baseline rule. It blocks
+# nothing on its own: a policy must select that rule. An account that sets its
+# own waf_blocked_countries replaces this list outright rather than merging.
+#
+# A dynamic control, not a fixed list. Review it regularly against concentrated
+# cybercriminal activity, current geopolitical tensions and active conflicts,
+# and data from global threat intelligence partners.
+#
+# Last reviewed: November 2026.
+waf_blocked_countries = [
+  "AF", # Afghanistan
+  "BY", # Belarus
+  "CU", # Cuba
+  "CD", # Democratic Republic of the Congo
+  "IR", # Iran
+  "IQ", # Iraq
+  "LB", # Lebanon
+  "LY", # Libya
+  "MM", # Myanmar (Burma)
+  "KP", # North Korea
+  "RU", # Russia
+  "SO", # Somalia
+  "SD", # Sudan
+  "SY", # Syria
+  "UA", # Ukraine
+  "VE", # Venezuela
+  "YE", # Yemen
+  "XX", # Unknown regions: Cloudflare's code when it cannot geolocate the client IP
+]
 
 # Must match the zones layer's default_zone_tier
 default_zone_tier = "free"

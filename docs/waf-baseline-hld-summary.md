@@ -38,7 +38,7 @@ The account values in section 6 are sample/placeholder data (RFC 5737 IPs, examp
 |---|---|---|
 | `waf_trusted_ip_ranges` | `[]` (set per account) | Corporate egress/VPN ranges. Used by the admin rules and as the exclusion for the bot challenge |
 | `waf_admin_paths` | `/admin`, `/administrator`, `/phpmyadmin`, `/wp-login.php`, `/wp-admin`, `/user/login`, `/user/password`, `/user/register` | Matched with `contains`. The variable's own default lists only 3 paths; `defaults.auto.tfvars` overrides it with these 8 |
-| `waf_blocked_countries` | `[]` | ISO 3166-1 alpha-2 codes. Geoblocking is a per-customer regulatory decision |
+| `waf_blocked_countries` | `AF`, `BY`, `CU`, `CD`, `IR`, `IQ`, `LB`, `LY`, `MM`, `KP`, `RU`, `SO`, `SD`, `SY`, `UA`, `VE`, `YE`, `XX` (reviewed November 2026) | ISO 3166-1 alpha-2 codes, plus Cloudflare's `XX` for unknown regions. A dynamic list, reviewed regularly against threat intelligence and geopolitical risk. The variable's own default is `[]`; `defaults.auto.tfvars` sets this list. Only applies where a policy selects `geoblock_countries`; an account list replaces it rather than merging |
 | `waf_ip_blocklist_name` | `null` | Name of an account IP List created by the `lists` layer |
 | `waf_managed_rules_action` | `null` (each rule keeps Cloudflare's shipped action) | Forces one action on every Cloudflare Managed rule. `log` gives a monitor-mode rollout |
 | `waf_owasp_paranoia_level` | `1` | Paranoia levels above this are disabled by the category tag `paranoia-level-N` |
