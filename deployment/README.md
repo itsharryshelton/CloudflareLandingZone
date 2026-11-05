@@ -417,7 +417,7 @@ The routes are application-specific, so `waf_html_submission_paths` has no platf
 | Setting | Default | Effect |
 |---|---|---|
 | `waf_trusted_ip_ranges` | `[]` | Must be set before selecting any rule that reads it. |
-| `waf_blocked_countries` | `[]` | Must be set before selecting `geoblock_countries`. |
+| `waf_blocked_countries` | Platform list (18 codes, reviewed November 2026) | Set in `layers/waf/defaults.auto.tfvars`; the variable's own default is `[]`. Blocks nothing until a policy selects `geoblock_countries`. An account list replaces it. |
 | `waf_ip_blocklist_name` | `null` | Must be set before selecting `block_listed_ips`. |
 | `waf_html_submission_paths` | `[]` | Must be set before selecting `html_submission`. |
 | `waf_html_submission_methods` | `["POST"]` | Methods `html_submission` covers. Add `PUT` or `PATCH` for routes that take them. |
