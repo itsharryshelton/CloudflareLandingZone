@@ -20,6 +20,31 @@ Azure Landing Zones (ALZ) established this standard for cloud adoption. CFLZ app
 
 <img width="2063" height="3381" alt="CFLZ" src="https://images.harryshelton.com/CFLZ.png" />
 
+## Case Study: Real Customer Deployment
+
+CFLZ runs in production. The figures below come from a live deployment for one customer.
+
+**Customer type:** Global Education Provider
+
+| Outcome                                                          | Result   |
+| ------------------------------------------------------------------| ----------|
+| Domains codified, all managed in code                            | 250+     |
+| Apps behind Cloudflare One Access, with Entra ID sync and SCIM   | 45+      |
+| Gateway policies deployed and managed for endpoints              | 17       |
+| Legacy redirects preserved and modernised to Bulk Redirects      | 82,000+  |
+| Dev to production go-live for the first major brand              | ~7 weeks |
+| Isolated layers (12 in use, 8 ready for future use)              | 20       |
+| Versioned CI/CD deployments in the first 10 weeks                | 118      |
+
+**Core features in use via CFLZ:** DNS, WAF, Cloudflare One Access, Cloudflare One Gateway, Workers, R2, Bulk Redirects.
+
+### Why it works
+
+- **Zones are data, not directories:** Every domain is a `for_each` entry in `.tfvars`. Onboarding a domain is a configuration edit against code that already exists, so the fleet grows without the code growing with it.
+- **Small, isolated changes ship often:** Each layer has its own state file, its own scoped token and its own approval gate. A WAF change cannot touch DNS or Access, so 118 deployments in 10 weeks did not mean 118 chances to break the whole estate.
+- **Unused layers cost nothing until needed:** The 8 layers not yet in use sit ready. Switching on a product is a matter of adding its `.tfvars` and environment, not designing a new build.
+- **Governance is decided once:** Access, Gateway and the WAF baseline are set at platform level and inherited by every zone, so every new app and domain lands with the same posture as the first.
+
 ## Architectural Framework
 
 CFLZ is designed to be similar to the Microsoft Cloud Adoption Framework (CAF), adapting it to the Cloudflare edge ecosystem, because it is a tried and tested method, but also allows Azure Architects to quickly understand and adopt a Cloudflare Landing Zone's Structure.
