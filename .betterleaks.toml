@@ -26,4 +26,17 @@ regexes = [
   '''(?i)(?:cloudflare_)?account_id\s*=\s*["'][a-f0-9]{32}["']''',
   '''(?i)zone_id\s*=\s*["'][a-f0-9]{32}["']''',
   '''(?i)(?:client_id|directory_id|tenant_id|group_id)\s*=\s*["'][0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}["']''',
+  # The two PEM entries below spell the dashes as -{5}: written out literally, one
+  # entry's header and the next one's would form a key block in this file itself.
+  #
+  # authenticated_origin_pulls quotes the PEM header twice in its validation error
+  # messages, which the default private-key rule reads as one key block. Matched on the
+  # prose that follows the header: a real key continues with a newline and base64.
+  '''-{5}BEGIN PRIVATE KEY-{5} line \(or the RSA/EC variant\)''',
+  # The TF_VAR_ORIGIN_PULL_CERTIFICATES example in the docs truncates the PEM to a JSON
+  # "\n..." placeholder, which the default private-key rule reads as a key block running
+  # on to the next PEM header in the file. Rewording the example would not help: the
+  # scan covers full git history. Matched on the placeholder itself: a real key
+  # continues with "\n" and base64, never "\n...".
+  '''-{5}BEGIN PRIVATE KEY-{5}\\n\.\.\."''',
 ]
