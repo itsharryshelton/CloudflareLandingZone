@@ -5,6 +5,18 @@
 # Trust organization. There is no for_each here: the account is the run, and its
 # ID comes from accounts/<account>/account.tfvars.
 #
+# Types var.access_groups and var.access_policies, which are declared `any` so
+# that the rule set object is written once rather than six times. It creates
+# nothing and is part of this layer, not a published module; see
+# modules/schema/variables.tf.
+module "schema" {
+  source = "./modules/schema"
+
+  access_groups   = var.access_groups
+  access_policies = var.access_policies
+  rule_sets       = local.rule_sets_as_given
+}
+
 # Downstream deployments pin an immutable tag instead of the local path:
 #   source = "git::https://github.com/yourorg/CloudflareLandingZone//modules/zerotrust?ref=v1.0.0"
 module "zerotrust" {

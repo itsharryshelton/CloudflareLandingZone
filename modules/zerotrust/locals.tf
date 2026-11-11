@@ -14,10 +14,10 @@ locals {
   service_tokens     = { for t in var.service_tokens : lower(trimspace(t.name)) => t }
   service_token_keys = keys(local.service_tokens)
 
-  access_groups     = { for g in var.access_groups : lower(trimspace(g.name)) => g }
+  access_groups     = { for g in module.schema.access_groups : lower(trimspace(g.name)) => g }
   access_group_keys = keys(local.access_groups)
 
-  access_policies    = { for p in var.access_policies : lower(trimspace(p.name)) => p }
+  access_policies    = { for p in module.schema.access_policies : lower(trimspace(p.name)) => p }
   access_policy_keys = keys(local.access_policies)
 
   access_applications = { for a in var.access_applications : lower(trimspace(a.name)) => a }
@@ -27,14 +27,22 @@ locals {
   }
 
   # Rule sets
-  rule_sets = merge(
-    { for key, group in local.access_groups : "access_groups.${key}.include" => group.include },
-    { for key, group in local.access_groups : "access_groups.${key}.exclude" => group.exclude if group.exclude != null },
-    { for key, group in local.access_groups : "access_groups.${key}.require" => group.require if group.require != null },
-    { for key, policy in local.access_policies : "access_policies.${key}.include" => policy.include },
-    { for key, policy in local.access_policies : "access_policies.${key}.exclude" => policy.exclude if policy.exclude != null },
-    { for key, policy in local.access_policies : "access_policies.${key}.require" => policy.require if policy.require != null },
+
+  # As written by the caller: untyped, so only what was set is present. The
+  # schema module says which of exclude and require exist; the contents are
+  # read from the variable by position, because the schema's copy of a group or
+  # policy carries its rule sets as empty objects.
+  rule_sets_as_given = merge(
+    { for i, group in module.schema.access_groups : "access_groups.${lower(trimspace(group.name))}.include" => var.access_groups[i].include },
+    { for i, group in module.schema.access_groups : "access_groups.${lower(trimspace(group.name))}.exclude" => var.access_groups[i].exclude if group.exclude != null },
+    { for i, group in module.schema.access_groups : "access_groups.${lower(trimspace(group.name))}.require" => var.access_groups[i].require if group.require != null },
+    { for i, policy in module.schema.access_policies : "access_policies.${lower(trimspace(policy.name))}.include" => var.access_policies[i].include },
+    { for i, policy in module.schema.access_policies : "access_policies.${lower(trimspace(policy.name))}.exclude" => var.access_policies[i].exclude if policy.exclude != null },
+    { for i, policy in module.schema.access_policies : "access_policies.${lower(trimspace(policy.name))}.require" => var.access_policies[i].require if policy.require != null },
   )
+
+  # The same six positions with every attribute present and defaulted.
+  rule_sets = module.schema.rule_sets
 
   # Every identity-provider-bearing condition, flattened onto a common shape so
   # the "name or ID, not both" rule is expressed once rather than four times.

@@ -153,6 +153,18 @@ Copy [`_TEMPLATE/`](_TEMPLATE/) to start. Every module has the same files:
 A large module may split `main.tf` by concern - `gateway` has `settings.tf` and
 `certificate.tf` - but the division of labour stays the same.
 
+Two optional additions, used only by `zerotrust` so far:
+
+| Path | Holds |
+|---|---|
+| `modules/schema/` | A child module that creates nothing and exists to hold a type written once instead of several times, since Terraform has no type aliases. The parent variable is `type = any`; the child types, defaults and validates it. See [CONTRIBUTING.md](../CONTRIBUTING.md#module-conventions) for when to use it. |
+| `tests/*.tftest.hcl` | `terraform test` files, run offline against `mock_provider`. CI does not run them yet. |
+
+`zerotrust` declares `access_groups` and
+`access_policies` as `any` for this reason: their type is in
+`zerotrust/modules/schema/variables.tf`, and every entry is still converted,
+defaulted and validated before anything reads it.
+
 ### The life of an input
 
 1. The layer builds the module's arguments: real IDs from its lookups, the
@@ -177,6 +189,11 @@ A module's guardrails live in two places, chosen by what the check needs to see:
 |---|---|---|
 | Decidable from one variable: types, enums, ranges, required fields | `validation` in `variables.tf` | Fails before a graph is built, and the message names exactly one input |
 | Needs another variable, a local, or a comparison across items: duplicates, one field against another | `lifecycle.precondition` in `main.tf` | Every cross-field rule in one file |
+
+A module with a `modules/schema` child, such as `zerotrust`, keeps the checks that
+read a typed value there rather than in its own `variables.tf`. A failure is then
+reported against the `module "schema"` block in `main.tf`, naming the entry at
+fault, instead of against the caller's input.
 
 The calling layer adds a third place, `preflight.tf`, for checks that span
 variables the module never sees - a `zone_key` naming no zone, a guardrail
