@@ -193,6 +193,18 @@ variable "service_tokens" {
 }
 
 variable "access_groups" {
+  # `any` on purpose. The type is declared in modules/schema/variables.tf, and
+  # every entry is converted, defaulted and validated against it there - one
+  # module call later than usual, by the same rules.
+  #
+  # Terraform has no type aliases. Declared here, the rule set object would be
+  # written out three times in this variable and three more in access_policies,
+  # and the six copies have to be kept identical by hand. Loosening only the
+  # rule sets (`include = any`) does not work: a map needs one element type, so
+  # two groups setting different rule attributes fail with "cannot find a common
+  # base type for all elements".
+  type        = any
+  default     = {}
   description = <<-EOT
     Reusable audiences, keyed by a logical key. A group answers "who counts as an
     administrator" once, and every policy that needs the same answer references
@@ -241,6 +253,14 @@ variable "access_groups" {
       oidc_claims             - an OIDC claim name and value
       external_evaluations    - delegate the decision to an external service
 
+    The last five are lists of objects:
+
+      entra_groups         - { group_id }
+      entra_auth_contexts  - { id, ac_id }
+      saml_attributes      - { attribute_name, attribute_value }
+      oidc_claims          - { claim_name, claim_value }
+      external_evaluations - { evaluate_url, keys_url }
+
     Anything taking an identity provider accepts either identity_provider_key,
     resolved against var.identity_providers, or identity_provider_id for one
     managed elsewhere. Exactly one of the two.
@@ -249,178 +269,18 @@ variable "access_groups" {
     creates is a Terraform dependency cycle rather than a configuration error,
     and the message would be unreadable. Nest an externally managed group with
     group_ids, or merge the two rule sets.
+
+    This variable is typed `any`; the exact type, defaults included, is
+    var.access_groups and var.rule_sets in modules/schema/variables.tf, and so
+    are the validation rules. The comment above `type` says why.
   EOT
-  type = map(object({
-    name       = string
-    is_default = optional(bool)
-    include = object({
-      everyone                = optional(bool, false)
-      emails                  = optional(list(string), [])
-      email_domains           = optional(list(string), [])
-      email_list_ids          = optional(list(string), [])
-      ip_cidrs                = optional(list(string), [])
-      ip_list_ids             = optional(list(string), [])
-      country_codes           = optional(list(string), [])
-      group_keys              = optional(list(string), [])
-      group_ids               = optional(list(string), [])
-      service_token_keys      = optional(list(string), [])
-      service_token_ids       = optional(list(string), [])
-      any_valid_service_token = optional(bool, false)
-      certificate             = optional(bool, false)
-      common_names            = optional(list(string), [])
-      auth_methods            = optional(list(string), [])
-      device_posture_ids      = optional(list(string), [])
-      login_method_keys       = optional(list(string), [])
-      login_method_ids        = optional(list(string), [])
-      entra_groups = optional(list(object({
-        identity_provider_key = optional(string)
-        identity_provider_id  = optional(string)
-        group_id              = string
-      })), [])
-      entra_auth_contexts = optional(list(object({
-        identity_provider_key = optional(string)
-        identity_provider_id  = optional(string)
-        id                    = string
-        ac_id                 = string
-      })), [])
-      saml_attributes = optional(list(object({
-        identity_provider_key = optional(string)
-        identity_provider_id  = optional(string)
-        attribute_name        = string
-        attribute_value       = string
-      })), [])
-      oidc_claims = optional(list(object({
-        identity_provider_key = optional(string)
-        identity_provider_id  = optional(string)
-        claim_name            = string
-        claim_value           = string
-      })), [])
-      external_evaluations = optional(list(object({
-        evaluate_url = string
-        keys_url     = string
-      })), [])
-    })
-    exclude = optional(object({
-      everyone                = optional(bool, false)
-      emails                  = optional(list(string), [])
-      email_domains           = optional(list(string), [])
-      email_list_ids          = optional(list(string), [])
-      ip_cidrs                = optional(list(string), [])
-      ip_list_ids             = optional(list(string), [])
-      country_codes           = optional(list(string), [])
-      group_keys              = optional(list(string), [])
-      group_ids               = optional(list(string), [])
-      service_token_keys      = optional(list(string), [])
-      service_token_ids       = optional(list(string), [])
-      any_valid_service_token = optional(bool, false)
-      certificate             = optional(bool, false)
-      common_names            = optional(list(string), [])
-      auth_methods            = optional(list(string), [])
-      device_posture_ids      = optional(list(string), [])
-      login_method_keys       = optional(list(string), [])
-      login_method_ids        = optional(list(string), [])
-      entra_groups = optional(list(object({
-        identity_provider_key = optional(string)
-        identity_provider_id  = optional(string)
-        group_id              = string
-      })), [])
-      entra_auth_contexts = optional(list(object({
-        identity_provider_key = optional(string)
-        identity_provider_id  = optional(string)
-        id                    = string
-        ac_id                 = string
-      })), [])
-      saml_attributes = optional(list(object({
-        identity_provider_key = optional(string)
-        identity_provider_id  = optional(string)
-        attribute_name        = string
-        attribute_value       = string
-      })), [])
-      oidc_claims = optional(list(object({
-        identity_provider_key = optional(string)
-        identity_provider_id  = optional(string)
-        claim_name            = string
-        claim_value           = string
-      })), [])
-      external_evaluations = optional(list(object({
-        evaluate_url = string
-        keys_url     = string
-      })), [])
-    }))
-    require = optional(object({
-      everyone                = optional(bool, false)
-      emails                  = optional(list(string), [])
-      email_domains           = optional(list(string), [])
-      email_list_ids          = optional(list(string), [])
-      ip_cidrs                = optional(list(string), [])
-      ip_list_ids             = optional(list(string), [])
-      country_codes           = optional(list(string), [])
-      group_keys              = optional(list(string), [])
-      group_ids               = optional(list(string), [])
-      service_token_keys      = optional(list(string), [])
-      service_token_ids       = optional(list(string), [])
-      any_valid_service_token = optional(bool, false)
-      certificate             = optional(bool, false)
-      common_names            = optional(list(string), [])
-      auth_methods            = optional(list(string), [])
-      device_posture_ids      = optional(list(string), [])
-      login_method_keys       = optional(list(string), [])
-      login_method_ids        = optional(list(string), [])
-      entra_groups = optional(list(object({
-        identity_provider_key = optional(string)
-        identity_provider_id  = optional(string)
-        group_id              = string
-      })), [])
-      entra_auth_contexts = optional(list(object({
-        identity_provider_key = optional(string)
-        identity_provider_id  = optional(string)
-        id                    = string
-        ac_id                 = string
-      })), [])
-      saml_attributes = optional(list(object({
-        identity_provider_key = optional(string)
-        identity_provider_id  = optional(string)
-        attribute_name        = string
-        attribute_value       = string
-      })), [])
-      oidc_claims = optional(list(object({
-        identity_provider_key = optional(string)
-        identity_provider_id  = optional(string)
-        claim_name            = string
-        claim_value           = string
-      })), [])
-      external_evaluations = optional(list(object({
-        evaluate_url = string
-        keys_url     = string
-      })), [])
-    }))
-  }))
-  default = {}
-
-  validation {
-    condition     = alltrue([for key in keys(var.access_groups) : can(regex("^[a-z0-9_]+$", key))])
-    error_message = "access_groups keys must be lowercase alphanumeric with underscores - they become Terraform resource addresses and state keys."
-  }
-
-  validation {
-    condition = length(distinct([
-      for group in var.access_groups : lower(trimspace(group.name))
-    ])) == length(var.access_groups)
-    error_message = "Two access_groups entries share a name. The name is the group's identity in Cloudflare, so each must be uniquely named."
-  }
-
-  validation {
-    condition = alltrue(flatten([
-      for group in var.access_groups : [
-        for rule in [group.include, group.exclude, group.require] : length(rule.group_keys) == 0
-        if rule != null
-      ]
-    ]))
-    error_message = "access_groups[*] rules must not use group_keys. A group referencing another group created by this layer is a Terraform dependency cycle, not something Cloudflare would report. Use group_ids for a group managed elsewhere, or merge the two rule sets."
-  }
 }
 
 variable "access_policies" {
+  # `any` for the reason given on access_groups. The type is declared in
+  # modules/schema/variables.tf.
+  type        = any
+  default     = {}
   description = <<-EOT
     Reusable Access policies, keyed by a logical key. A policy is a decision plus
     the rules it rests on; applications attach policies by key, so the same
@@ -480,183 +340,22 @@ variable "access_policies" {
       oidc_claims             - an OIDC claim name and value
       external_evaluations    - delegate the decision to an external service
 
+    The last five are lists of objects:
+
+      entra_groups         - { group_id }
+      entra_auth_contexts  - { id, ac_id }
+      saml_attributes      - { attribute_name, attribute_value }
+      oidc_claims          - { claim_name, claim_value }
+      external_evaluations - { evaluate_url, keys_url }
+
     Anything taking an identity provider accepts either identity_provider_key,
     resolved against var.identity_providers, or identity_provider_id for one
     managed elsewhere. Exactly one of the two.
+
+    This variable is typed `any`; the exact type, defaults included, is
+    var.access_policies and var.rule_sets in modules/schema/variables.tf, and so
+    are the validation rules.
   EOT
-  type = map(object({
-    name                           = string
-    decision                       = string
-    session_duration               = optional(string)
-    isolation_required             = optional(bool)
-    purpose_justification_required = optional(bool)
-    purpose_justification_prompt   = optional(string)
-    approval_required              = optional(bool)
-    approval_groups = optional(list(object({
-      approvals_needed = number
-      email_addresses  = optional(list(string))
-      email_list_uuid  = optional(string)
-    })), [])
-    include = object({
-      everyone                = optional(bool, false)
-      emails                  = optional(list(string), [])
-      email_domains           = optional(list(string), [])
-      email_list_ids          = optional(list(string), [])
-      ip_cidrs                = optional(list(string), [])
-      ip_list_ids             = optional(list(string), [])
-      country_codes           = optional(list(string), [])
-      group_keys              = optional(list(string), [])
-      group_ids               = optional(list(string), [])
-      service_token_keys      = optional(list(string), [])
-      service_token_ids       = optional(list(string), [])
-      any_valid_service_token = optional(bool, false)
-      certificate             = optional(bool, false)
-      common_names            = optional(list(string), [])
-      auth_methods            = optional(list(string), [])
-      device_posture_ids      = optional(list(string), [])
-      login_method_keys       = optional(list(string), [])
-      login_method_ids        = optional(list(string), [])
-      entra_groups = optional(list(object({
-        identity_provider_key = optional(string)
-        identity_provider_id  = optional(string)
-        group_id              = string
-      })), [])
-      entra_auth_contexts = optional(list(object({
-        identity_provider_key = optional(string)
-        identity_provider_id  = optional(string)
-        id                    = string
-        ac_id                 = string
-      })), [])
-      saml_attributes = optional(list(object({
-        identity_provider_key = optional(string)
-        identity_provider_id  = optional(string)
-        attribute_name        = string
-        attribute_value       = string
-      })), [])
-      oidc_claims = optional(list(object({
-        identity_provider_key = optional(string)
-        identity_provider_id  = optional(string)
-        claim_name            = string
-        claim_value           = string
-      })), [])
-      external_evaluations = optional(list(object({
-        evaluate_url = string
-        keys_url     = string
-      })), [])
-    })
-    exclude = optional(object({
-      everyone                = optional(bool, false)
-      emails                  = optional(list(string), [])
-      email_domains           = optional(list(string), [])
-      email_list_ids          = optional(list(string), [])
-      ip_cidrs                = optional(list(string), [])
-      ip_list_ids             = optional(list(string), [])
-      country_codes           = optional(list(string), [])
-      group_keys              = optional(list(string), [])
-      group_ids               = optional(list(string), [])
-      service_token_keys      = optional(list(string), [])
-      service_token_ids       = optional(list(string), [])
-      any_valid_service_token = optional(bool, false)
-      certificate             = optional(bool, false)
-      common_names            = optional(list(string), [])
-      auth_methods            = optional(list(string), [])
-      device_posture_ids      = optional(list(string), [])
-      login_method_keys       = optional(list(string), [])
-      login_method_ids        = optional(list(string), [])
-      entra_groups = optional(list(object({
-        identity_provider_key = optional(string)
-        identity_provider_id  = optional(string)
-        group_id              = string
-      })), [])
-      entra_auth_contexts = optional(list(object({
-        identity_provider_key = optional(string)
-        identity_provider_id  = optional(string)
-        id                    = string
-        ac_id                 = string
-      })), [])
-      saml_attributes = optional(list(object({
-        identity_provider_key = optional(string)
-        identity_provider_id  = optional(string)
-        attribute_name        = string
-        attribute_value       = string
-      })), [])
-      oidc_claims = optional(list(object({
-        identity_provider_key = optional(string)
-        identity_provider_id  = optional(string)
-        claim_name            = string
-        claim_value           = string
-      })), [])
-      external_evaluations = optional(list(object({
-        evaluate_url = string
-        keys_url     = string
-      })), [])
-    }))
-    require = optional(object({
-      everyone                = optional(bool, false)
-      emails                  = optional(list(string), [])
-      email_domains           = optional(list(string), [])
-      email_list_ids          = optional(list(string), [])
-      ip_cidrs                = optional(list(string), [])
-      ip_list_ids             = optional(list(string), [])
-      country_codes           = optional(list(string), [])
-      group_keys              = optional(list(string), [])
-      group_ids               = optional(list(string), [])
-      service_token_keys      = optional(list(string), [])
-      service_token_ids       = optional(list(string), [])
-      any_valid_service_token = optional(bool, false)
-      certificate             = optional(bool, false)
-      common_names            = optional(list(string), [])
-      auth_methods            = optional(list(string), [])
-      device_posture_ids      = optional(list(string), [])
-      login_method_keys       = optional(list(string), [])
-      login_method_ids        = optional(list(string), [])
-      entra_groups = optional(list(object({
-        identity_provider_key = optional(string)
-        identity_provider_id  = optional(string)
-        group_id              = string
-      })), [])
-      entra_auth_contexts = optional(list(object({
-        identity_provider_key = optional(string)
-        identity_provider_id  = optional(string)
-        id                    = string
-        ac_id                 = string
-      })), [])
-      saml_attributes = optional(list(object({
-        identity_provider_key = optional(string)
-        identity_provider_id  = optional(string)
-        attribute_name        = string
-        attribute_value       = string
-      })), [])
-      oidc_claims = optional(list(object({
-        identity_provider_key = optional(string)
-        identity_provider_id  = optional(string)
-        claim_name            = string
-        claim_value           = string
-      })), [])
-      external_evaluations = optional(list(object({
-        evaluate_url = string
-        keys_url     = string
-      })), [])
-    }))
-  }))
-  default = {}
-
-  validation {
-    condition     = alltrue([for key in keys(var.access_policies) : can(regex("^[a-z0-9_]+$", key))])
-    error_message = "access_policies keys must be lowercase alphanumeric with underscores - they become Terraform resource addresses and state keys."
-  }
-
-  validation {
-    condition = length(distinct([
-      for policy in var.access_policies : lower(trimspace(policy.name))
-    ])) == length(var.access_policies)
-    error_message = "Two access_policies entries share a name. The name is the policy's identity in Cloudflare, so each must be uniquely named."
-  }
-
-  validation {
-    condition     = alltrue([for policy in var.access_policies : contains(["allow", "deny", "bypass", "non_identity"], policy.decision)])
-    error_message = "Each access_policies[*].decision must be \"allow\", \"deny\", \"bypass\" or \"non_identity\"."
-  }
 }
 
 variable "access_applications" {

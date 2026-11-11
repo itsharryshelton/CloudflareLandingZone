@@ -64,6 +64,19 @@ An example must stay offline-plannable: no data sources, every input a literal,
 placeholders only. With no example, a module that has required inputs cannot be
 planned by its own CI at all.
 
+Two optional additions exist, and only `zerotrust` uses either today:
+
+- `modules/schema/`, a child module that creates nothing. It holds a type that
+  would otherwise be written out several times in `variables.tf`, because Terraform
+  has no type aliases. The parent variable is declared `type = any` and passes its
+  value, and a flattened map of the repeated object, to the child, which types,
+  defaults and validates it. Reach for it only when the same object appears three or
+  more times in one file; a single copy in the layer and a single copy in the
+  module is the normal cost of the layer/module split and needs no workaround.
+  `zerotrust` has one on each side, for the Access rule set.
+- `tests/*.tftest.hcl`, `terraform test` files that run offline against
+  `mock_provider`. See [Test your guardrails](#test-your-guardrails).
+
 ### Where a guardrail goes
 
 Put a check in `variables.tf` if it can be decided from one variable. Types, enums,
@@ -91,6 +104,15 @@ calls.
 
 So: single field checks go in `variables.tf` everywhere. Cross field checks go in
 `main.tf` in a module, and `preflight.tf` in a layer.
+
+The exception is a module or layer with a `modules/schema` child, as `zerotrust`
+has. A variable declared `type = any` there is typed in the child, so its type
+errors and the single field checks that read the typed value are in
+`modules/schema/variables.tf`, not in the parent's. The parent's description
+still says what every field means and points at the child. Two things differ for
+the operator: a failure is reported against `module "schema"` in the parent's
+`.tf` file rather than the tfvars line, and the message names the offending entry
+(for example `access_groups.staff.include`).
 
 ### Duplicate object keys
 
@@ -315,6 +337,31 @@ of `{ id, name, subcategories }` objects and
 `{ id, name }`, and every precondition in it - including the ones in
 `modules/gateway`, which see only resolved IDs - can be fired against a committed
 account tree with a dummy token.
+
+### Tests that stay in the repository
+
+A one-off run proves a guardrail once. `zerotrust` also keeps its checks as
+`terraform test` files, in `modules/zerotrust/tests/` and
+`deployment/layers/zerotrust/tests/`, so a later change can re-prove them. They run
+offline: `mock_provider "cloudflare" {}` stands in for the provider and
+`override_data` for the organisation lookup, so no token, account or state is
+involved.
+
+Do not run `terraform init` in the repository. Copy the directory to a scratch
+location, keeping the modules at the same relative path, and run there:
+
+```bash
+terraform -chdir=<scratch>/modules/zerotrust init -backend=false
+terraform -chdir=<scratch>/modules/zerotrust test
+```
+
+Two limits to know about. `expect_failures` cannot name a variable or resource inside
+a child module, so the checks that moved into `modules/schema` are tested by
+loading that child directly (`schema.tftest.hcl`), while `rule_sets.tftest.hcl`
+exercises the parent. And `ci.yml` does not run `terraform test`, so these files
+protect a change only when someone runs them. `rule_sets.tftest.hcl` includes
+`all_six_positions_share_one_type`, which is the drift check if a rule set type is
+ever declared in more than one place again.
 
 ## Pull requests
 

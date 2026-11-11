@@ -30,9 +30,9 @@ locals {
   # Key -> Cloudflare name
 
   identity_provider_names_by_key = { for key, provider in var.identity_providers : key => provider.name }
-  access_group_names_by_key      = { for key, group in var.access_groups : key => group.name }
+  access_group_names_by_key      = { for key, group in module.schema.access_groups : key => group.name }
   service_token_names_by_key     = { for key, token in var.service_tokens : key => token.name }
-  access_policy_names_by_key     = { for key, policy in var.access_policies : key => policy.name }
+  access_policy_names_by_key     = { for key, policy in module.schema.access_policies : key => policy.name }
 
   # Module inputs
 
@@ -54,14 +54,21 @@ locals {
     }
   ]
 
-  rule_sets = merge(
-    { for key, group in var.access_groups : "access_groups.${key}.include" => group.include },
-    { for key, group in var.access_groups : "access_groups.${key}.exclude" => group.exclude if group.exclude != null },
-    { for key, group in var.access_groups : "access_groups.${key}.require" => group.require if group.require != null },
-    { for key, policy in var.access_policies : "access_policies.${key}.include" => policy.include },
-    { for key, policy in var.access_policies : "access_policies.${key}.exclude" => policy.exclude if policy.exclude != null },
-    { for key, policy in var.access_policies : "access_policies.${key}.require" => policy.require if policy.require != null },
+  # As written in the account tree: untyped, so only what was set is present.
+  # The schema module says which of exclude and require exist; the contents are
+  # read from the variable, because the schema's copy of a group or policy
+  # carries its rule sets as empty objects.
+  rule_sets_as_given = merge(
+    { for key, group in module.schema.access_groups : "access_groups.${key}.include" => var.access_groups[key].include },
+    { for key, group in module.schema.access_groups : "access_groups.${key}.exclude" => var.access_groups[key].exclude if group.exclude != null },
+    { for key, group in module.schema.access_groups : "access_groups.${key}.require" => var.access_groups[key].require if group.require != null },
+    { for key, policy in module.schema.access_policies : "access_policies.${key}.include" => var.access_policies[key].include },
+    { for key, policy in module.schema.access_policies : "access_policies.${key}.exclude" => var.access_policies[key].exclude if policy.exclude != null },
+    { for key, policy in module.schema.access_policies : "access_policies.${key}.require" => var.access_policies[key].require if policy.require != null },
   )
+
+  # The same six positions with every attribute present and defaulted.
+  rule_sets = module.schema.rule_sets
 
   translated_rules = {
     for path, rule in local.rule_sets : path => {
@@ -139,7 +146,7 @@ locals {
   }
 
   access_groups = [
-    for key, group in var.access_groups : {
+    for key, group in module.schema.access_groups : {
       name       = group.name
       is_default = group.is_default
       include    = local.translated_rules["access_groups.${key}.include"]
@@ -149,7 +156,7 @@ locals {
   ]
 
   access_policies = [
-    for key, policy in var.access_policies : {
+    for key, policy in module.schema.access_policies : {
       name                           = policy.name
       decision                       = policy.decision
       session_duration               = policy.session_duration
@@ -261,7 +268,7 @@ locals {
   restricted_policy_decisions = [for decision in var.restricted_policy_decisions : lower(trimspace(decision))]
 
   restricted_decisions_used = sort([
-    for key, policy in var.access_policies : "access_policies.${key} -> \"${policy.decision}\""
+    for key, policy in module.schema.access_policies : "access_policies.${key} -> \"${policy.decision}\""
     if contains(local.restricted_policy_decisions, lower(trimspace(policy.decision)))
   ])
 

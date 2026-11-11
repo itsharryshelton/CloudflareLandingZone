@@ -6,6 +6,17 @@
 # below are the checks that need more than one input, so they cannot be
 # variable validations.
 
+# Types var.access_groups and var.access_policies, which are declared `any` so
+# that the rule set object is written once rather than six times. It creates
+# nothing; see modules/schema/variables.tf.
+module "schema" {
+  source = "./modules/schema"
+
+  access_groups   = var.access_groups
+  access_policies = var.access_policies
+  rule_sets       = local.rule_sets_as_given
+}
+
 # The team name, session lengths and dashboard lock for the whole account.
 #
 # The provider creates this with an HTTP PUT, so it can adopt and manage an

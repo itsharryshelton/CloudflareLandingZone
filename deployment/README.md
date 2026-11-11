@@ -58,7 +58,7 @@ deployment/
         └── ...
 ```
 
-Each layer is a root module with its own state file, holding `terraform.tf`, `providers.tf`, `variables.tf`, `locals*.tf`, one `<subject>.tf`, `preflight.tf`, `outputs.tf` and its own `defaults.auto.tfvars` where platform baselines apply. Where they apply, a layer also carries `zone_lookup.tf` (or another `*_lookup.tf`) for the names it resolves through the API, `tags.tf` for [resource tags](../.github/workflows/README.md#resource-tags), `tier.tf` for a declared apply tier, and `imports.tf` for adopting what already exists at Cloudflare.
+Each layer is a root module with its own state file, holding `terraform.tf`, `providers.tf`, `variables.tf`, `locals*.tf`, one `<subject>.tf`, `preflight.tf`, `outputs.tf` and its own `defaults.auto.tfvars` where platform baselines apply. Where they apply, a layer also carries `zone_lookup.tf` (or another `*_lookup.tf`) for the names it resolves through the API, `tags.tf` for [resource tags](../.github/workflows/README.md#resource-tags), `tier.tf` for a declared apply tier, and `imports.tf` for adopting what already exists at Cloudflare. `zerotrust` also has a `modules/schema` directory, a local child module that holds the Access rule set type once, and a `tests/` directory of offline `terraform test` files; see [CONTRIBUTING.md](../CONTRIBUTING.md#module-conventions).
 
 Upstream, a layer's `module` blocks point at [../modules/](../modules/), except `dns`, `gateway`, `lists`, `rules`, `turnstile` and `waf`, which point at a placeholder `git::https://github.com/Your-Org/cloudflare-platform-modules//<module>`. Each block carries a commented example of the pinned `?ref=` form. In a deployment repository, every `source` has to name the published module repository at a tag.
 
