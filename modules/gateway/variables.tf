@@ -35,13 +35,23 @@ variable "policies" {
       dlp_profile_ids       = optional(list(string), [])
       upload_file_types     = optional(list(string), [])
       download_file_types   = optional(list(string), [])
+
+      domain_list_ids         = optional(list(string), [])
+      host_list_ids           = optional(list(string), [])
+      sni_domain_list_ids     = optional(list(string), [])
+      sni_host_list_ids       = optional(list(string), [])
+      url_list_ids            = optional(list(string), [])
+      destination_ip_list_ids = optional(list(string), [])
+      source_ip_list_ids      = optional(list(string), [])
+      dns_location_ids        = optional(list(string), [])
     }), {})
 
     identity = optional(object({
-      user_emails       = optional(list(string), [])
-      user_group_names  = optional(list(string), [])
-      user_group_emails = optional(list(string), [])
-      user_group_ids    = optional(list(string), [])
+      user_emails         = optional(list(string), [])
+      user_group_names    = optional(list(string), [])
+      user_group_emails   = optional(list(string), [])
+      user_group_ids      = optional(list(string), [])
+      user_email_list_ids = optional(list(string), [])
     }), {})
 
     device_posture_check_ids = optional(list(string), [])
@@ -177,15 +187,32 @@ variable "policies" {
       destination_ip_cidrs  - destination ranges. On a dns policy this is the
                               RESOLVED address, evaluated after the answer comes back
 
+    Gateway list references - destination terms too, each list its own term. A
+    list is matched as `in $<list uuid>`, so its contents can change without
+    the policy changing. The list's type must suit the field; the module sees
+    only an ID and cannot check that, so the caller has to:
+
+      domain_list_ids         - DOMAIN lists, matched like `domains`. dns and http
+      host_list_ids           - DOMAIN lists, matched like `hosts`. dns and http
+      sni_domain_list_ids     - DOMAIN lists, matched like `sni_domains`. network
+      sni_host_list_ids       - DOMAIN lists, matched like `sni_hosts`. network
+      url_list_ids            - URL lists, matched against the request URL. http
+                                only, and only past decryption
+      destination_ip_list_ids - IP lists, matched like `destination_ip_cidrs`
+
     Constraints - each is a set OR'd internally and AND'd against the rest:
 
       source_ip_cidrs       - where the request came from
+      source_ip_list_ids    - IP lists of source ranges. OR'd with source_ip_cidrs,
+                              since both name the same thing
       destination_ports     - network only
       protocols             - network only. "tcp", "udp" or "icmp"
       http_methods          - http only
       dlp_profile_ids       - http only. Data Loss Prevention profile UUIDs. A match
                               means the request body contained something the profile
                               describes
+      dns_location_ids      - dns only. Gateway DNS location UUIDs: the query
+                              arrived through one of these locations
       upload_file_types     - http only. OR'd with download_file_types, because one
                               request is one direction
       download_file_types   - http only
@@ -197,7 +224,8 @@ variable "policies" {
     `identity` restricts a policy to people rather than traffic. Its terms are
     OR'd, since they are alternative ways of naming the same population:
 
-      user_emails, user_group_names, user_group_emails, user_group_ids
+      user_emails, user_group_names, user_group_emails, user_group_ids,
+      user_email_list_ids (EMAIL lists, matched as `identity.email in $<uuid>`)
 
     `device_posture_check_ids` restricts to devices that PASSED the named WARP
     posture checks.
@@ -239,10 +267,12 @@ variable "policies" {
 
     WHAT THIS MODULE DOES NOT MANAGE
 
-    Gateway lists, DLP profiles, proxy endpoints, account-level Gateway settings,
-    browser isolation controls, header injection, egress policies and resolver
-    policies. DLP profiles are referenced by ID because Cloudflare exposes no data
-    source that resolves one by name.
+    Gateway lists, DLP profiles and DNS locations are separate modules
+    (zerotrust_list, dlp_profile, dns_location); this one takes their IDs. Also
+    not managed: proxy endpoints, browser isolation controls, header injection,
+    egress policies and resolver policies. A DLP profile created elsewhere is
+    still referenced by ID, because Cloudflare exposes no data source that
+    resolves one by name.
   EOT
 
   validation {
@@ -353,7 +383,29 @@ variable "policies" {
         can(regex("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$", id))
       ]
     ]))
-    error_message = "Each policies[*].match.dlp_profile_ids and policies[*].device_posture_check_ids entry must be a UUID. Cloudflare exposes no data source that resolves a DLP profile or a device posture check by name, so these arrive as IDs from the dashboard."
+    error_message = "Each policies[*].match.dlp_profile_ids and policies[*].device_posture_check_ids entry must be a UUID. Cloudflare exposes no data source that resolves a DLP profile or a device posture check by name, so these arrive as IDs - from the dlp_profile module's output, or copied from the dashboard."
+  }
+
+  # A list ID is written unquoted after `$`, so anything that is not a bare UUID
+  # becomes expression syntax rather than a value. The quote check above cannot
+  # catch that, because there is no quote to break out of.
+  validation {
+    condition = alltrue(flatten([
+      for policy in var.policies : [
+        for id in concat(
+          policy.match.domain_list_ids,
+          policy.match.host_list_ids,
+          policy.match.sni_domain_list_ids,
+          policy.match.sni_host_list_ids,
+          policy.match.url_list_ids,
+          policy.match.destination_ip_list_ids,
+          policy.match.source_ip_list_ids,
+          policy.match.dns_location_ids,
+          policy.identity.user_email_list_ids,
+        ) : can(regex("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$", id))
+      ]
+    ]))
+    error_message = "Each policies[*].match *_list_ids and dns_location_ids entry, and each identity.user_email_list_ids entry, must be a UUID - the id output of a cloudflare_zero_trust_list or cloudflare_zero_trust_dns_location. A list is referenced as $<uuid> with no quotes around it, so any other character would be read as expression syntax."
   }
 
   validation {

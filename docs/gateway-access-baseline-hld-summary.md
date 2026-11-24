@@ -1,6 +1,6 @@
 # Cloudflare Landing Zone: Gateway and Access baseline (source material for HLD)
 
-Summary of the Cloudflare One Gateway (Secure Web Gateway) and Access rules as implemented, for use when filling in the Zero Trust / SSE section of a High-Level Design. Written from the code at `main` @ `4ae43c7` on 2026-10-27. Where this document and the code disagree, the code wins.
+Summary of the Cloudflare One Gateway (Secure Web Gateway) and Access rules as implemented, for use when filling in the Zero Trust / SSE section of a High-Level Design. Written from the code at `main` @ `4ae43c7` on 2026-10-27, with the Gateway lists, DLP profiles and DNS locations added on 2026-11-24. Where this document and the code disagree, the code wins.
 
 **Source of truth:**
 
@@ -9,9 +9,11 @@ Summary of the Cloudflare One Gateway (Secure Web Gateway) and Access rules as i
   - Assembly and name resolution: `locals.tf`, `catalogue_lookup.tf`
   - Guards: `preflight.tf`
   - Platform defaults: `defaults.auto.tfvars`
+  - Lists, DLP profiles, DNS locations: `lists.tf`, `dlp_profiles.tf`, `dns_locations.tf`
 - Gateway module: `modules/gateway/`
   - Expression compiler and policy guards: `locals.tf`, `main.tf`
   - Account settings and inspection CA: `settings.tf`, `certificate.tf`, `locals.settings.tf`
+- Modules the gateway layer also calls: `modules/zerotrust_list/`, `modules/dlp_profile/`, `modules/dns_location/`
 - Access layer: `deployment/layers/zerotrust/`
   - Assembly: `locals.tf`
   - Guards: `preflight.tf`
@@ -35,14 +37,14 @@ The two layers are built differently, and the HLD should not describe them the s
 - **One module instance per account.** Gateway is account-scoped, so no zone is involved.
 - **Three builders are managed:** `dns`, `network` and `http`. Egress and resolver policies are separate Gateway builders and are rejected by input validation.
 - **Policy set = selected baseline policies + account `gateway_policies`**, concatenated into one list for the module.
-- **Names, not IDs.** Categories and applications are named in config and resolved at plan time against the account's own Cloudflare catalogue (`cloudflare_zero_trust_gateway_categories_list`, and `cloudflare_zero_trust_gateway_app_types_list` with `max_items = 10000` to avoid silent truncation). A name that does not resolve fails the plan. DLP profiles are the exception: they are referenced by UUID because no data source resolves them by name.
+- **Names, not IDs.** Categories and applications are named in config and resolved at plan time against the account's own Cloudflare catalogue (`cloudflare_zero_trust_gateway_categories_list`, and `cloudflare_zero_trust_gateway_app_types_list` with `max_items = 10000` to avoid silent truncation). A name that does not resolve fails the plan. Lists, custom DLP profiles and DNS locations created by the layer are named by key and resolved to their UUIDs. Predefined and dashboard-built DLP profiles are the exception: they are referenced by UUID because no data source resolves them by name.
 - **Compiled expressions.** Account trees never write wirefilter. The module compiles `match` selectors into:
   - `(destination terms OR'd) and (each constraint AND'd)`
-  - Destination terms: `domains`, `hosts`, `sni_domains`, `sni_hosts`, `applications`, `content_categories`, `security_categories`, `destination_ip_cidrs`
-  - Constraints: `source_ip_cidrs`, `destination_ports`, `protocols`, `http_methods`, `dlp_profile_ids`
+  - Destination terms: `domains`, `hosts`, `sni_domains`, `sni_hosts`, `applications`, `content_categories`, `security_categories`, `destination_ip_cidrs`, and one term per list named in `domain_list_keys`, `host_list_keys`, `sni_domain_list_keys`, `sni_host_list_keys`, `url_list_keys` or `destination_ip_list_keys` (compiled as `in $<list uuid>`)
+  - Constraints: `source_ip_cidrs` OR'd with `source_ip_list_keys`, `destination_ports`, `protocols`, `http_methods`, `dlp_profile_keys` / `dlp_profile_ids`, `dns_location_keys` (`dns.location in {…}`, DNS only)
   - `upload_file_types` and `download_file_types` are OR'd with each other, then AND'd with the rest
   - `negate` inverts the whole traffic expression
-  - `identity` terms (`user_emails`, `user_group_names`, `user_group_emails`, `user_group_ids`) are OR'd
+  - `identity` terms (`user_emails`, `user_group_names`, `user_group_emails`, `user_group_ids`, `user_email_list_keys`) are OR'd
   - Raw `traffic_expression`, `identity_expression` and `device_posture_expression` are escape hatches. They replace the compiled expression for that dimension; setting both is refused.
 - **Precedence.** Gateway walks each builder in ascending precedence and stops at the first allow or block that matches. Precedence must be **unique across the whole account, all builders together** (module precondition; Cloudflare returns 409 otherwise). Precedence below `reserved_precedence_ceiling` (100) belongs to the baseline and is refused for account policies.
 - **Policy identity.** The module keys policies by lowercased `name`. Renaming a policy destroys and recreates it.
@@ -57,7 +59,11 @@ The two layers are built differently, and the HLD should not describe them the s
 | `gateway_security_categories` | `"Command and Control & Botnet"`, `"Malware"` | Feeds both security-threat baselines. The variable default is `[]`; `defaults.auto.tfvars` sets these two |
 | `gateway_blocked_content_categories` | `[]` | Acceptable-use decision, so no platform default |
 | `gateway_bypass_applications` | `[]` | Applications exempt from TLS inspection. Account-level decision |
-| `gateway_dlp_profile_ids` | `[]` | DLP profile UUIDs from the Zero Trust dashboard |
+| `gateway_dlp_profile_keys` | `[]` | Keys into `gateway_dlp_profiles` for the baseline DLP rule |
+| `gateway_dlp_profile_ids` | `[]` | UUIDs of predefined or dashboard-built DLP profiles for the baseline DLP rule |
+| `gateway_lists` | `{}` | Zero Trust lists, per account |
+| `gateway_dlp_profiles` | `{}` | Custom DLP profiles and their patterns, per account |
+| `gateway_dns_locations` | `{}` | Gateway DNS locations (sites), per account |
 | `gateway_quarantine_file_types` | `[]` | Must be one of: exe, pdf, doc, docm, docx, rtf, ppt, pptx, xls, xlsm, xlsx, zip, rar |
 | `reserved_precedence_ceiling` | `100` | Precedence below this is baseline-only |
 | `restricted_actions` | `[]` | Gateway actions refused for account and baseline policies. See issue 6 |
@@ -81,7 +87,7 @@ All entries are enabled, apply to every user and device (no identity, posture, s
 | `bypass_trusted_applications` | Baseline - do not inspect trusted applications | http | off (Do Not Inspect) | 20 | `any(app.ids[*] in {…})` | `gateway_bypass_applications` |
 | `block_security_threats_http` | Baseline - block security threats (HTTP) | http | block | 30 | `any(http.request.uri.security_category[*] in {…})` | `gateway_security_categories` |
 | `block_disallowed_content` | Baseline - block disallowed content categories | dns | block | 40 | `any(dns.content_category[*] in {…})` | `gateway_blocked_content_categories`. Block page on |
-| `block_dlp_matches` | Baseline - block DLP matches | http | block | 50 | `any(dlp.profiles[*] in {…})` | `gateway_dlp_profile_ids` |
+| `block_dlp_matches` | Baseline - block DLP matches | http | block | 50 | `any(dlp.profiles[*] in {…})` | `gateway_dlp_profile_keys` and/or `gateway_dlp_profile_ids` |
 | `quarantine_risky_downloads` | Baseline - quarantine risky downloads | http | quarantine | 60 | `any(http.download.file.types[*] in {…})` | `gateway_quarantine_file_types` (also sent as the quarantine file-type setting) |
 
 **Block reasons shown to users:**
@@ -110,7 +116,10 @@ All entries are enabled, apply to every user and device (no identity, posture, s
 - an account policy enables DLP payload logging without `allow_dlp_payload_logging`;
 - an account policy disables DNSSEC validation without `allow_disabling_dnssec_validation`;
 - account HTTP policies (other than `off`) exist while TLS decryption is off or `gateway_settings` is unmanaged, without `allow_uninspected_http_policies` (see issue 4);
-- a policy or `default_untrusted_cert_action` uses `pass_through` without `allow_untrusted_certificate_pass_through`.
+- a policy or `default_untrusted_cert_action` uses `pass_through` without `allow_untrusted_certificate_pass_through`;
+- a policy names a list, DLP profile or DNS location key the account does not define (`gateway_dlp_profile_keys` included);
+- a policy reads a list through a selector its type does not suit (DOMAIN for domain/host/SNI, IP for IP, URL for URL, EMAIL for identity email);
+- more than one DNS location sets `client_default`.
 
 **Module, on every policy.** The plan fails when:
 
@@ -119,7 +128,7 @@ All entries are enabled, apply to every user and device (no identity, posture, s
 - two policies share a precedence, in any builder;
 - a policy has no selector at all and `match_all_traffic` is not set;
 - `match_all_traffic` is combined with allow, off, noscan or noisolate;
-- a Do Not Inspect policy matches on something only visible after decryption (DLP, methods, file types);
+- a Do Not Inspect policy matches on something only visible after decryption (DLP, methods, file types, URL lists);
 - a DLP match is combined with off or noscan;
 - a structured matcher and a raw expression are set for the same dimension;
 - an action is missing its setting (redirect target, quarantine file types, L4 override, DNS override);
@@ -140,12 +149,20 @@ All entries are enabled, apply to every user and device (no identity, posture, s
 - DLP profile IDs are UUIDs;
 - quarantine file types are in the sandbox list;
 - `restricted_actions` entries are real Gateway actions;
-- `default_untrusted_cert_action` is pass_through, block or error.
+- `default_untrusted_cert_action` is pass_through, block or error;
+- list, DLP profile and DNS location keys match `^[a-z0-9_]+$` and their names are unique.
+
+**Lists (`modules/zerotrust_list`).** The plan fails when an entry does not fit the list type (IP, hostname, email, URL without a trailing slash, AAGUID, serial), an IP entry is not in the canonical form Cloudflare stores, an entry is duplicated (DOMAIN and EMAIL compared lower-cased), the list is empty, or it exceeds `max_items` (1,000).
+
+**DLP profiles (`modules/dlp_profile`).** The plan fails when the profile has no entries or every entry is disabled, two entries share a name, a pattern does not compile under RE2, or a pattern matches the empty string (and so every request body). `allowed_match_count` must be 0 to 1,000.
+
+**DNS locations (`modules/dns_location`).** The plan fails when every endpoint is off, the IPv4 endpoint is on with no source `networks` and no dedicated address pair, a source network is wider than /24 or off its boundary, or an IPv6, DoH or DoT endpoint answers any source (DoH without `require_token`) and `allow_unrestricted_endpoints` is not set.
 
 ## A5. Tenant extension points
 
 - **`gateway_policies`**: dns, network and http policies at precedence 100 and above, with `match`, `identity`, `device_posture_check_ids`, raw expressions, `schedule`, `expiration` and `settings`.
-- **Baseline parameters**: the five lists in A2.
+- **Baseline parameters**: the five lists in A2, plus `gateway_dlp_profile_keys`.
+- **`gateway_lists`, `gateway_dlp_profiles`, `gateway_dns_locations`**: Zero Trust lists, custom DLP profiles and DNS locations, read by policies through key selectors.
 - **`gateway_settings`**: TLS decryption, inspection mode, protocol detection, body scanning, antivirus, sandbox, block page, activity log, browser isolation, extended email matching, FIPS, max TTL.
 - **`gateway_inspection_certificate`**.
 
@@ -158,7 +175,9 @@ All entries are enabled, apply to every user and device (no identity, posture, s
 **Baseline selected:** `block_security_threats`, `block_security_threats_http`, `block_dlp_matches`, `quarantine_risky_downloads`.
 
 - **Security categories (overrides platform default):** Command and Control & Botnet, Malware, Phishing, Cryptomining, Spyware, Spam, DGA Domains, DNS Tunneling, Anonymizer.
-- **DLP profiles:** one placeholder UUID (`33333333-…`). EDIT required.
+- **DLP profiles:** the baseline blocks on `internal_identifiers` by key, a custom profile with two placeholder patterns (`PRJ-[0-9]{6}`, `\bEMP[0-9]{7}\b`) and `allowed_match_count = 5`. No predefined profile is named. EDIT the patterns.
+- **Lists:** `threat_feed_domains` (DOMAIN, placeholder example.net), read by `block_threat_feed_domains`.
+- **DNS locations:** `head_office` (203.0.113.0/24, IPv4 plus DoH with `require_token`) and `guest_wifi` (198.51.100.128/25, IPv4 only). EDIT the networks.
 - **Quarantine file types:** exe, zip, rar.
 - **Not selected:** `block_disallowed_content` (no content categories set) and `bypass_trusted_applications` (the bypass is done by an account policy at HTTP 110 instead).
 - **`gateway_settings`:** not set, so TLS decryption is unmanaged (see issue 2).
@@ -171,6 +190,8 @@ All entries are enabled, apply to every user and device (no identity, posture, s
 | `block_newly_registered_domains` | Block newly registered domains | block | 110 | content: New Domains, Newly Seen Domains |
 | `block_peer_to_peer` | Block peer-to-peer file sharing | block | 120 | content: Peer-to-Peer |
 | `block_known_bad_domains` | Block known bad domains | block | 130 | domains: a-really-bad-website.net (placeholder) |
+| `block_threat_feed_domains` | Block threat feed domains | block | 170 | domain list: threat_feed_domains |
+| `enforce_safesearch_on_guest_wifi` | Enforce SafeSearch on guest Wi-Fi | safesearch | 180 | DNS location: guest_wifi |
 
 **Network policies.** Each allow sits immediately above the block it exempts.
 
@@ -205,7 +226,7 @@ Every HTTP allow above gets `untrusted_cert_action = error` from the platform de
 ### account_b
 
 - **Baseline selected:** `block_security_threats`, `block_security_threats_http`, using the platform default categories (Command and Control & Botnet, Malware).
-- **Account policy:** `block_traffic_from_unknown_ranges` ("Block traffic from unknown source ranges"), network, block, precedence 100. Match is `negate = true` on source 198.51.100.0/24 and 192.0.2.0/24, so anything from outside those ranges is blocked.
+- **Account policy:** `block_traffic_from_unknown_ranges` ("Block traffic from unknown source ranges"), network, block, precedence 100. Match is `negate = true` on `source_ip_list_keys = ["corporate_ranges"]`, an IP list holding 198.51.100.0/24 and 192.0.2.0/24, so anything from outside those ranges is blocked.
 - **Not used:** content categories, bypass, DLP, quarantine.
 - **`gateway_settings`:** not set (see issue 4).
 
@@ -342,13 +363,13 @@ The bare `account-a-admin.pages.dev` hostname is listed on purpose: protecting o
   - Split tunnels decide what Gateway can see: excluded traffic is never evaluated by any DNS, network or HTTP policy.
 - **Pages layer:** emits `pages_access_applications`, which is copied by hand into the zerotrust account tree. The pages token has no Zero Trust scope, so the zerotrust entry is the only protection on those sites.
 - **Tunnels layer:** manages cloudflared tunnels, routes and virtual networks, which private Access destinations and Gateway network rules can target.
-- **Not managed anywhere in the repo** (no resource exists in any module): Gateway egress and resolver policies, DNS locations / proxy endpoints, Zero Trust lists, DLP profiles, Access custom pages, Access mTLS certificates, CASB. The HLD should list these as dashboard-managed, out of scope or future work.
+- **Not managed anywhere in the repo** (no resource exists in any module): Gateway egress and resolver policies, proxy endpoints, Cloudflare's predefined DLP profiles (referenced by UUID, not tuned), DLP datasets and sensitivity levels, Access custom pages, Access mTLS certificates, CASB. The HLD should list these as dashboard-managed, out of scope or future work.
 
 # Known issues / open items
 
 Flag these in the HLD; do not treat them as design intent.
 
-1. **account_a `gateway.tfvars` cannot plan: precedence collides across builders.** DNS uses 100–130, network 100–160 and HTTP 100–130, so 100, 110, 120 and 130 are each used three times. The module requires precedence to be unique across the whole account. The file's header comment ("each have their own precedence sequence") and the layer's `gateway_policies` description ("Evaluation order within this policy's type") describe per-builder numbering, which contradicts the module and the baseline catalogue comment.
+1. **account_a `gateway.tfvars` cannot plan: precedence collides across builders.** DNS uses 100–130 (plus 170 and 180), network 100–160 and HTTP 100–130, so 100, 110, 120 and 130 are each used three times. The module requires precedence to be unique across the whole account. The file's header comment ("each have their own precedence sequence") and the layer's `gateway_policies` description ("Evaluation order within this policy's type") describe per-builder numbering, which contradicts the module and the baseline catalogue comment.
 2. **account_a Gateway also fails the uninspected-HTTP guard.** It defines HTTP policies but leaves `gateway_settings` unset, so TLS decryption is "unmanaged" and `allow_uninspected_http_policies` is false.
 3. **Tenant restriction headers are never sent.** `restrict_microsoft_365_tenants` and `restrict_google_workspace_tenants` set `settings.add_headers`, but neither the layer variable nor the module has that attribute, and Terraform drops undeclared object attributes without error. Enabling either rule would create a plain HTTP allow with no headers. For Google, that is an allow on google.com that exempts all Google traffic from every HTTP policy below it (including the download and upload blocks) and restricts nothing. Both ship `enabled = false`.
 4. **Baseline HTTP policies are not covered by the uninspected-HTTP guard when `gateway_settings` is null.** The layer check only scans account `gateway_policies`, and the module check only exists when the settings resource does. account_b plans cleanly with `block_security_threats_http` while inspection is unmanaged; unless TLS decryption is already on in the dashboard, that rule only sees plaintext HTTP.
@@ -358,7 +379,9 @@ Flag these in the HLD; do not treat them as design intent.
 8. **Gateway policy identity is the name, not the key.** The `gateway_policies` description says renaming the key destroys and recreates the policy. The module keys by name, so a key rename is a no-op and a name rename is a recreate. (The Access layer describes this correctly.)
 9. **Stale comment in account_a `gateway.tfvars`.** `allow_sanctioned_software_sources` says the baseline quarantine rule is at HTTP precedence 40. It is at 60; 40 is the DNS content baseline.
 10. **Placeholders that make account_a rules inert or harmful until edited:**
-    - the DLP profile UUID (`block_dlp_matches` matches nothing);
+    - the DLP patterns in `internal_identifiers` (they match this repo's sample formats, not a real organisation's);
+    - the `threat_feed_domains` list entry (example.net);
+    - the DNS location networks, which must be each site's public egress range;
     - the SMTP relay address;
     - the bastion range 198.51.100.0/24, which means precedence 130 blocks **all** outbound SSH, Telnet, SMB and RDP;
     - example.org for software sources and unmanaged storage;

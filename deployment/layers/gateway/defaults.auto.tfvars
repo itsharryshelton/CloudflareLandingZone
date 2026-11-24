@@ -43,9 +43,11 @@ gateway_blocked_content_categories = []
 # or matched by a DLP profile, so it is an account-level decision.
 gateway_bypass_applications = []
 
-# DLP profile UUIDs are created per account in the Zero Trust dashboard, so they
-# cannot have a platform default.
-gateway_dlp_profile_ids = []
+# Which DLP profiles the baseline DLP rule blocks on is per account: keys into
+# the account's gateway_dlp_profiles, or UUIDs of predefined and dashboard-built
+# profiles. Neither can have a platform default.
+gateway_dlp_profile_keys = []
+gateway_dlp_profile_ids  = []
 
 # File extensions the baseline quarantine rule detonates in Cloudflare's sandbox
 # before delivering. Short on purpose - quarantine makes the user wait.

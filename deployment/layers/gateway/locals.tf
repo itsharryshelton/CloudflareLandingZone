@@ -57,6 +57,28 @@ locals {
 
   application_name_count = length(local.application_ids_by_name)
 
+  # Lists, DLP profiles and DNS locations managed by this layer, by key.
+  #
+  # Each ID is unknown until its object is created, so a policy reading a new
+  # list plans as "known after apply" for its expression. That is expected. The
+  # key checks in preflight.tf read var.*, not these, so they still run at plan.
+  list_ids_by_key         = { for key, list in module.zerotrust_list : key => list.id }
+  dlp_profile_ids_by_key  = { for key, profile in module.dlp_profile : key => profile.id }
+  dns_location_ids_by_key = { for key, location in module.dns_location : key => location.id }
+
+  # The list type each list selector needs. Cloudflare does not reject a list
+  # of the wrong type - an IP list read by a Domain selector is accepted and
+  # matches nothing - so the layer checks it.
+  list_key_selector_types = {
+    domain_list_keys         = "DOMAIN"
+    host_list_keys           = "DOMAIN"
+    sni_domain_list_keys     = "DOMAIN"
+    sni_host_list_keys       = "DOMAIN"
+    url_list_keys            = "URL"
+    destination_ip_list_keys = "IP"
+    source_ip_list_keys      = "IP"
+  }
+
   # Baseline selection
 
   selected_baseline_keys = [
@@ -116,13 +138,23 @@ locals {
         dlp_profile_ids      = local.gateway_baseline_catalogue[key].dlp_profile_ids
         upload_file_types    = []
         download_file_types  = local.gateway_baseline_catalogue[key].download_file_types
+
+        domain_list_ids         = []
+        host_list_ids           = []
+        sni_domain_list_ids     = []
+        sni_host_list_ids       = []
+        url_list_ids            = []
+        destination_ip_list_ids = []
+        source_ip_list_ids      = []
+        dns_location_ids        = []
       }
 
       identity = {
-        user_emails       = []
-        user_group_names  = []
-        user_group_emails = []
-        user_group_ids    = []
+        user_emails         = []
+        user_group_names    = []
+        user_group_emails   = []
+        user_group_ids      = []
+        user_email_list_ids = []
       }
 
       device_posture_check_ids  = []
@@ -201,16 +233,32 @@ locals {
         destination_ports    = policy.match.destination_ports
         protocols            = policy.match.protocols
         http_methods         = policy.match.http_methods
-        dlp_profile_ids      = policy.match.dlp_profile_ids
         upload_file_types    = policy.match.upload_file_types
         download_file_types  = policy.match.download_file_types
+
+        # Profiles managed here by key, and profiles managed elsewhere by UUID.
+        # An unknown key is dropped here and reported by preflight.tf.
+        dlp_profile_ids = concat(
+          policy.match.dlp_profile_ids,
+          [for key in policy.match.dlp_profile_keys : local.dlp_profile_ids_by_key[key] if contains(keys(var.gateway_dlp_profiles), key)],
+        )
+
+        domain_list_ids         = [for key in policy.match.domain_list_keys : local.list_ids_by_key[key] if contains(keys(var.gateway_lists), key)]
+        host_list_ids           = [for key in policy.match.host_list_keys : local.list_ids_by_key[key] if contains(keys(var.gateway_lists), key)]
+        sni_domain_list_ids     = [for key in policy.match.sni_domain_list_keys : local.list_ids_by_key[key] if contains(keys(var.gateway_lists), key)]
+        sni_host_list_ids       = [for key in policy.match.sni_host_list_keys : local.list_ids_by_key[key] if contains(keys(var.gateway_lists), key)]
+        url_list_ids            = [for key in policy.match.url_list_keys : local.list_ids_by_key[key] if contains(keys(var.gateway_lists), key)]
+        destination_ip_list_ids = [for key in policy.match.destination_ip_list_keys : local.list_ids_by_key[key] if contains(keys(var.gateway_lists), key)]
+        source_ip_list_ids      = [for key in policy.match.source_ip_list_keys : local.list_ids_by_key[key] if contains(keys(var.gateway_lists), key)]
+        dns_location_ids        = [for key in policy.match.dns_location_keys : local.dns_location_ids_by_key[key] if contains(keys(var.gateway_dns_locations), key)]
       }
 
       identity = {
-        user_emails       = policy.identity.user_emails
-        user_group_names  = policy.identity.user_group_names
-        user_group_emails = policy.identity.user_group_emails
-        user_group_ids    = policy.identity.user_group_ids
+        user_emails         = policy.identity.user_emails
+        user_group_names    = policy.identity.user_group_names
+        user_group_emails   = policy.identity.user_group_emails
+        user_group_ids      = policy.identity.user_group_ids
+        user_email_list_ids = [for key in policy.identity.user_email_list_keys : local.list_ids_by_key[key] if contains(keys(var.gateway_lists), key)]
       }
 
       device_posture_check_ids  = policy.device_posture_check_ids
@@ -395,4 +443,64 @@ locals {
     ],
     var.default_untrusted_cert_action == "pass_through" ? ["default_untrusted_cert_action"] : [],
   ))
+
+  # Every list key a policy names, with the list type its selector needs.
+  list_key_references = flatten([
+    for policy_key, policy in var.gateway_policies : concat(
+      flatten([
+        for selector, wanted in local.list_key_selector_types : [
+          for key in policy.match[selector] : {
+            where  = "gateway_policies.${policy_key}.match.${selector}"
+            key    = key
+            wanted = wanted
+          }
+        ]
+      ]),
+      [
+        for key in policy.identity.user_email_list_keys : {
+          where  = "gateway_policies.${policy_key}.identity.user_email_list_keys"
+          key    = key
+          wanted = "EMAIL"
+        }
+      ],
+    )
+  ])
+
+  unknown_list_keys = sort(distinct([
+    for reference in local.list_key_references : "${reference.where} -> \"${reference.key}\""
+    if !contains(keys(var.gateway_lists), reference.key)
+  ]))
+
+  mismatched_list_types = sort(distinct([
+    for reference in local.list_key_references :
+    "${reference.where} -> \"${reference.key}\" is a ${var.gateway_lists[reference.key].type} list, the selector needs ${reference.wanted}"
+    if contains(keys(var.gateway_lists), reference.key) && var.gateway_lists[reference.key].type != reference.wanted
+  ]))
+
+  unknown_dlp_profile_keys = sort(distinct(concat(
+    [
+      for key in var.gateway_dlp_profile_keys : "gateway_dlp_profile_keys -> \"${key}\""
+      if !contains(keys(var.gateway_dlp_profiles), key)
+    ],
+    flatten([
+      for policy_key, policy in var.gateway_policies : [
+        for key in policy.match.dlp_profile_keys : "gateway_policies.${policy_key}.match.dlp_profile_keys -> \"${key}\""
+        if !contains(keys(var.gateway_dlp_profiles), key)
+      ]
+    ]),
+  )))
+
+  unknown_dns_location_keys = sort(distinct(flatten([
+    for policy_key, policy in var.gateway_policies : [
+      for key in policy.match.dns_location_keys : "gateway_policies.${policy_key}.match.dns_location_keys -> \"${key}\""
+      if !contains(keys(var.gateway_dns_locations), key)
+    ]
+  ])))
+
+  # Cloudflare keeps one default location per account. Two set here would each
+  # take the flag from the other on alternate applies.
+  default_dns_locations = sort([
+    for key, location in var.gateway_dns_locations : key
+    if location.client_default
+  ])
 }

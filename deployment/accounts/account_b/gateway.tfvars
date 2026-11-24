@@ -14,6 +14,21 @@ gateway_bypass_applications = []
 gateway_dlp_profile_ids       = []
 gateway_quarantine_file_types = []
 
+# The account's own address space, kept as a list so the policy below - and
+# any later one - reads one maintained set of ranges rather than each carrying
+# its own copy.
+gateway_lists = {
+  corporate_ranges = {
+    name        = "Corporate source ranges"
+    type        = "IP"
+    description = "Every public range the account's sites and VPN egress from"
+    items = [
+      { value = "198.51.100.0/24", description = "Head office" },
+      { value = "192.0.2.0/24", description = "Branch office" },
+    ]
+  }
+}
+
 gateway_blocked_content_categories = []
 
 gateway_policies = {
@@ -28,8 +43,8 @@ gateway_policies = {
     description = "Anything reaching Gateway from outside the account's own address space"
 
     match = {
-      negate          = true
-      source_ip_cidrs = ["198.51.100.0/24", "192.0.2.0/24"]
+      negate              = true
+      source_ip_list_keys = ["corporate_ranges"]
     }
 
     settings = {

@@ -23,7 +23,9 @@
 # one or two of these on first apply.
 #
 # EDIT before this is a real baseline:
-#   - gateway_dlp_profile_ids            the UUIDs from this account's DLP profiles
+#   - gateway_dlp_profiles               the patterns this organisation's data takes
+#   - gateway_lists                      the threat feed entries
+#   - gateway_dns_locations              each site's public egress range
 #   - allow_sanctioned_smtp_relay        the relay address
 #   - allow_sanctioned_admin_endpoints   the bastion ranges
 #   - restrict_microsoft_365_tenants     the tenant, then enable
@@ -57,13 +59,87 @@ gateway_security_categories = [
 # The account-level pair at HTTP 100/110 does it instead.
 gateway_bypass_applications = []
 
-# EDIT. DLP profiles are defined in the Zero Trust dashboard under DLP and
-# referenced by UUID - Cloudflare exposes no way to resolve one by name. Until
-# these are this account's real profiles, the baseline DLP rule matches whatever
-# the placeholder happens to be, which is nothing.
-gateway_dlp_profile_ids = [
-  "33333333-3333-3333-3333-333333333333",
-]
+# The baseline DLP rule blocks on the profiles named here by key, from
+# gateway_dlp_profiles below. Cloudflare's predefined profiles (Financial
+# Information, Credentials and Secrets, ...) are not created by this layer; to
+# block on one as well, add its UUID from the dashboard to gateway_dlp_profile_ids.
+gateway_dlp_profile_keys = ["internal_identifiers"]
+gateway_dlp_profile_ids  = []
+
+# EDIT the patterns. Custom DLP profiles, created and owned by this layer.
+#
+# Every pattern here is matched against every inspected upload and form post,
+# so a loose one blocks legitimate work estate-wide. A pattern that can match an
+# empty string fails the plan for exactly that reason. Start with
+# allowed_match_count above zero, read the Gateway logs, then tighten.
+gateway_dlp_profiles = {
+  internal_identifiers = {
+    name        = "Internal identifiers"
+    description = "Project codes and staff numbers that should not leave the organisation in bulk"
+
+    # One stray reference in an email is normal; a spreadsheet of them is not.
+    allowed_match_count = 5
+
+    entries = [
+      {
+        name        = "Project code"
+        regex       = "PRJ-[0-9]{6}"
+        description = "Internal project reference, e.g. PRJ-123456"
+      },
+      {
+        name        = "Staff number"
+        regex       = "\\bEMP[0-9]{7}\\b"
+        description = "HR staff number, e.g. EMP1234567"
+      },
+    ]
+  }
+}
+
+# Zero Trust lists, read by policies below through their *_list_keys
+# selectors. A list's entries change what every policy reading it matches,
+# without those policies appearing in the plan.
+gateway_lists = {
+  # EDIT: a placeholder for an externally maintained feed. Read by
+  # block_threat_feed_domains at DNS precedence 170.
+  threat_feed_domains = {
+    name        = "Threat feed domains"
+    type        = "DOMAIN"
+    description = "Domains from the security team's threat intelligence feed, blocked at DNS"
+    items = [
+      { value = "example.net", description = "Placeholder - replace with feed entries" },
+    ]
+  }
+}
+
+# Sites whose DNS is filtered without the Cloudflare One client: an office
+# router or a guest network pointing at Gateway's resolvers. Devices on the
+# client resolve through the account's default location and need nothing here.
+#
+# EDIT each site's networks: its PUBLIC egress range as Cloudflare sees it, not
+# its internal addressing. On the shared resolver addresses that range is the
+# only thing tying a query to the site.
+gateway_dns_locations = {
+  head_office = {
+    name     = "Head office"
+    networks = ["203.0.113.0/24"]
+
+    # IPv4 for the office router; DoH for laptops off-site, behind an identity
+    # token so the endpoint is not open to whoever learns its URL.
+    endpoints = {
+      ipv4 = { enabled = true }
+      doh  = { enabled = true, require_token = true }
+    }
+  }
+
+  guest_wifi = {
+    name     = "Guest Wi-Fi"
+    networks = ["198.51.100.128/25"]
+
+    endpoints = {
+      ipv4 = { enabled = true }
+    }
+  }
+}
 
 # Executables and archives are detonated in Cloudflare's sandbox before delivery.
 # Kept short: quarantine makes the user wait for the scan. The sandbox accepts a
@@ -167,6 +243,41 @@ gateway_policies = {
     settings = {
       block_reason       = "This domain is blocked by your organisation."
       block_page_enabled = true
+    }
+  }
+
+  # Domains from the threat feed list above. The policy holds only the list's
+  # UUID, so the security team's entries change what this blocks without this
+  # policy appearing in a plan.
+  block_threat_feed_domains = {
+    name        = "Block threat feed domains"
+    type        = "dns"
+    action      = "block"
+    precedence  = 170
+    description = "Domains on the threat intelligence list, matched with every subdomain"
+
+    match = {
+      domain_list_keys = ["threat_feed_domains"]
+    }
+
+    settings = {
+      block_reason       = "This domain is on your organisation's threat list."
+      block_page_enabled = true
+    }
+  }
+
+  # Scoped by where the query arrived rather than by what it asks for: every
+  # search engine lookup from the guest network gets SafeSearch, and the office
+  # on the same building's other network does not.
+  enforce_safesearch_on_guest_wifi = {
+    name        = "Enforce SafeSearch on guest Wi-Fi"
+    type        = "dns"
+    action      = "safesearch"
+    precedence  = 180
+    description = "SafeSearch for every query arriving through the guest Wi-Fi DNS location"
+
+    match = {
+      dns_location_keys = ["guest_wifi"]
     }
   }
 

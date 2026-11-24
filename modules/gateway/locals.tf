@@ -3,6 +3,13 @@
 # Every map indexed by a computed key is built with tomap() and uniform value
 # types. An object literal whose attributes differ in type cannot be indexed by
 # anything Terraform does not know at parse time.
+#
+# Whether a selector is in use is decided from list LENGTHS, never from the
+# compiled string. A list or DLP profile created in the same apply has an ID
+# Terraform does not know until then, so a string built from it is unknown at
+# plan, and a guardrail comparing that string with "" would be deferred to apply
+# - after the list it was guarding had already been created. A length is known
+# even when the elements are not.
 
 locals {
   policies    = { for policy in var.policies : lower(trimspace(policy.name)) => policy }
@@ -14,13 +21,22 @@ locals {
     "content_categories", "security_categories", "destination_ips",
   ]
 
+  # Gateway list references. Destination terms as well, one term per list,
+  # because each list is its own `in $<uuid>` clause.
+  destination_list_selectors = [
+    "domain_lists", "host_lists", "sni_domain_lists", "sni_host_lists",
+    "url_lists", "destination_ip_lists",
+  ]
+
   # Selectors that NARROW a match. AND'd against the destination clause and against each other.
-  constraint_selectors = ["source_ips", "destination_ports", "protocols", "http_methods", "dlp_profiles"]
+  constraint_selectors = ["source_ips", "destination_ports", "protocols", "http_methods", "dlp_profiles", "dns_locations"]
 
   # One request is an upload or a download, never both, so these are OR'd with each other and AND'd with everything else.
   file_selectors = ["upload_file_types", "download_file_types"]
 
-  all_selectors = concat(local.destination_selectors, local.constraint_selectors, local.file_selectors)
+  literal_selectors = concat(local.destination_selectors, local.constraint_selectors, local.file_selectors)
+  list_selectors    = concat(local.destination_list_selectors, ["source_ip_lists"])
+  all_selectors     = concat(local.literal_selectors, local.list_selectors)
 
   # An empty template means the selector does not exist for that policy type.
   # A DNS policy cannot see a file type; a network policy sees a TLS SNI rather than an HTTP Host header; only HTTP is past decryption, so only HTTP can match a DLP profile.
@@ -39,6 +55,7 @@ locals {
       protocols           = ""
       http_methods        = ""
       dlp_profiles        = ""
+      dns_locations       = "dns.location in {%s}"
       upload_file_types   = ""
       download_file_types = ""
     })
@@ -57,6 +74,7 @@ locals {
       protocols           = "net.protocol in {%s}"
       http_methods        = ""
       dlp_profiles        = ""
+      dns_locations       = ""
       upload_file_types   = ""
       download_file_types = ""
     })
@@ -75,9 +93,48 @@ locals {
       protocols           = ""
       http_methods        = "http.request.method in {%s}"
       dlp_profiles        = "any(dlp.profiles[*] in {%s})"
+      dns_locations       = ""
       upload_file_types   = "any(http.upload.file.types[*] in {%s})"
       download_file_types = "any(http.download.file.types[*] in {%s})"
     })
+  }
+
+  # The same idea for list references, with `$%s` taking one list UUID. The
+  # forms are the ones Cloudflare's own policy builder emits for "in list".
+  list_field_templates = {
+    dns = tomap({
+      domain_lists         = "any(dns.domains[*] in $%s)"
+      host_lists           = "dns.fqdn in $%s"
+      sni_domain_lists     = ""
+      sni_host_lists       = ""
+      url_lists            = ""
+      destination_ip_lists = "any(dns.resolved_ips[*] in $%s)"
+      source_ip_lists      = "dns.src_ip in $%s"
+    })
+
+    network = tomap({
+      domain_lists         = ""
+      host_lists           = ""
+      sni_domain_lists     = "any(net.sni.domains[*] in $%s)"
+      sni_host_lists       = "net.sni.host in $%s"
+      url_lists            = ""
+      destination_ip_lists = "net.dst.ip in $%s"
+      source_ip_lists      = "net.src.ip in $%s"
+    })
+
+    http = tomap({
+      domain_lists         = "any(http.request.domains[*] in $%s)"
+      host_lists           = "http.request.host in $%s"
+      sni_domain_lists     = ""
+      sni_host_lists       = ""
+      url_lists            = "http.request.uri in $%s"
+      destination_ip_lists = "http.conn.dst_ip in $%s"
+      source_ip_lists      = "http.conn.src_ip in $%s"
+    })
+  }
+
+  field_templates = {
+    for type, templates in local.traffic_field_templates : type => merge(templates, local.list_field_templates[type])
   }
 
   selector_sets = {
@@ -95,40 +152,124 @@ locals {
       protocols           = join(" ", [for value in policy.match.protocols : "\"${lower(trimspace(value))}\""])
       http_methods        = join(" ", [for value in policy.match.http_methods : "\"${upper(trimspace(value))}\""])
       dlp_profiles        = join(" ", [for value in policy.match.dlp_profile_ids : "\"${trimspace(value)}\""])
+      dns_locations       = join(" ", [for value in policy.match.dns_location_ids : "\"${trimspace(value)}\""])
       upload_file_types   = join(" ", [for value in policy.match.upload_file_types : "\"${lower(trimspace(value))}\""])
       download_file_types = join(" ", [for value in policy.match.download_file_types : "\"${lower(trimspace(value))}\""])
     })
   }
 
-  selector_terms = {
+  list_selector_ids = {
+    for key, policy in local.policies : key => tomap({
+      domain_lists         = policy.match.domain_list_ids
+      host_lists           = policy.match.host_list_ids
+      sni_domain_lists     = policy.match.sni_domain_list_ids
+      sni_host_lists       = policy.match.sni_host_list_ids
+      url_lists            = policy.match.url_list_ids
+      destination_ip_lists = policy.match.destination_ip_list_ids
+      source_ip_lists      = policy.match.source_ip_list_ids
+    })
+  }
+
+  # How many values each selector was given. This, not the compiled string, is
+  # what every "is it set" decision below reads - see the header.
+  selector_counts = {
+    for key, policy in local.policies : key => tomap({
+      domains              = length(policy.match.domains)
+      hosts                = length(policy.match.hosts)
+      sni_domains          = length(policy.match.sni_domains)
+      sni_hosts            = length(policy.match.sni_hosts)
+      applications         = length(policy.match.application_ids)
+      content_categories   = length(policy.match.content_category_ids)
+      security_categories  = length(policy.match.security_category_ids)
+      destination_ips      = length(policy.match.destination_ip_cidrs)
+      source_ips           = length(policy.match.source_ip_cidrs)
+      destination_ports    = length(policy.match.destination_ports)
+      protocols            = length(policy.match.protocols)
+      http_methods         = length(policy.match.http_methods)
+      dlp_profiles         = length(policy.match.dlp_profile_ids)
+      dns_locations        = length(policy.match.dns_location_ids)
+      upload_file_types    = length(policy.match.upload_file_types)
+      download_file_types  = length(policy.match.download_file_types)
+      domain_lists         = length(policy.match.domain_list_ids)
+      host_lists           = length(policy.match.host_list_ids)
+      sni_domain_lists     = length(policy.match.sni_domain_list_ids)
+      sni_host_lists       = length(policy.match.sni_host_list_ids)
+      url_lists            = length(policy.match.url_list_ids)
+      destination_ip_lists = length(policy.match.destination_ip_list_ids)
+      source_ip_lists      = length(policy.match.source_ip_list_ids)
+    })
+  }
+
+  # A selector contributes a term when it was given values AND the policy type
+  # has a field for it. The second half failing is reported, not silently
+  # dropped - see unsupported_selectors.
+  selector_active = {
     for key, policy in local.policies : key => tomap({
       for selector in local.all_selectors : selector => (
-        local.selector_sets[key][selector] == "" || local.traffic_field_templates[policy.type][selector] == ""
-        ? ""
-        : format(local.traffic_field_templates[policy.type][selector], local.selector_sets[key][selector])
+        local.selector_counts[key][selector] > 0 && local.field_templates[policy.type][selector] != ""
+      )
+    })
+  }
+
+  selector_terms = {
+    for key, policy in local.policies : key => tomap({
+      for selector in local.literal_selectors : selector => (
+        local.selector_active[key][selector]
+        ? format(local.traffic_field_templates[policy.type][selector], local.selector_sets[key][selector])
+        : ""
+      )
+    })
+  }
+
+  list_terms = {
+    for key, policy in local.policies : key => tomap({
+      for selector in local.list_selectors : selector => (
+        local.selector_active[key][selector]
+        ? [for id in local.list_selector_ids[key][selector] : format(local.list_field_templates[policy.type][selector], trimspace(id))]
+        : []
       )
     })
   }
 
   destination_clauses = {
-    for key in local.policy_keys : key => [
-      for selector in local.destination_selectors : local.selector_terms[key][selector]
-      if local.selector_terms[key][selector] != ""
-    ]
+    for key in local.policy_keys : key => concat(
+      [
+        for selector in local.destination_selectors : local.selector_terms[key][selector]
+        if local.selector_active[key][selector]
+      ],
+      flatten([for selector in local.destination_list_selectors : local.list_terms[key][selector]]),
+    )
   }
 
   file_clauses = {
     for key in local.policy_keys : key => [
       for selector in local.file_selectors : local.selector_terms[key][selector]
-      if local.selector_terms[key][selector] != ""
+      if local.selector_active[key][selector]
     ]
   }
 
+  # Literal source ranges and source IP lists name the same thing - where the
+  # request came from - so they are OR'd into one constraint rather than AND'd
+  # as two, which would demand a source in both at once.
+  source_terms = {
+    for key in local.policy_keys : key => concat(
+      local.selector_active[key]["source_ips"] ? [local.selector_terms[key]["source_ips"]] : [],
+      local.list_terms[key]["source_ip_lists"],
+    )
+  }
+
   constraint_clauses = {
-    for key in local.policy_keys : key => [
-      for selector in local.constraint_selectors : local.selector_terms[key][selector]
-      if local.selector_terms[key][selector] != ""
-    ]
+    for key in local.policy_keys : key => concat(
+      length(local.source_terms[key]) == 0 ? [] : [
+        length(local.source_terms[key]) == 1
+        ? local.source_terms[key][0]
+        : "(${join(" or ", local.source_terms[key])})"
+      ],
+      [
+        for selector in local.constraint_selectors : local.selector_terms[key][selector]
+        if selector != "source_ips" && local.selector_active[key][selector]
+      ],
+    )
   }
 
   traffic_clauses = {
@@ -162,13 +303,18 @@ locals {
   # Identity terms are alternative ways of naming the same population, so they
   # are OR'd. A policy that named a group and an email and meant "both" wants two
   # policies, or a group that already expresses the intersection.
+  identity_terms = {
+    for key, policy in local.policies : key => concat(
+      length(policy.identity.user_emails) == 0 ? [] : ["identity.email in {${join(" ", [for value in policy.identity.user_emails : "\"${lower(trimspace(value))}\""])}}"],
+      length(policy.identity.user_group_names) == 0 ? [] : ["any(identity.groups[*].name in {${join(" ", [for value in policy.identity.user_group_names : "\"${trimspace(value)}\""])}})"],
+      length(policy.identity.user_group_emails) == 0 ? [] : ["any(identity.groups[*].email in {${join(" ", [for value in policy.identity.user_group_emails : "\"${lower(trimspace(value))}\""])}})"],
+      length(policy.identity.user_group_ids) == 0 ? [] : ["any(identity.groups[*].id in {${join(" ", [for value in policy.identity.user_group_ids : "\"${trimspace(value)}\""])}})"],
+      [for id in policy.identity.user_email_list_ids : format("identity.email in $%s", trimspace(id))],
+    )
+  }
+
   compiled_identity = {
-    for key, policy in local.policies : key => join(" or ", compact([
-      length(policy.identity.user_emails) == 0 ? "" : "identity.email in {${join(" ", [for value in policy.identity.user_emails : "\"${lower(trimspace(value))}\""])}}",
-      length(policy.identity.user_group_names) == 0 ? "" : "any(identity.groups[*].name in {${join(" ", [for value in policy.identity.user_group_names : "\"${trimspace(value)}\""])}})",
-      length(policy.identity.user_group_emails) == 0 ? "" : "any(identity.groups[*].email in {${join(" ", [for value in policy.identity.user_group_emails : "\"${lower(trimspace(value))}\""])}})",
-      length(policy.identity.user_group_ids) == 0 ? "" : "any(identity.groups[*].id in {${join(" ", [for value in policy.identity.user_group_ids : "\"${trimspace(value)}\""])}})",
-    ]))
+    for key in local.policy_keys : key => join(" or ", local.identity_terms[key])
   }
 
   compiled_device_posture = {
@@ -196,6 +342,26 @@ locals {
   device_posture = {
     for key, policy in local.policies : key => (
       policy.device_posture_expression != null ? trimspace(policy.device_posture_expression) : local.compiled_device_posture[key]
+    )
+  }
+
+  # Whether each dimension is sent at all. Decided from what was configured
+  # rather than from the expression text, which may be unknown until apply.
+  has_traffic = {
+    for key, policy in local.policies : key => (
+      policy.traffic_expression != null ? trimspace(policy.traffic_expression) != "" : length(local.traffic_clauses[key]) > 0
+    )
+  }
+
+  has_identity = {
+    for key, policy in local.policies : key => (
+      policy.identity_expression != null ? trimspace(policy.identity_expression) != "" : length(local.identity_terms[key]) > 0
+    )
+  }
+
+  has_device_posture = {
+    for key, policy in local.policies : key => (
+      policy.device_posture_expression != null ? trimspace(policy.device_posture_expression) != "" : length(policy.device_posture_check_ids) > 0
     )
   }
 
@@ -303,8 +469,8 @@ locals {
 
   unsupported_selectors = sort(distinct(flatten([
     for key, policy in local.policies : [
-      for selector in local.all_selectors : "${key}.match.${selector} on a ${policy.type} policy"
-      if local.selector_sets[key][selector] != "" && local.traffic_field_templates[policy.type][selector] == ""
+      for selector in local.all_selectors : "${key}.match.${contains(local.list_selectors, selector) ? "${trimsuffix(selector, "s")}_ids" : selector} on a ${policy.type} policy"
+      if local.selector_counts[key][selector] > 0 && local.field_templates[policy.type][selector] == ""
     ]
   ])))
 
@@ -325,7 +491,7 @@ locals {
 
   policies_with_no_selector = sort([
     for key in local.policy_keys : key
-    if local.traffic[key] == "" && local.identity[key] == "" && local.device_posture[key] == "" && !local.policies[key].match_all_traffic
+    if !local.has_traffic[key] && !local.has_identity[key] && !local.has_device_posture[key] && !local.policies[key].match_all_traffic
   ])
 
   # A catch-all whose action opens something rather than closing it. Gateway
@@ -337,12 +503,13 @@ locals {
   ])
 
   # Do Not Inspect is evaluated before TLS decryption, so it can only see what is visible in the TLS handshake.
-  decryption_only_selectors = ["dlp_profiles", "http_methods", "upload_file_types", "download_file_types"]
+  # A URL list is matched on the path as well as the host, and the path is inside the encrypted request.
+  decryption_only_selectors = ["dlp_profiles", "http_methods", "upload_file_types", "download_file_types", "url_lists"]
 
   do_not_inspect_needing_decryption = sort(distinct(flatten([
     for key, policy in local.policies : [
-      for selector in local.decryption_only_selectors : "${key}.match.${selector}"
-      if policy.action == "off" && local.selector_sets[key][selector] != ""
+      for selector in local.decryption_only_selectors : "${key}.match.${selector == "url_lists" ? "url_list_ids" : selector}"
+      if policy.action == "off" && local.selector_counts[key][selector] > 0
     ]
   ])))
 
@@ -357,12 +524,12 @@ locals {
   # discarded, and the plan gives no sign which.
   conflicting_traffic_definitions = sort([
     for key, policy in local.policies : key
-    if policy.traffic_expression != null && local.compiled_traffic[key] != ""
+    if policy.traffic_expression != null && length(local.traffic_clauses[key]) > 0
   ])
 
   conflicting_identity_definitions = sort([
     for key, policy in local.policies : key
-    if policy.identity_expression != null && local.compiled_identity[key] != ""
+    if policy.identity_expression != null && length(local.identity_terms[key]) > 0
   ])
 
   conflicting_device_posture_definitions = sort([

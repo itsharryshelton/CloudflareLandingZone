@@ -97,7 +97,7 @@ the CSV once they are all uploaded.
 | `<account>-device_posture-apply` | `device_posture` | `terraform-deviceposture-apply` | `Zero Trust:Edit` |
 | `<account>-devices-apply` | `devices` | `terraform-devices-apply` | `Zero Trust:Edit`. Decides what device traffic reaches Gateway at all |
 | `<account>-dns-apply` | `dns` | `terraform-dns-apply` | `DNS:Edit`, `Zone:Read` |
-| `<account>-gateway-apply` | `gateway` | `terraform-gateway-apply` | `Zero Trust:Edit` |
+| `<account>-gateway-apply` | `gateway` | `terraform-gateway-apply` | `Zero Trust:Edit`. Also covers the Zero Trust lists, custom DLP profiles and DNS locations the layer manages |
 | `<account>-lists-apply` | `lists` | *not created - make by hand* | `Account Filter Lists:Edit` |
 | `<account>-load_balancing-apply` | `load_balancing` | `terraform-loadbalancing-apply` | `Account Load Balancers:Edit`, `Zone Load Balancers:Edit`, `Zone:Read` |
 | `<account>-logpush-apply` | `logpush` | `terraform-logpush-apply` | `Logs:Edit` (account + zone), `Zone:Read`; `Zero Trust: PII Read` for Access/Gateway/DEX datasets |

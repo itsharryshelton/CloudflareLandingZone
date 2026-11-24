@@ -52,6 +52,8 @@ cloudflare/cloudflare provider            configured by the layer, never by the 
 | `d1_database` | `d1` | One D1 database |
 | `device_posture` | `device_posture` | Device posture rules and service provider integrations |
 | `device_profiles` | `devices` | Cloudflare One Client device settings, the default and custom device profiles, and their Local Domain Fallback lists |
+| `dlp_profile` | `gateway` | One custom DLP profile and its detection entries |
+| `dns_location` | `gateway` | One Gateway DNS location and its resolver endpoints |
 | `dns_records` | `dns` | One zone's DNS records |
 | `gateway` | `gateway` | Gateway policies, account settings and the inspection root CA |
 | `load_balancer` | `load_balancing` | One monitor, one pool and one load balancer |
@@ -70,6 +72,7 @@ cloudflare/cloudflare provider            configured by the layer, never by the 
 | `worker_script` | `workers` | One Worker, its routes, custom domains and cron triggers |
 | `workers_kv_namespace` | `workers` | One KV namespace, and optionally the pairs Terraform owns |
 | `zerotrust` | `zerotrust` | The Zero Trust organisation, identity providers, service tokens, Access groups, policies and applications |
+| `zerotrust_list` | `gateway` | One Zero Trust list (hostnames, IPs, URLs, emails, ...) and its entries |
 | `zone_base` | `zones` | One zone and its settings (and the legacy `dns_records` input) |
 | `zone_rules` | `zones` | One zone's rate plan subscription and bot management |
 | `_TEMPLATE` | - | The skeleton a new module is copied from |

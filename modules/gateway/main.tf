@@ -20,10 +20,12 @@ resource "cloudflare_zero_trust_gateway_policy" "this" {
   filters     = [local.policy_filters[each.value.type]]
 
   # Sent only where the policy actually restricts on that dimension. An empty
-  # string is not "match nothing" to Cloudflare, it is a parse error.
-  traffic        = local.traffic[each.key] == "" ? null : local.traffic[each.key]
-  identity       = local.identity[each.key] == "" ? null : local.identity[each.key]
-  device_posture = local.device_posture[each.key] == "" ? null : local.device_posture[each.key]
+  # string is not "match nothing" to Cloudflare, it is a parse error. Decided
+  # from what was configured, because a list ID in the expression is unknown
+  # until the list exists.
+  traffic        = local.has_traffic[each.key] ? local.traffic[each.key] : null
+  identity       = local.has_identity[each.key] ? local.identity[each.key] : null
+  device_posture = local.has_device_posture[each.key] ? local.device_posture[each.key] : null
 
   rule_settings = local.rule_settings[each.key]
   schedule      = each.value.schedule
@@ -37,7 +39,7 @@ resource "cloudflare_zero_trust_gateway_policy" "this" {
 
     precondition {
       condition     = length(local.unsupported_selectors) == 0
-      error_message = "These selectors do not exist for the policy type they were used on: ${join("; ", local.unsupported_selectors)}. A DNS policy is resolved before there is a connection, so it has no port, protocol or file type. A network policy sees the TLS SNI rather than an HTTP Host header, so it takes sni_domains and sni_hosts instead of domains and hosts. Only an HTTP policy is past decryption, so only an HTTP policy can match a DLP profile, a method or a file type."
+      error_message = "These selectors do not exist for the policy type they were used on: ${join("; ", local.unsupported_selectors)}. A DNS policy is resolved before there is a connection, so it has no port, protocol or file type. A network policy sees the TLS SNI rather than an HTTP Host header, so it takes sni_domains, sni_hosts and their list forms instead of domains and hosts. Only an HTTP policy is past decryption, so only an HTTP policy can match a DLP profile, a method, a file type or a URL list. Only a DNS policy has a DNS location."
     }
 
     precondition {
@@ -64,7 +66,7 @@ resource "cloudflare_zero_trust_gateway_policy" "this" {
     # keeps being inspected while the dashboard shows the bypass as configured.
     precondition {
       condition     = length(local.do_not_inspect_needing_decryption) == 0
-      error_message = "A Do Not Inspect policy (action = \"off\") matches on something only visible after TLS decryption: ${join("; ", local.do_not_inspect_needing_decryption)}. Do Not Inspect is evaluated before decryption, so it can only match on the TLS handshake and the hostname - applications, domains, hosts, categories and IPs. The rule as written would never match, and the traffic it was meant to exempt would keep being decrypted."
+      error_message = "A Do Not Inspect policy (action = \"off\") matches on something only visible after TLS decryption: ${join("; ", local.do_not_inspect_needing_decryption)}. Do Not Inspect is evaluated before decryption, so it can only match on the TLS handshake and the hostname - applications, domains, hosts, categories, IPs and the lists of those. A URL list needs the path, which is encrypted. The rule as written would never match, and the traffic it was meant to exempt would keep being decrypted."
     }
 
     precondition {
