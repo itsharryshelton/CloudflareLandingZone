@@ -17,6 +17,7 @@ deployment/
 │   ├── lists/                         # own state: account-level IP, ASN and hostname lists
 │   ├── load_balancing/                # own state: monitors, pools, zone load balancers
 │   ├── logpush/                       # own state: Logpush jobs, account and zone log streams
+│   ├── notifications/                 # own state: notification policies and webhook destinations
 │   ├── origin_pulls/                  # own state: Authenticated Origin Pulls, client certificates, per-hostname edge-to-origin mTLS
 │   ├── pages/                         # own state: Pages projects, branch deployment rules, bindings, custom domains
 │   ├── r2/                            # own state: buckets, CORS, lifecycle, retention, domains
@@ -41,6 +42,7 @@ deployment/
     │   ├── lists.tfvars               # shared lists     -> lists
     │   ├── load_balancing.tfvars      # load balancers   -> load_balancing
     │   ├── logpush.tfvars             # log streams      -> logpush
+    │   ├── notifications.tfvars       # alerting         -> notifications
     │   ├── origin_pulls.tfvars        # origin mTLS      -> origin_pulls
     │   ├── pages.tfvars               # Jamstack sites   -> pages
     │   ├── r2.tfvars                  # object storage   -> r2
@@ -53,7 +55,7 @@ deployment/
     │   ├── workers.tfvars             # edge compute, KV, queues -> workers
     │   ├── zerotrust.tfvars           # Access posture   -> zerotrust
     │   ├── zone_config.tfvars         # zone settings    -> zones
-    │   └── zones.tfvars               # zone inventory   -> zones, bulk_redirects, dns, waf, lb, logpush, origin_pulls, pages, r2, rules, tunnels, workers
+    │   └── zones.tfvars               # zone inventory   -> zones, bulk_redirects, dns, waf, lb, logpush, notifications, origin_pulls, pages, r2, rules, tunnels, workers
     └── account_b/
         └── ...
 ```
@@ -87,6 +89,7 @@ Tier 3: Zone-Dependent & Consumer Layers
 ├── dns                                (resolves zone IDs via data source; creates DNS records)
 ├── load_balancing                     (resolves zone IDs; provisions origin pools and health monitors)
 ├── logpush                            (resolves zone IDs for zone-scoped jobs; pushes logs to a SIEM or storage)
+├── notifications                      (resolves zone IDs a policy filters on; alert policies and webhook destinations)
 ├── origin_pulls                       (resolves zone IDs; enables Authenticated Origin Pulls and uploads client certificates)
 ├── pages                              (resolves zone IDs; writes the proxied CNAME behind each custom domain)
 ├── r2                                 (provisions buckets; binds custom domains to existing zones)
@@ -100,7 +103,7 @@ Tier 3: Zone-Dependent & Consumer Layers
 Tier membership is derived directly from the Terraform source code - calling the `zone_base` module means Tier 2, resolving a zone with `data "cloudflare_zone"` means Tier 3 - except where the source cannot express the dependency at all. Those two layers declare their own tier in a `tier.tf` holding `locals { apply_tier = <n> }`, which `tf-matrix.sh` reads in preference to the derivation:
 - **Tier 1 (`account_governance`):** Account-wide permissions and resource-group scopes. Every downstream token is evaluated against what this layer applies, so it runs on its own first. Declared in `tier.tf`, because the dependency is on Cloudflare's authorisation decision rather than on any Terraform attribute.
 - **Tier 2 (`zones`, `ai_gateway`, `bulk_redirects`, `d1`, `device_posture`, `gateway`, `lists`, `turnstile`, `wan`):** `zones` creates the zone containers at Cloudflare. The remaining layers touch no zones, so nothing waits on them. `lists` is deliberately placed in Tier 2 so that named lists exist before `waf` references them, `device_posture` so that a posture rule exists before a `zerotrust` Access policy requires it, and `d1` so that a database and its migrations exist before `workers` looks it up by name and deploys code against it.
-- **Tier 3 (`dns`, `load_balancing`, `logpush`, `origin_pulls`, `pages`, `r2`, `rules`, `tunnels`, `waf`, `workers`, `zerotrust`):** These layers resolve zones dynamically via `data "cloudflare_zone"`, which fails at plan time until Tier 2 has created the zone. `tunnels` resolves one for the proxied CNAME behind each public hostname, `pages` one per zone a custom domain's `zone_key` names, and `logpush` one for each zone-scoped job. `origin_pulls` resolves one per zone it configures, and belongs behind `zones` for a second reason: the zone's SSL mode has to be `full` or `strict` before authenticating to the origin means anything. `zerotrust` is included here by declaration in its own `tier.tf`, because Access applications are addressed by hostname and require the corresponding zone and DNS record to exist, yet the layer never reads a zone for the derivation to find.
+- **Tier 3 (`dns`, `load_balancing`, `logpush`, `notifications`, `origin_pulls`, `pages`, `r2`, `rules`, `tunnels`, `waf`, `workers`, `zerotrust`):** These layers resolve zones dynamically via `data "cloudflare_zone"`, which fails at plan time until Tier 2 has created the zone. `tunnels` resolves one for the proxied CNAME behind each public hostname, `pages` one per zone a custom domain's `zone_key` names, `logpush` one for each zone-scoped job, and `notifications` one for each zone a policy filters on. `origin_pulls` resolves one per zone it configures, and belongs behind `zones` for a second reason: the zone's SSL mode has to be `full` or `strict` before authenticating to the origin means anything. `zerotrust` is included here by declaration in its own `tier.tf`, because Access applications are addressed by hostname and require the corresponding zone and DNS record to exist, yet the layer never reads a zone for the derivation to find.
 
 ## Why split this way
 
@@ -114,9 +117,9 @@ Tier membership is derived directly from the Terraform source code - calling the
 
 ## Layers do not read each other's state
 
-The `dns`, `waf`, `load_balancing`, `logpush`, `origin_pulls`, `pages`, `r2`, `rules`, `tunnels`, and `workers` layers resolve a zone key to a zone ID using `data "cloudflare_zone"` filtered by name and account ID, rather than reading `terraform_remote_state`. State files remain completely decoupled: any layer can be applied, re-initialised, or migrated without affecting the others.
+The `dns`, `waf`, `load_balancing`, `logpush`, `notifications`, `origin_pulls`, `pages`, `r2`, `rules`, `tunnels`, and `workers` layers resolve a zone key to a zone ID using `data "cloudflare_zone"` filtered by name and account ID, rather than reading `terraform_remote_state`. State files remain completely decoupled: any layer can be applied, re-initialised, or migrated without affecting the others.
 
-This design requires the Cloudflare API to be accessible at plan time for consumer layers, and plans will fail if the zone does not yet exist. Apply `zones` first; `dns`, `waf`, `load_balancing`, `logpush`, `origin_pulls`, `pages`, `r2`, `rules`, `tunnels`, and `workers` can then plan and apply concurrently.
+This design requires the Cloudflare API to be accessible at plan time for consumer layers, and plans will fail if the zone does not yet exist. Apply `zones` first; `dns`, `waf`, `load_balancing`, `logpush`, `notifications`, `origin_pulls`, `pages`, `r2`, `rules`, `tunnels`, and `workers` can then plan and apply concurrently.
 
 `account_governance` queries the API to resolve role, permission group, and resource group names to IDs. `zerotrust` queries the account's existing Zero Trust organisation, to adopt its team name when `zero_trust_team_name` is unset and to refuse an unintended rename when it is set. `gateway` dynamically resolves Cloudflare's content categories, security categories, and application catalogues so that configuration files reference human-readable names like `"Microsoft 365"` rather than arbitrary IDs like `606`.
 
@@ -154,6 +157,7 @@ export TF_VAR_wan_bgp_md5_keys='{"<peering tunnel key>":"<md5_key>"}'
 export TF_VAR_logpush_destination_secrets='{"audit_archive":"r2://<bucket>/audit/{DATE}?account-id=<id>&access-key-id=<key_id>&secret-access-key=<secret>"}'
 export TF_VAR_logpush_ownership_challenges='{"primary_http_requests":"<challenge_token>"}'
 export TF_VAR_device_posture_integration_secrets='{"intune":{"client_secret":"<entra_app_client_secret>"}}'
+export TF_VAR_notification_webhook_secrets='{"noc_slack":{"url":"<chat_webhook_url>"},"ops_receiver":{"secret":"<cf_webhook_auth>"}}'
 export TF_VAR_origin_pull_certificates='{"api_origin":{"certificate":"<client_certificate_pem>","private_key":"<private_key_pem>"}}'
 export TF_VAR_pages_project_secrets='{"admin_portal":{"production":{"SESSION_SECRET":"<value>"}}}'
 ```
@@ -187,6 +191,7 @@ The pipeline maps variable files to layers dynamically. The table below lists th
 | `lists`              | `account.tfvars`, `lists.tfvars`                                      | None                                                                                                                          |
 | `load_balancing`     | `account.tfvars`, `zones.tfvars`, `load_balancing.tfvars`             | None                                                                                                                          |
 | `logpush`            | `account.tfvars`, `zones.tfvars`, `logpush.tfvars`                    | `TF_VAR_logpush_destination_secrets`, `TF_VAR_logpush_ownership_challenges` (from the `<account>-plan` environment)           |
+| `notifications`      | `account.tfvars`, `zones.tfvars`, `notifications.tfvars`              | `TF_VAR_notification_webhook_secrets` (from the `<account>-plan` environment; only where a webhook URL is a credential or carries a `cf-webhook-auth` secret) |
 | `origin_pulls`       | `account.tfvars`, `zones.tfvars`, `origin_pulls.tfvars`               | `TF_VAR_origin_pull_certificates` (from the `<account>-plan` environment; only where a zone uploads a certificate of its own) |
 | `pages`              | `account.tfvars`, `zones.tfvars`, `pages.tfvars`                      | `TF_VAR_pages_project_secrets` (from the `<account>-plan` environment; only where a project lists `secret_names`)             |
 | `r2`                 | `account.tfvars`, `zones.tfvars`, `r2.tfvars`, `tags.tfvars`          | None                                                                                                                          |
@@ -241,6 +246,7 @@ Keys are scoped locally to each account tree: `primary` in `account_a` is comple
 - `wan`: a static route to an unmanaged tunnel or next hop, a prefix reachable over one tunnel, a public or default route, or a tunnel with health checks off.
 - `tunnels`: a route naming an undeclared tunnel, a public or default private network route, or an origin with TLS verification off.
 - `logpush`: a zone-scoped job on a zone below Enterprise, a dataset pushed from the wrong scope, or a credential committed in a Logpush destination.
+- `notifications`: a policy with no destination, an unknown alert type or filter name, a zone ID in `filters`, a credential-shaped webhook URL committed to the account tree, a plain `http://` webhook, or a recipient outside `allowed_email_domains`.
 
 ---
 
@@ -1685,6 +1691,66 @@ A gateway ID is unique per account, so applying against one created in the dashb
 - `workers_ai_billing_mode` can only be `postpaid` on provider 5.23 (#7331), and `log_classification` and `byok_only` do not exist in it yet. All need a provider bump.
 - The unit of a spend limit's `window` is not documented by Cloudflare. Verify it against a rule created in the dashboard before relying on one.
 
+## Notifications
+
+The `notifications` layer manages Cloudflare Notifications through [`modules/notifications`](../modules/notifications/): the policies that decide which events - a Universal SSL failure, an HTTP DDoS attack, an origin error spike, a Cloudflare incident - are sent where, and the webhook destinations they send to. It is account-scoped, as Cloudflare's alerting is: a policy about a zone names the zone in its filters rather than being attached to it, so the layer reads a zone only for a policy that names a `zone_key`.
+
+```hcl
+# accounts/account_a/notifications.tfvars
+notification_webhooks = {
+  ops_receiver = {
+    name = "Ops alert receiver"
+    url  = "https://alerts.example.com/cloudflare"
+  }
+  # The URL is the credential, so it arrives in TF_VAR_NOTIFICATION_WEBHOOK_SECRETS
+  noc_slack = { name = "NOC Slack" }
+}
+
+notification_policies = {
+  universal_ssl = {
+    name             = "Universal SSL events"
+    alert_type       = "universal_ssl_event_type"
+    zone_keys        = ["primary"]
+    email_recipients = ["noc@example.com"]
+    webhook_keys     = ["ops_receiver", "noc_slack"]
+  }
+}
+```
+
+A policy is one `alert_type` sent to any mix of `email_recipients`, `webhook_keys` (webhooks this layer declares), `webhook_ids` (webhooks managed elsewhere) and `pagerduty_ids`, and the plan fails for a policy that reaches none of them. `zone_keys` becomes the `zones` filter; every other filter goes in `filters` by the name the API uses, and `filters.zones` itself is refused so that no zone ID is committed. The module validates `alert_type` and filter names against provider 5.23's lists. It cannot validate entitlement: many alert types need a plan or product the account may not have, and Cloudflare refuses those at apply.
+
+### A webhook URL can be the credential
+
+A Slack, Discord, Google Chat, Feishu or Microsoft Teams webhook URL is the whole credential for that channel. Leave `url` out of `notifications.tfvars` for any of those, or for a URL with a token or key in its query string, and supply it from the `<account>-plan` environment's `TF_VAR_NOTIFICATION_WEBHOOK_SECRETS`, keyed like `notification_webhooks`. The same secret carries an optional `secret`, which Cloudflare sends in the `cf-webhook-auth` header so a generic receiver can reject a request that did not come from Cloudflare:
+
+```bash
+export TF_VAR_notification_webhook_secrets='{"noc_slack":{"url":"https://hooks.slack.com/services/..."},"ops_receiver":{"secret":"<random>"}}'
+```
+
+The plan fails for a credential-shaped URL in the file, a webhook with a URL in both places or in neither, and a secret keyed to no webhook. Both values land in this layer's state and saved plan in plain text. Cloudflare detects the destination type from the URL, so read `type` in the `notification_webhooks` output after the first apply (see [Reading a layer's outputs](#reading-a-layers-outputs)): a Slack URL reported as `generic` is being sent JSON the channel will not render. `last_success` and `last_failure` in the same output are Cloudflare's own record of whether anything arrived.
+
+PagerDuty is connected in the dashboard (Notifications > Destinations) through PagerDuty's own OAuth flow, and has no Terraform resource. Take each service's ID from there and list it in `pagerduty_ids`.
+
+### Adopting policies that already exist
+
+Most accounts already have policies, created in the dashboard. Cloudflare allows two policies with the same name and alert type, so applying this layer against them does not fail: it creates a second copy, and every alert they cover arrives twice. `layers/notifications/imports.tf` carries the API queries and commented `import` blocks for policies and webhooks (both `<account_id>/<id>`). Read it before the first apply.
+
+### Governing defaults
+
+| Setting | Default | Effect |
+|---|---|---|
+| `default_policy_enabled` | `true` | A declared policy sends. Off is a per-policy statement, never a silent default. |
+| `allowed_email_domains` | `[]` (any) | When set, fails the plan for a recipient outside the list. Alerts carry hostnames, origin addresses and attack detail. |
+| `required_alert_types` | `[]` | Alert types every account must have an enabled policy for, such as `universal_ssl_event_type`. Empty because entitlement varies by plan. |
+| `allow_insecure_webhook_urls` | `false` | Fails the plan for a plain `http://` webhook, checked against secret URLs as well, without printing them. |
+
+### Out of Scope
+
+- **PagerDuty connections**, made in the dashboard and referenced by ID.
+- **Plan and product entitlement.** Whether an alert type is available to the account is decided by Cloudflare at apply.
+- **Delivery.** Nothing here can tell whether a mailbox is read or a channel still exists; the `notification_webhooks` output is the nearest signal.
+- **Zone-plan gating by alert type.** Unlike `logpush`, the layer does not check a zone's `zone_tier` against what an alert type needs, because Cloudflare does not publish that mapping by API name.
+
 ---
 
 ## Adding a new account
@@ -1716,7 +1782,7 @@ The Release Manager automates:
 Within your customer's dedicated deployment repository, you can manage multiple administrative accounts (for example: `production`, `staging`, `development`):
 
 1. Create a directory `accounts/<account_name>/`.
-2. Copy all twenty-four template `.tfvars` files from `accounts/account_a/`:
+2. Copy all twenty-five template `.tfvars` files from `accounts/account_a/`:
    - `account.tfvars`
    - `account_governance.tfvars`
    - `ai_gateway.tfvars`
@@ -1728,6 +1794,7 @@ Within your customer's dedicated deployment repository, you can manage multiple 
    - `lists.tfvars`
    - `load_balancing.tfvars`
    - `logpush.tfvars`
+   - `notifications.tfvars`
    - `origin_pulls.tfvars`
    - `pages.tfvars`
    - `r2.tfvars`

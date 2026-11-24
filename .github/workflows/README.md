@@ -63,7 +63,7 @@ Terraform source, so adding an account, a layer or a module needs no edit here:
   |---|---|---|
   | 1 | `account_governance` | Account-wide permissions and resource-group scope. Every later tier's token is evaluated against what this applies, so it goes out on its own and first. |
   | 2 | `zones`, `ai_gateway`, `bulk_redirects`, `d1`, `device_posture`, `gateway`, `lists`, `turnstile`, `wan` | `zones` *creates* zones. The rest touch no zone at all, so nothing waits on them - they ride along in this tier rather than being ordered against each other. `lists` must land before `waf`, `device_posture` before `zerotrust`, whose Access policies name its rules, and `d1` before `workers`, which finds each database it binds by name and needs its migrations applied; all three do by being a tier earlier. |
-  | 3 | `dns`, `load_balancing`, `logpush`, `origin_pulls`, `pages`, `r2`, `rules`, `tunnels`, `waf`, `workers`, `zerotrust` | Resolve a zone with `data "cloudflare_zone"`, which fails at plan time until tier 2 has created it. `r2` is here because a bucket can be served from a custom domain, even where no bucket currently is; `tunnels` for the same reason, since a tunnel's public hostname needs a CNAME in its zone; `pages` likewise, for the CNAME behind each custom domain; `logpush` because a zone-scoped job is created against its zone, even on an account whose jobs are all account-scoped; `origin_pulls` because Authenticated Origin Pulls is configured on a zone, and only means anything once that zone's SSL mode is `full` or `strict`. `zerotrust` is here by its own `tier.tf` instead: Access applications are addressed by hostname, so they need the zone to exist even though the layer never reads one. |
+  | 3 | `dns`, `load_balancing`, `logpush`, `notifications`, `origin_pulls`, `pages`, `r2`, `rules`, `tunnels`, `waf`, `workers`, `zerotrust` | Resolve a zone with `data "cloudflare_zone"`, which fails at plan time until tier 2 has created it. `r2` is here because a bucket can be served from a custom domain, even where no bucket currently is; `tunnels` for the same reason, since a tunnel's public hostname needs a CNAME in its zone; `pages` likewise, for the CNAME behind each custom domain; `logpush` because a zone-scoped job is created against its zone, even on an account whose jobs are all account-scoped; `notifications` because a policy can be filtered to a zone, by ID, even where none currently is; `origin_pulls` because Authenticated Origin Pulls is configured on a zone, and only means anything once that zone's SSL mode is `full` or `strict`. `zerotrust` is here by its own `tier.tf` instead: Access applications are addressed by hostname, so they need the zone to exist even though the layer never reads one. |
 
   Tier 2 and 3 membership is **derived from the Terraform source** - `zone_base`
   call versus `data "cloudflare_zone"` block - so a new layer classifies itself.
@@ -354,6 +354,7 @@ one needs.
 | `account_a-device_posture-apply`     | **required** | `Zero Trust:Edit` at account scope, and nothing else. The same grant as `gateway`: Cloudflare has no narrower permission group for posture rules and service provider integrations |
 | `account_a-tunnels-apply`            | **required** | `Cloudflare Tunnel:Edit` at account scope; plus `Zone:Read` and `DNS:Edit` only if an ingress rule names a `zone_key`, for its proxied CNAME                                                                     |
 | `account_a-logpush-apply`            | **required** | `Logs:Edit` at account and zone scope, and `Zone:Read`; plus `Zero Trust: PII Read` at account scope only if a job pushes an Access, Gateway or DEX dataset |
+| `account_a-notifications-apply`      | **required** | `Notifications:Edit` at account scope (the API refers to the same grant as Notifications Write); plus `Zone:Read` only if a policy names a `zone_key`. Changes no traffic, but can repoint any alert at a destination of its choosing, or switch the alert a SOC relies on off |
 | `account_a-origin_pulls-apply`       | **required** | `SSL and Certificates:Edit` and `Zone:Read` at zone scope, and nothing at account scope. Notably *not* `Zone:Edit` and *not* `DNS:Edit` |
 | `account_a-gateway-apply`            | **required** | `Zero Trust:Edit` at account scope, and nothing else. The API refers to the same grant as Zero Trust Write; it covers both the Gateway policy APIs and the category and application catalogues the layer resolves names against |
 | `account_a-wan-apply`                | **required** | `Magic Transit:Edit` at account scope, and nothing else. The permission group is named after the older product and covers the Cloudflare WAN tunnel and route APIs                                                              |
@@ -577,6 +578,23 @@ TF_VAR_PAGES_PROJECT_SECRETS = {"admin_portal":{"production":{"SESSION_SECRET":"
 Only needed where a project lists `secret_names`. Cloudflare never returns a
 secret once set, but Terraform records what it sent, so every value lands in the
 saved plan and in `pages` state in plain text.
+
+The `notifications` layer takes one secret, wired in the same way and held in
+the **`<account>-plan`** environment for the same reason:
+**`TF_VAR_NOTIFICATION_WEBHOOK_SECRETS`**, a JSON object keyed like the
+`notification_webhooks` map, each entry carrying the webhook's `url`, its
+cf-webhook-auth `secret`, or both.
+
+```
+TF_VAR_NOTIFICATION_WEBHOOK_SECRETS = {"noc_slack":{"url":"https://hooks.slack.com/services/..."},"ops_receiver":{"secret":"<random>"}}
+```
+
+Only needed where a webhook's URL is its own credential - Slack, Discord,
+Google Chat, Feishu, Teams, a token in the query string - or a receiver checks
+cf-webhook-auth. A generic URL with no credential in it stays in
+`notifications.tfvars`. Both values land in the saved plan and in
+`notifications` state in plain text; a leaked chat URL is revoked at the chat
+service, not here.
 
 On the apply environments, also set **Deployment branches** to `main` only, so a
 branch cannot reach a write token.
