@@ -5,7 +5,8 @@
 #
 # MODES
 #   plan   init, plan to a file, upload the plan as an artifact, publish a
-#          value-free summary of what would change.
+#          value-free summary of what would change. Called by
+#          drift-detection.yml, also uploads a value-free drift result.
 #   apply  init, download that same plan file, `terraform apply <plan>`. A
 #          layer that outputs resource_tags then exports it for the
 #          resource-tags job in terraform-apply.yml.
@@ -81,6 +82,15 @@ on:
           Apply only. Artifact to upload the layer's `resource_tags` output to,
           for the resource-tags job in terraform-apply.yml. A layer with no such
           output uploads nothing; empty skips the export altogether.
+        required: false
+        type: string
+        default: ''
+      drift_artifact:
+        description: >-
+          Plan only. Artifact to upload a drift result to, for the report job in
+          drift-detection.yml: resource addresses and actions, split into what
+          changed outside Terraform and what the plan would change. No attribute
+          values. Empty skips it.
         required: false
         type: string
         default: ''
@@ -394,6 +404,10 @@ jobs:
       - name: Summarise the plan
         id: summary
         if: inputs.mode == 'plan'
+        env:
+          DRIFT_ARTIFACT: ${{ inputs.drift_artifact }}
+          ACCOUNT: ${{ inputs.account }}
+          LAYER: ${{ inputs.layer }}
         run: |
           set -euo pipefail
           cd "$LAYER_DIR"
@@ -417,6 +431,23 @@ jobs:
               + " destroy=\(map(select(. == "delete")) | length)"
           ' tfplan.json)
           echo "counts=$counts" >>"$GITHUB_OUTPUT"
+
+          # Drift detection only. resource_drift is what refresh found changed at
+          # Cloudflare since the last apply; resource_changes is what an apply
+          # would do now, which also covers merged-but-unapplied code. Reads are
+          # left out: a deferred data source read is not drift.
+          if [[ -n "${DRIFT_ARTIFACT:-}" ]]; then
+            mkdir -p "$GITHUB_WORKSPACE/drift-result"
+            jq -c --arg account "$ACCOUNT" --arg layer "$LAYER" '
+              def changed($list):
+                [$list[]? | select(.mode == "managed")
+                  | select(.change.actions != ["no-op"] and .change.actions != ["read"])
+                  | {a: (.change.actions | join("+")), r: .address}]
+                | sort_by(.r);
+              {account: $account, layer: $layer,
+               outside: changed(.resource_drift), planned: changed(.resource_changes)}
+            ' tfplan.json >"$GITHUB_WORKSPACE/drift-result/${ACCOUNT}--${LAYER}.json"
+          fi
           rm -f tfplan.json
 
           {
@@ -426,6 +457,21 @@ jobs:
             echo
             echo "_Resource addresses and actions only. Attribute values stay in the \`${{ inputs.plan_artifact }}\` artifact._"
           } >>"$GITHUB_STEP_SUMMARY"
+
+      # A plan that fails uploads nothing here, and the report job reads the
+      # missing result as "could not check" - so no failure path needs its own
+      # upload. overwrite because the name carries no run attempt: re-running a
+      # failed pair replaces its result rather than leaving the report to pick
+      # between two.
+      - name: Upload the drift result
+        if: inputs.mode == 'plan' && inputs.drift_artifact != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ inputs.drift_artifact }}
+          path: drift-result/
+          retention-days: 1
+          overwrite: true
+          if-no-files-found: error
 
       - name: Warn on planned destroys
         if: inputs.mode == 'plan'

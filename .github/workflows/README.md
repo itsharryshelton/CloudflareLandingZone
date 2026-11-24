@@ -1,16 +1,17 @@
 # Pipelines
 
-Six workflows, plus one reusable definition the Terraform ones share.
+Seven workflows, plus one reusable definition the Terraform ones share.
 
 | Workflow                                     | Trigger                                | Touches Cloudflare? | Can change anything? |
 | ----------------------------------------------| ----------------------------------------| ---------------------| ----------------------|
 | [`ci.yml`](ci.yml)                           | every PR, every push to `main`, manual | no                  | a git tag only: a green push to `main` publishes the next tag (`#major` / `#minor` in a commit message since the last tag, else patch) |
 | [`secret-scanning.yml`](secret-scanning.yml) | every PR, every push to `main`, manual | no                  | no                   |
 | [`terraform-plan.yml`](terraform-plan.yml)   | manual only                            | reads               | no                   |
+| [`drift-detection.yml`](drift-detection.yml) | nightly at 02:17 UTC, manual           | reads               | a GitHub issue only, see [Drift detection](#drift-detection) |
 | [`terraform-apply.yml`](terraform-apply.yml) | manual only                            | reads + writes      | yes, after approval  |
 | [`state-forget.yml`](state-forget.yml)       | manual only                            | no                  | state only, after approval |
 | [`state-unlock.yml`](state-unlock.yml)       | manual only                            | no                  | the state lock only, after approval |
-| [`_terraform-run.yml`](_terraform-run.yml)   | called by plan and apply               | n/a                 | n/a                  |
+| [`_terraform-run.yml`](_terraform-run.yml)   | called by plan, apply and drift detection | n/a              | n/a                  |
 
 The two `state-*` workflows are maintenance tools with **no automated caller**.
 Neither holds a Cloudflare credential, so neither can change anything at
@@ -610,6 +611,80 @@ The apply pipeline already plans and gates every change, so I judged this low ri
 and you can dispatch `terraform-plan.yml` against your branch before opening a PR.
 What a pull request does get is `ci.yml`'s offline plan of the offline-plannable
 layers it touches.
+
+## Drift detection
+
+[`drift-detection.yml`](drift-detection.yml) runs a read-only plan of every
+account and layer at 02:17 UTC every night, and reports the result as **one
+rolling GitHub issue** labelled `drift-detection`. It uses the same
+`<account>-plan` environment and read-only token as `terraform-plan.yml`, so it
+needs no new environment, token or secret. The job that writes the issue holds
+no Cloudflare credential, only a `GITHUB_TOKEN` with `issues: write`.
+
+Each pair lands in one of three buckets:
+
+| Bucket | Meaning |
+|---|---|
+| **Changed outside Terraform** | Refresh found the resource different at Cloudflare from the last apply: a dashboard edit, an API call, another tool. Taken from the plan's `resource_drift`. |
+| **An apply would change** | What the plan would do now. Reverts the above, and also catches code merged to `main` and never applied. |
+| **Not checked** | The plan did not finish: an expired token, a [stale lock](#a-cancelled-run-left-the-state-locked), a zone merged but not applied yet. Reported as loudly as drift, because a pair nobody can plan is a pair nobody is watching. |
+
+How the issue behaves, so nobody is alerted every night for the same thing:
+
+- **Drift first found:** the issue is opened. This is the notification.
+- **Same drift the next night:** the issue description is refreshed with the new
+  "last checked" time. Editing a description notifies nobody.
+- **Drift changes** (a new resource, one fixed, a pair failing): a comment is
+  added, which notifies everyone on the issue.
+- **A full run comes back clean:** the issue is closed with a comment.
+- **A run narrowed by `account` or `layer`** writes to its run summary only and
+  leaves the issue alone, because it cannot tell whether the rest are clean.
+
+The issue carries resource addresses and actions only, like the plan summary.
+Addresses include `for_each` keys such as zone names and record keys, so the
+issue is as visible as the repository is. Attribute-level detail stays in the
+run's `tfplan-<account>-<layer>-*` artifacts, kept for 3 days.
+
+### Getting it to a person
+
+GitHub's own notifications deliver it. Two optional repository variables decide
+who they reach - see [VARIABLES_AND_SECRETS.md](../../VARIABLES_AND_SECRETS.md#1-repository-variables):
+
+| Variable | Example | Effect |
+|---|---|---|
+| `DRIFT_ISSUE_ASSIGNEES` | `oncall-engineer,platform-lead` | Assigned when the issue opens. Assignees are emailed on open and on every change comment. An assignee who cannot be assigned (no repository access, a typo) is skipped with a warning, and the issue opens unassigned rather than not at all. |
+| `DRIFT_ISSUE_MENTION` | `@yourorg/platform-oncall` | Written into the issue and every change comment. A team mention reaches every member, under each member's own notification settings. |
+
+With neither set, only people watching the repository hear about it.
+
+To route it to a **service desk** that raises tickets from inbound email, give the
+desk a GitHub account with read access to this repository, set its notification
+email to the desk's mailbox, and name it in `DRIFT_ISSUE_ASSIGNEES`. Every new
+issue and change comment then arrives as an email and becomes a ticket, and the
+close comment can resolve it. This uses a licensed seat, and it sends resource
+addresses (zone names, record keys) out of GitHub into the desk, so agree it
+with whoever owns both before setting it up. A desk with its own GitHub
+integration can watch the `drift-detection` label instead.
+
+### Things to know
+
+- **Schedules run on the default branch only.** The cron is UTC, and GitHub can
+  start a scheduled run late, or drop it at busy times. In a public repository,
+  GitHub disables schedules after 60 days without repository activity.
+- **If the run itself breaks** before it knows what to plan, there is no report
+  and no issue. GitHub emails a failed scheduled run to whoever last edited the
+  `cron` line, so that person hears about it.
+- **It shares each pair's `tf-<account>-<layer>` concurrency group, state lock
+  and plan token** with manual plans and applies. A nightly plan queues behind a
+  running plan or apply for the same pair, and `max-parallel: 2` keeps its draw on
+  the token light. GitHub keeps only one *pending* job per concurrency group and
+  cancels the older one when another queues, as it already does between
+  `terraform-plan.yml` and `terraform-apply.yml`. So if two other runs for the
+  same pair overlap 02:17 UTC, either the nightly plan (reported as not checked)
+  or a queued plan or apply job can be cancelled. Move the cron if your change
+  window overlaps it.
+- **To check now**, run it from the Actions tab. Leave `account` and `layer` at
+  `all` if you want it to update the issue.
 
 ## Notes
 
