@@ -95,6 +95,7 @@ the CSV once they are all uploaded.
 | `<account>-bulk_redirects-apply` | `bulk_redirects` | *not created - make by hand* | `Account Filter Lists:Edit`, `Account Rulesets:Edit` |
 | `<account>-d1-apply` | `d1` | `terraform-d1-apply` | `D1:Edit`. Also runs the post-apply migrations, which are queries over the D1 REST API, so it can read and rewrite the contents of every database in the account |
 | `<account>-device_posture-apply` | `device_posture` | `terraform-deviceposture-apply` | `Zero Trust:Edit` |
+| `<account>-devices-apply` | `devices` | `terraform-devices-apply` | `Zero Trust:Edit`. Decides what device traffic reaches Gateway at all |
 | `<account>-dns-apply` | `dns` | `terraform-dns-apply` | `DNS:Edit`, `Zone:Read` |
 | `<account>-gateway-apply` | `gateway` | `terraform-gateway-apply` | `Zero Trust:Edit` |
 | `<account>-lists-apply` | `lists` | *not created - make by hand* | `Account Filter Lists:Edit` |
@@ -122,7 +123,8 @@ The bootstrap tokens are not an exact match for this column. Several are broader
 - `terraform-wan-apply` adds Magic Firewall, Magic Network Monitoring and Magic WAN
   to Magic Transit.
 - `terraform-zerotrust-apply` takes every Zero Trust and Access write group,
-  including the `Zero Trust:Edit` that `gateway` and `device_posture` hold.
+  including the `Zero Trust:Edit` that `gateway`, `device_posture` and `devices`
+  hold.
 - `terraform-workers-apply` also carries `Pages:Edit`, `Workers R2 Storage:Edit`
   and `Secrets Store:Edit`, among others. `Pages:Edit` undoes the split that gives
   `pages` a layer of its own.
@@ -207,7 +209,7 @@ Notes:
 
 ### Layers with nothing extra
 
-`account_governance`, `ai_gateway`, `bulk_redirects`, `d1`, `dns`, `gateway`, `lists`,
+`account_governance`, `ai_gateway`, `bulk_redirects`, `d1`, `devices`, `dns`, `gateway`, `lists`,
 `load_balancing`, `r2`, `rules`, `tunnels`, `turnstile`, `waf`, `workers` and
 `zones` need only their `CLOUDFLARE_API_TOKEN`. So does `origin_pulls`, unless a zone in it
 uploads a certificate of its own, `pages`, unless a project lists

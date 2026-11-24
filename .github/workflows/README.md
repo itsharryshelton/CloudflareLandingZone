@@ -63,7 +63,7 @@ Terraform source, so adding an account, a layer or a module needs no edit here:
   | Tier | Layers | Why it is here |
   |---|---|---|
   | 1 | `account_governance` | Account-wide permissions and resource-group scope. Every later tier's token is evaluated against what this applies, so it goes out on its own and first. |
-  | 2 | `zones`, `ai_gateway`, `bulk_redirects`, `d1`, `device_posture`, `gateway`, `lists`, `turnstile`, `wan` | `zones` *creates* zones. The rest touch no zone at all, so nothing waits on them - they ride along in this tier rather than being ordered against each other. `lists` must land before `waf`, `device_posture` before `zerotrust`, whose Access policies name its rules, and `d1` before `workers`, which finds each database it binds by name and needs its migrations applied; all three do by being a tier earlier. |
+  | 2 | `zones`, `ai_gateway`, `bulk_redirects`, `d1`, `device_posture`, `devices`, `gateway`, `lists`, `turnstile`, `wan` | `zones` *creates* zones. The rest touch no zone at all, so nothing waits on them - they ride along in this tier rather than being ordered against each other. `lists` must land before `waf`, `device_posture` before `zerotrust`, whose Access policies name its rules, and `d1` before `workers`, which finds each database it binds by name and needs its migrations applied; all three do by being a tier earlier. |
   | 3 | `dns`, `load_balancing`, `logpush`, `notifications`, `origin_pulls`, `pages`, `r2`, `rules`, `tunnels`, `waf`, `workers`, `zerotrust` | Resolve a zone with `data "cloudflare_zone"`, which fails at plan time until tier 2 has created it. `r2` is here because a bucket can be served from a custom domain, even where no bucket currently is; `tunnels` for the same reason, since a tunnel's public hostname needs a CNAME in its zone; `pages` likewise, for the CNAME behind each custom domain; `logpush` because a zone-scoped job is created against its zone, even on an account whose jobs are all account-scoped; `notifications` because a policy can be filtered to a zone, by ID, even where none currently is; `origin_pulls` because Authenticated Origin Pulls is configured on a zone, and only means anything once that zone's SSL mode is `full` or `strict`. `zerotrust` is here by its own `tier.tf` instead: Access applications are addressed by hostname, so they need the zone to exist even though the layer never reads one. |
 
   Tier 2 and 3 membership is **derived from the Terraform source** - `zone_base`
@@ -353,6 +353,7 @@ one needs.
 | `account_a-account_governance-apply` | **required** | `Account Settings:Edit`, and nothing at zone scope                                                                                                                                                                              |
 | `account_a-zerotrust-apply`          | **required** | `Access: Organizations, Identity Providers, and Groups:Edit`, `Access: Apps and Policies:Edit`, `Access: Service Tokens:Edit`, all at account scope                                                                             |
 | `account_a-device_posture-apply`     | **required** | `Zero Trust:Edit` at account scope, and nothing else. The same grant as `gateway`: Cloudflare has no narrower permission group for posture rules and service provider integrations |
+| `account_a-devices-apply`            | **required** | `Zero Trust:Edit` at account scope, and nothing else. The same grant again: Cloudflare has no narrower permission group for device settings and device profiles |
 | `account_a-tunnels-apply`            | **required** | `Cloudflare Tunnel:Edit` at account scope; plus `Zone:Read` and `DNS:Edit` only if an ingress rule names a `zone_key`, for its proxied CNAME                                                                     |
 | `account_a-logpush-apply`            | **required** | `Logs:Edit` at account and zone scope, and `Zone:Read`; plus `Zero Trust: PII Read` at account scope only if a job pushes an Access, Gateway or DEX dataset |
 | `account_a-notifications-apply`      | **required** | `Notifications:Edit` at account scope (the API refers to the same grant as Notifications Write); plus `Zone:Read` only if a policy names a `zone_key`. Changes no traffic, but can repoint any alert at a destination of its choosing, or switch the alert a SOC relies on off |
@@ -448,6 +449,13 @@ both repoint a hostname and decide which certificate the edge presents can stand
 up an origin of their own and have Cloudflare authenticate to it. Give it the
 same reviewer list as `zones`, and remember the private keys live in its state
 rather than in its token - see the layer secret below.
+
+The `devices` token is the same grant a third time, and for the same reason the
+layer is its own: review. A device profile decides what traffic reaches Gateway at
+all. One split tunnel exclusion, or the Gateway proxy switched off in device
+settings, takes traffic out of every DNS, network and HTTP policy without a line
+changing in the `gateway` plan - and a bad include list can take a fleet off the
+network. Give it the same reviewer list as `gateway`.
 
 The `device_posture` token holds `Zero Trust:Edit`, the same grant as `gateway`,
 because Cloudflare offers nothing narrower for posture. So the split this layer

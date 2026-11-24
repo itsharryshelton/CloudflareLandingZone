@@ -261,7 +261,9 @@ a `data "cloudflare_*"` block and so makes a real API read at plan time: the
 layers that resolve a zone by name, `account_governance` resolving role and
 permission group names, `zerotrust` reading the account's existing Zero Trust
 organization, and `gateway` resolving Cloudflare's category and application
-catalogues. Those are covered by `validate` in CI, and planned against the live
+catalogues. `devices` holds no data source but reads all the same: its import
+block fetches the default device profile it adopts, so an uncommented `import`
+block excludes a layer too. Those are covered by `validate` in CI, and planned against the live
 account by `terraform-plan.yml` (dispatched by hand) and by `terraform-apply.yml`
 before its approval gate. Which layers qualify is derived, not listed, so a new
 layer is classified correctly without editing the workflow.
