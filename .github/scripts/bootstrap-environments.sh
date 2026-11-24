@@ -277,5 +277,5 @@ Six layers also take a secret that is not a Cloudflare token, on the same terms:
 All of them go in <account>-plan, not an apply environment: the plan reads
 them, and apply runs the saved plan without re-reading TF_VAR_.
 The zerotrust one is exported on every plan, so it must be set - to {} if there
-is nothing to put in it. The wan ones are not exported by _terraform-run.yml yet.
+is nothing to put in it.
 EOF

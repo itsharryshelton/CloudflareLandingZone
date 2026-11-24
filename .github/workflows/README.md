@@ -514,12 +514,13 @@ secret for that reason alone. It is not a security control - Cloudflare's own
 documentation says MD5 is not a valid security mechanism and the key is not
 treated as a secret. It stops accidental peering, not an attacker.
 
-Neither variable is wired into [`_terraform-run.yml`](_terraform-run.yml) yet:
-exported unconditionally, an unset secret would hand Terraform an empty string
-where it expects a map and fail every `wan` plan without one. Export them in the
-plan step of your own copy of that workflow, conditionally on the secret being
-set - the way the `logpush`, `device_posture`, `origin_pulls` and `pages` ones
-below are - and hold them in **`<account>-plan`**, for the same reason those are.
+Both are wired into [`_terraform-run.yml`](_terraform-run.yml) for the `wan`
+layer only, and only when set: exported unconditionally, an unset secret would
+hand Terraform an empty string where it expects a map and fail every `wan` plan
+without one. Hold them in **`<account>-plan`**, for the same reason as the
+`zerotrust` one. Leaving both unset is valid: each IPsec tunnel then gets a PSK
+Cloudflare generates, visible only in the dashboard, and BGP sessions peer
+without an MD5 key.
 
 The `logpush` layer takes two secrets, and those are wired in:
 [`_terraform-run.yml`](_terraform-run.yml) exports them for the `logpush` layer

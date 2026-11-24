@@ -203,7 +203,7 @@ The pipeline maps variable files to layers dynamically. The table below lists th
 | `tunnels`            | `account.tfvars`, `zones.tfvars`, `tunnels.tfvars`                    | None (no tunnel secret is sent and no connector token is read)                                                                |
 | `turnstile`          | `account.tfvars`, `turnstile.tfvars`                                  | None (Cloudflare issues the widget secret, and it lands in this layer's state)                                                |
 | `waf`                | `account.tfvars`, `zones.tfvars`, `waf.tfvars`                        | None                                                                                                                          |
-| `wan`                | `account.tfvars`, `wan.tfvars`                                        | `TF_VAR_wan_ipsec_tunnel_psks`, `TF_VAR_wan_bgp_md5_keys` (not yet exported by the pipeline)                                  |
+| `wan`                | `account.tfvars`, `wan.tfvars`                                        | `TF_VAR_wan_ipsec_tunnel_psks`, `TF_VAR_wan_bgp_md5_keys` (from the `<account>-plan` environment; only when set)             |
 | `workers`            | `account.tfvars`, `zones.tfvars`, `d1.tfvars`, `workers.tfvars`, `tags.tfvars` | None (Worker secrets use Secrets Store)                                                                                       |
 | `zerotrust`          | `account.tfvars`, `zerotrust.tfvars`, `tags.tfvars`                   | `TF_VAR_identity_provider_secrets` (from the `<account>-plan` environment; must be set, `{}` only if no OAuth-type provider is declared) |
 | `zones`              | `account.tfvars`, `zones.tfvars`, `zone_config.tfvars`, `tags.tfvars` | None                                                                                                                          |
@@ -1158,7 +1158,7 @@ Two tunnels per prefix is the baseline: a prefix reachable over one tunnel fails
 In a `/31` tunnel interface, Cloudflare occupies one IP address and the customer edge router occupies the other. Static routes must target the customer router as the next hop. The layer derives customer next-hop IP addresses automatically from `tunnel_key`, preventing configuration errors that route traffic into Cloudflare's own endpoint.
 
 ### Secrets Injection
-IPsec Pre-Shared Keys (PSKs), and BGP MD5 keys where a tunnel peers, must never be stored in `.tfvars`. They are supplied as `TF_VAR_wan_ipsec_tunnel_psks` and `TF_VAR_wan_bgp_md5_keys`. The pipeline does not export either yet: add a conditional export to the plan step of `_terraform-run.yml` and hold the secrets in `<account>-plan` - see [.github/workflows/README.md](../.github/workflows/README.md).
+IPsec Pre-Shared Keys (PSKs), and BGP MD5 keys where a tunnel peers, must never be stored in `.tfvars`. They are supplied as `TF_VAR_wan_ipsec_tunnel_psks` and `TF_VAR_wan_bgp_md5_keys`, which the plan step of `_terraform-run.yml` exports for the `wan` layer only, and only when set, from the `TF_VAR_WAN_IPSEC_TUNNEL_PSKS` and `TF_VAR_WAN_BGP_MD5_KEYS` secrets in `<account>-plan` - see [.github/workflows/README.md](../.github/workflows/README.md).
 
 ```bash
 export TF_VAR_wan_ipsec_tunnel_psks='{"london_primary":"<32_char_secure_psk>"}'
