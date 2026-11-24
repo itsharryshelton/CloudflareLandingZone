@@ -55,6 +55,7 @@ cloudflare/cloudflare provider            configured by the layer, never by the 
 | `gateway` | `gateway` | Gateway policies, account settings and the inspection root CA |
 | `load_balancer` | `load_balancing` | One monitor, one pool and one load balancer |
 | `logpush_job` | `logpush` | One Logpush job |
+| `notifications` | `notifications` | Notification policies and the webhook destinations they send to |
 | `origin_rules` | `rules` | One zone's `http_request_origin` entry-point ruleset |
 | `pages_project` | `pages` | One Pages project, its custom domains and their CNAMEs |
 | `queue` | `workers` | One queue, and its consumer where the consuming Worker lives elsewhere |

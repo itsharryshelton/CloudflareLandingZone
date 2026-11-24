@@ -707,6 +707,37 @@ TOKEN_SPECS["terraform-d1-apply"]="$(cat <<JSON
 JSON
 )"
 
+# 9j. terraform-notifications-apply
+# Notifications:Edit covers policies and webhook destinations. Zone:Read is only
+# needed when a policy names a zone_key, but is granted unconditionally like the
+# other zone-reading layers.
+NOTIFICATIONS_ACCT_PERMS="$(build_perm_array "account" "Notifications:Edit|Notifications Write")"
+NOTIFICATIONS_ZONE_PERMS="$(build_perm_array "zone" "Zone:Read|Zone Read")"
+TOKEN_SPECS["terraform-notifications-apply"]="$(cat <<JSON
+{
+  "name": "terraform-notifications-apply",
+  "policies": [
+    {
+      "effect": "allow",
+      "permission_groups": $NOTIFICATIONS_ACCT_PERMS,
+      "resources": {
+        "$ACCOUNT_RESOURCE": "*"
+      }
+    },
+    {
+      "effect": "allow",
+      "permission_groups": $NOTIFICATIONS_ZONE_PERMS,
+      "resources": {
+        "$ACCOUNT_RESOURCE": {
+          "$ZONE_RESOURCE": "*"
+        }
+      }
+    }
+  ]
+}
+JSON
+)"
+
 # 10. terraform-zone-apply
 ZONE_PERMS="$(build_perm_array "zone" \
   "DNS:Edit|DNS Write" \
@@ -763,6 +794,7 @@ TOKEN_NAMES=(
   "terraform-gateway-apply"
   "terraform-loadbalancing-apply"
   "terraform-logpush-apply"
+  "terraform-notifications-apply"
   "terraform-originpulls-apply"
   "terraform-pages-apply"
   "terraform-r2-apply"
@@ -888,6 +920,7 @@ SECURITY WARNING & NEXT STEPS:
    gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-gateway-apply
    gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-load_balancing-apply
    gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-logpush-apply
+   gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-notifications-apply
    gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-origin_pulls-apply
    gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-pages-apply
    gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-r2-apply

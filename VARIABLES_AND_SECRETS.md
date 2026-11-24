@@ -94,6 +94,7 @@ the CSV once they are all uploaded.
 | `<account>-lists-apply` | `lists` | *not created - make by hand* | `Account Filter Lists:Edit` |
 | `<account>-load_balancing-apply` | `load_balancing` | `terraform-loadbalancing-apply` | `Account Load Balancers:Edit`, `Zone Load Balancers:Edit`, `Zone:Read` |
 | `<account>-logpush-apply` | `logpush` | `terraform-logpush-apply` | `Logs:Edit` (account + zone), `Zone:Read`; `Zero Trust: PII Read` for Access/Gateway/DEX datasets |
+| `<account>-notifications-apply` | `notifications` | `terraform-notifications-apply` | `Notifications:Edit` (the API names the same grant Notifications Write); `Zone:Read` if a policy names a `zone_key`. Can repoint any alert at a destination of its choosing, or switch one off |
 | `<account>-origin_pulls-apply` | `origin_pulls` | `terraform-originpulls-apply` | `SSL and Certificates:Edit`, `Zone:Read` - notably *not* `Zone:Edit` and *not* `DNS:Edit` |
 | `<account>-pages-apply` | `pages` | `terraform-pages-apply` | `Cloudflare Pages:Edit`; `Zone:Read` + `DNS:Edit` if a custom domain names a `zone_key`. Nothing in Zero Trust - Access for a project is the `zerotrust` layer's. Can change what a production site serves, and read every plain env var |
 | `<account>-r2-apply` | `r2` | `terraform-r2-apply` | `Workers R2 Storage:Edit`; `Zone:Read` + `DNS:Edit` if a bucket has a custom domain |
@@ -132,7 +133,7 @@ difference matters.
 
 ## 5. Layer secrets (`TF_VAR_*`)
 
-Only six layers take a secret besides their token. Each is a JSON object keyed
+Only seven layers take a secret besides their token. Each is a JSON object keyed
 the same way as the matching map in that layer's `.tfvars`.
 
 These go in the **`<account>-plan`** environment, not the apply one. The plan
@@ -144,6 +145,7 @@ step is what reads `TF_VAR_*`; apply runs the saved plan and never re-reads them
 | `TF_VAR_DEVICE_POSTURE_INTEGRATION_SECRETS` | `device_posture` | `device_posture_integrations` | Yes, only when set | `{"intune":{"client_secret":"<client secret>"}}` |
 | `TF_VAR_LOGPUSH_DESTINATION_SECRETS` | `logpush` | `logpush_jobs` | Yes, only when set | `{"audit_archive":"r2://<bucket>/audit/{DATE}?account-id=<id>&access-key-id=<key id>&secret-access-key=<secret>"}` |
 | `TF_VAR_LOGPUSH_OWNERSHIP_CHALLENGES` | `logpush` | `logpush_jobs` | Yes, only when set | `{"primary_http_requests":"<challenge token>"}` |
+| `TF_VAR_NOTIFICATION_WEBHOOK_SECRETS` | `notifications` | `notification_webhooks` | Yes, only when set | `{"noc_slack":{"url":"https://hooks.slack.com/services/..."},"ops_receiver":{"secret":"<random>"}}` |
 | `TF_VAR_ORIGIN_PULL_CERTIFICATES` | `origin_pulls` | `certificate_key` references in `origin_pulls` | Yes, only when set | `{"api_origin":{"certificate":"-----BEGIN CERTIFICATE-----\n...","private_key":"-----BEGIN PRIVATE KEY-----\n..."}}` |
 | `TF_VAR_PAGES_PROJECT_SECRETS` | `pages` | `pages_projects`, then environment | Yes, only when set | `{"admin_portal":{"production":{"SESSION_SECRET":"<value>"}}}` |
 | `TF_VAR_WAN_IPSEC_TUNNEL_PSKS` | `wan` | `wan_ipsec_tunnels` | **No** - see below | `{"london_primary":"<psk>","london_secondary":"<psk>"}` |
@@ -162,6 +164,12 @@ Notes:
 - **device_posture:** most integration types take `client_secret`; Uptycs takes
   `client_key` and `client_secret`; a custom integration takes
   `access_client_secret`.
+- **notifications:** only needed where a webhook's URL is its own credential -
+  Slack, Discord, Google Chat, Feishu, Teams, a token in the query string - or
+  a receiver checks the `cf-webhook-auth` header. Each entry sets `url`,
+  `secret` or both. A generic URL with no credential in it stays in
+  `notifications.tfvars`, and the plan fails for a webhook with a URL in both
+  places, or in neither, and for a credential-shaped URL in the file.
 - **origin_pulls:** only needed where a zone uploads a client certificate of
   its own; a zone running on the certificate Cloudflare presents by default
   needs nothing here. PEM is line-structured, so the newlines have to survive -
@@ -196,8 +204,9 @@ Notes:
 `account_governance`, `ai_gateway`, `bulk_redirects`, `d1`, `dns`, `gateway`, `lists`,
 `load_balancing`, `r2`, `rules`, `tunnels`, `turnstile`, `waf`, `workers` and
 `zones` need only their `CLOUDFLARE_API_TOKEN`. So does `origin_pulls`, unless a zone in it
-uploads a certificate of its own, and `pages`, unless a project lists
-`secret_names`. Workers secrets live in Cloudflare Secrets
+uploads a certificate of its own, `pages`, unless a project lists
+`secret_names`, and `notifications`, unless a webhook's URL is a credential or
+carries a `cf-webhook-auth` secret. Workers secrets live in Cloudflare Secrets
 Store and are referenced by name in `workers.tfvars`.
 
 ---
