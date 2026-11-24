@@ -7,7 +7,7 @@
 # See accounts/account_a/wan.tfvars for the fuller worked example.
 #
 # The pre-shared keys are not in this file and must never be. They arrive from the
-# apply environment, keyed the same way as wan_ipsec_tunnels:
+# <account>-plan environment, keyed the same way as wan_ipsec_tunnels:
 #
 #   TF_VAR_wan_ipsec_tunnel_psks={"bristol_primary":"<psk>","bristol_secondary":"<psk>"}
 

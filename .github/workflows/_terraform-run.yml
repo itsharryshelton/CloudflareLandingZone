@@ -334,6 +334,8 @@ jobs:
           ORIGIN_PULL_CERTIFICATES: ${{ inputs.layer == 'origin_pulls' && secrets.TF_VAR_ORIGIN_PULL_CERTIFICATES || '' }}
           PAGES_PROJECT_SECRETS: ${{ inputs.layer == 'pages' && secrets.TF_VAR_PAGES_PROJECT_SECRETS || '' }}
           NOTIFICATION_WEBHOOK_SECRETS: ${{ inputs.layer == 'notifications' && secrets.TF_VAR_NOTIFICATION_WEBHOOK_SECRETS || '' }}
+          WAN_IPSEC_TUNNEL_PSKS: ${{ inputs.layer == 'wan' && secrets.TF_VAR_WAN_IPSEC_TUNNEL_PSKS || '' }}
+          WAN_BGP_MD5_KEYS: ${{ inputs.layer == 'wan' && secrets.TF_VAR_WAN_BGP_MD5_KEYS || '' }}
         run: |
           set -euo pipefail
           # Exported only when set: an unset secret would reach Terraform as an
@@ -365,7 +367,15 @@ jobs:
           if [[ -n "${NOTIFICATION_WEBHOOK_SECRETS:-}" ]]; then
             export TF_VAR_notification_webhook_secrets="$NOTIFICATION_WEBHOOK_SECRETS"
           fi
-          unset LOGPUSH_DESTINATION_SECRETS LOGPUSH_OWNERSHIP_CHALLENGES DEVICE_POSTURE_INTEGRATION_SECRETS ORIGIN_PULL_CERTIFICATES PAGES_PROJECT_SECRETS NOTIFICATION_WEBHOOK_SECRETS
+          # IPsec PSKs and BGP MD5 keys. Unset is valid: Cloudflare generates a
+          # PSK Terraform never sees, and a session with no MD5 key still peers.
+          if [[ -n "${WAN_IPSEC_TUNNEL_PSKS:-}" ]]; then
+            export TF_VAR_wan_ipsec_tunnel_psks="$WAN_IPSEC_TUNNEL_PSKS"
+          fi
+          if [[ -n "${WAN_BGP_MD5_KEYS:-}" ]]; then
+            export TF_VAR_wan_bgp_md5_keys="$WAN_BGP_MD5_KEYS"
+          fi
+          unset LOGPUSH_DESTINATION_SECRETS LOGPUSH_OWNERSHIP_CHALLENGES DEVICE_POSTURE_INTEGRATION_SECRETS ORIGIN_PULL_CERTIFICATES PAGES_PROJECT_SECRETS NOTIFICATION_WEBHOOK_SECRETS WAN_IPSEC_TUNNEL_PSKS WAN_BGP_MD5_KEYS
 
           # Which account var files this layer takes is derived from the config,
           # not hardcoded - see .github/scripts/tf-varfiles.sh. Written to a file

@@ -156,8 +156,8 @@ step is what reads `TF_VAR_*`; apply runs the saved plan and never re-reads them
 | `TF_VAR_NOTIFICATION_WEBHOOK_SECRETS` | `notifications` | `notification_webhooks` | Yes, only when set | `{"noc_slack":{"url":"https://hooks.slack.com/services/..."},"ops_receiver":{"secret":"<random>"}}` |
 | `TF_VAR_ORIGIN_PULL_CERTIFICATES` | `origin_pulls` | `certificate_key` references in `origin_pulls` | Yes, only when set | `{"api_origin":{"certificate":"-----BEGIN CERTIFICATE-----\n...","private_key":"-----BEGIN PRIVATE KEY-----\n..."}}` |
 | `TF_VAR_PAGES_PROJECT_SECRETS` | `pages` | `pages_projects`, then environment | Yes, only when set | `{"admin_portal":{"production":{"SESSION_SECRET":"<value>"}}}` |
-| `TF_VAR_WAN_IPSEC_TUNNEL_PSKS` | `wan` | `wan_ipsec_tunnels` | **No** - see below | `{"london_primary":"<psk>","london_secondary":"<psk>"}` |
-| `TF_VAR_WAN_BGP_MD5_KEYS` | `wan` | the `wan_gre_tunnels` / `wan_ipsec_tunnels` entries that set `bgp_customer_asn` | **No** - see below | `{"<peering tunnel key>":"<md5 key>"}` |
+| `TF_VAR_WAN_IPSEC_TUNNEL_PSKS` | `wan` | `wan_ipsec_tunnels` | Yes, only when set | `{"london_primary":"<psk>","london_secondary":"<psk>"}` |
+| `TF_VAR_WAN_BGP_MD5_KEYS` | `wan` | the `wan_gre_tunnels` / `wan_ipsec_tunnels` entries that set `bgp_customer_asn` | Yes, only when set | `{"<peering tunnel key>":"<md5 key>"}` |
 
 Notes:
 
@@ -195,13 +195,11 @@ Notes:
   Datadog, Azure SAS) goes in `TF_VAR_LOGPUSH_DESTINATION_SECRETS` and is left
   out of `logpush.tfvars`. One with no credential (S3, GCS) stays in
   `destination_conf`.
-- **wan:** neither WAN secret is exported by
-  [`_terraform-run.yml`](.github/workflows/_terraform-run.yml). Add a
-  conditional export to the plan step in your copy, the same way the
-  `device_posture` and `logpush` ones are done, before supplying PSKs or MD5
-  keys. Until then each IPsec tunnel gets a PSK Cloudflare generates, visible
-  only in the dashboard. One PSK per tunnel, 32+ random characters (the plan
-  refuses fewer than 16), never reused.
+- **wan:** both are optional. Without `TF_VAR_WAN_IPSEC_TUNNEL_PSKS` each
+  IPsec tunnel gets a PSK Cloudflare generates, visible only in the dashboard.
+  One PSK per tunnel, 32+ random characters (the plan refuses fewer than 16),
+  never reused. `TF_VAR_WAN_BGP_MD5_KEYS` only applies to a tunnel that sets
+  `bgp_customer_asn`, and the plan fails for a key on one that does not.
 - The `<account>-plan` environment has no reviewer gate, so anyone who can
   dispatch a plan can reach these. Every one also lands in the saved plan and in
   that layer's state in plain text. Scope each credential as narrowly as its
