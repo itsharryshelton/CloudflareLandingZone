@@ -557,3 +557,135 @@ variable "waf_html_submission_skip_rule_ids" {
     error_message = "waf_html_submission_skip_rule_ids entries must be 32-character hexadecimal Cloudflare rule IDs, as shown in Security Events."
   }
 }
+
+# Account-level WAF (account_waf.tf). Off unless the account is entitled to it.
+variable "account_waf_enabled" {
+  type        = bool
+  default     = false
+  description = <<-EOT
+    Deploy account-level WAF rulesets: one custom ruleset and the account's
+    http_request_firewall_custom and http_request_firewall_managed entry points,
+    enforcing the baseline centrally on Enterprise zones instead of copying it
+    into each zone's policy.
+
+    Off by default because it needs the account-level WAF entitlement, which
+    not every Enterprise account has. Cloudflare rejects the rulesets at apply
+    time without it; a plan cannot tell. Turn it on only once the entitlement
+    is confirmed, and after re-issuing the terraform-waf-apply token with
+    account WAF permission (ACCOUNT_WAF=1 in bootstrap-account-tokens.sh).
+
+    Turning it off again destroys the account-level rulesets on the next apply.
+    Zone policies are unaffected either way.
+  EOT
+}
+
+variable "account_waf_baseline_custom_rules" {
+  type        = list(string)
+  default     = []
+  description = <<-EOT
+    Baseline custom rules, by name from the catalogue in locals.waf.tf, that the
+    account-level custom ruleset carries. The same catalogue the zone policies
+    select from, with the same input requirements. Read only when
+    account_waf_enabled is true.
+
+    The platform selection lives in defaults.auto.tfvars. An account that sets
+    this replaces that list outright.
+  EOT
+}
+
+variable "account_waf_baseline_managed_rulesets" {
+  type        = list(string)
+  default     = []
+  description = <<-EOT
+    Baseline managed rulesets, by name from the catalogue in locals.waf.tf
+    (`cloudflare_managed`, `owasp_core`), executed from the account-level
+    managed entry point. Tuned by the same waf_owasp_* and
+    waf_managed_rules_action variables as the zone baselines. Read only when
+    account_waf_enabled is true.
+
+    A zone that also executes one of these runs it twice, and its own
+    exceptions do not reach the account-level copy. Drop the ruleset from the
+    zone policy once the account level covers that zone.
+  EOT
+}
+
+variable "account_waf" {
+  description = <<-EOT
+    Account-level WAF scope and tenant rules, read only when
+    account_waf_enabled is true.
+
+    - `zone_keys`          - (Optional) Keys from var.zones the account-level
+                             rules apply to. Empty - the default - applies them
+                             to every Enterprise zone in the account, including
+                             zones this repository does not manage. Each listed
+                             zone must have zone_tier "enterprise": Cloudflare
+                             only runs account-level WAF rules on Enterprise
+                             zones, so any other zone would be silently skipped.
+    - `custom_rules`       - (Optional) Tenant custom rules, appended after the
+                             baseline. Same shape as waf_policies[*].custom_block_rules
+                             without skip.products.
+    - `managed_rulesets`   - (Optional) Managed rulesets by raw ID, appended
+                             after the baseline ones.
+    - `managed_exceptions` - (Optional) Skip rules ahead of the account-level
+                             managed rulesets. The only way to turn an
+                             account-level managed rule off for some traffic.
+    - `custom_ruleset_name`, `custom_entrypoint_name`, `managed_entrypoint_name`
+                           - (Optional) Dashboard display names.
+  EOT
+  type = object({
+    zone_keys               = optional(list(string), [])
+    custom_ruleset_name     = optional(string)
+    custom_entrypoint_name  = optional(string)
+    managed_entrypoint_name = optional(string)
+    custom_rules = optional(list(object({
+      name        = string
+      expression  = string
+      action      = optional(string, "block")
+      description = optional(string)
+      enabled     = optional(bool, true)
+      logging     = optional(bool)
+      skip = optional(object({
+        ruleset = optional(string)
+        phases  = optional(list(string))
+      }))
+    })), [])
+    managed_rulesets = optional(list(object({
+      id          = string
+      version     = optional(string)
+      expression  = optional(string, "true")
+      description = optional(string)
+      enabled     = optional(bool, true)
+      overrides = optional(object({
+        action            = optional(string)
+        enabled           = optional(bool)
+        sensitivity_level = optional(string)
+        categories = optional(list(object({
+          category          = string
+          action            = optional(string)
+          enabled           = optional(bool)
+          sensitivity_level = optional(string)
+        })), [])
+        rules = optional(list(object({
+          id                = string
+          action            = optional(string)
+          enabled           = optional(bool)
+          score_threshold   = optional(number)
+          sensitivity_level = optional(string)
+        })), [])
+      }))
+    })), [])
+    managed_exceptions = optional(list(object({
+      name        = string
+      expression  = string
+      description = optional(string)
+      enabled     = optional(bool, true)
+      logging     = optional(bool)
+      skip = object({
+        ruleset  = optional(string)
+        rulesets = optional(list(string))
+        rules    = optional(map(list(string)))
+      })
+    })), [])
+  })
+  default = {}
+}

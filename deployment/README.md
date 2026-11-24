@@ -112,7 +112,7 @@ Tier membership is derived directly from the Terraform source code - calling the
 
 **Account isolation over single-state monoliths.** One `provider "cloudflare"` block carries one API token, and Terraform cannot pass a dynamic provider alias into a `for_each` module block. Accounts cannot be `for_each` keys: each account requires its own run, with its own scoped token and isolated state key. This model guarantees blast-radius containment: a token compromised for one customer cannot reach another.
 
-**Product isolation over combined states.** A WAF, DNS, or load balancer apply cannot propose destroying a zone, because zones are not in its state. Zone deletion is the most destructive failure mode in Cloudflare, as it immediately cascades to eliminate all DNS records. Splitting state also allows each layer's pipeline runner to hold a tightly scoped token: `waf` requires `Zone WAF:Edit` and `Zone:Read`, never `Zone:Edit`. The boundary is strictly enforced across roles: `account_governance` is the only layer whose credentials can grant administrative access, and `zerotrust` is the only layer that controls access behind Cloudflare Access. Neither holds zone-level modification rights.
+**Product isolation over combined states.** A WAF, DNS, or load balancer apply cannot propose destroying a zone, because zones are not in its state. Zone deletion is the most destructive failure mode in Cloudflare, as it immediately cascades to eliminate all DNS records. Splitting state also allows each layer's pipeline runner to hold a tightly scoped token: `waf` requires `Zone WAF:Edit` and `Zone:Read`, never `Zone:Edit`, plus `Account WAF:Edit` only where account-level WAF is enabled. The boundary is strictly enforced across roles: `account_governance` is the only layer whose credentials can grant administrative access, and `zerotrust` is the only layer that controls access behind Cloudflare Access. Neither holds zone-level modification rights.
 
 **Zone as a `for_each` key, not a directory.** Maintaining a directory per account and zone would mean onboarding a zone requires adding duplicated `.tf` orchestrator files. A fleet-wide module version bump would touch hundreds of files. Adding a zone here needs only a `zones.tfvars` entry; `zone_config.tfvars` overrides its baseline, and `dns.tfvars` holds its records.
 
@@ -365,6 +365,8 @@ The baseline catalogue is defined in `layers/waf/locals.waf.tf` and parameterise
 | `block_known_exploit_paths` | `block` | None |
 | `challenge_undisclosed_bots` | `managed_challenge` | `waf_trusted_ip_ranges` |
 | `log_trusted_admin_access` | `log` | `waf_trusted_ip_ranges` |
+| `block_disallowed_methods` | `block` | None. Blocks `TRACE`, `TRACK` and `DEBUG`. |
+| `block_attack_score` | `block` | A `business` zone or above: blocks WAF attack score class `attack` (score 1-20). Below that tier the plan fails. |
 
 `waf_admin_paths` defaults to eight paths, `/user/login`, `/user/password` and `/user/register` among them, so `block_admin_from_untrusted` blocks those login pages for every address outside `waf_trusted_ip_ranges`. Trim the list where that is wrong for a site.
 
@@ -423,6 +425,31 @@ The routes are application-specific, so `waf_html_submission_paths` has no platf
 
 **Validation Guardrails:** A baseline rule selected without its input fails the plan: `waf_trusted_ip_ranges`, `waf_blocked_countries` or `waf_ip_blocklist_name`, per the table above. For example, enabling `block_admin_from_untrusted` with an empty `waf_trusted_ip_ranges` would generate a rule blocking all admin access globally, including internal operations. `waf_admin_paths` is not checked, so keep it non-empty: empty, the admin rules produce an expression Cloudflare rejects at apply.
 
+### Account-level WAF
+
+On an Enterprise account with the account-level WAF entitlement, the baseline can be enforced once for every Enterprise zone instead of being copied into each zone's policy. The layer then also writes an account custom ruleset, executed from the account's `http_request_firewall_custom` entry point, and the account's `http_request_firewall_managed` entry point. Not every Enterprise account has the entitlement, so it is off unless `account_waf_enabled = true`, and Cloudflare only rejects an unentitled account at apply, not at plan.
+
+```hcl
+# accounts/<account>/waf.tfvars
+account_waf_enabled = true
+
+account_waf = {
+  zone_keys = [] # empty = every Enterprise zone in the account, managed here or not
+  custom_rules = [
+    { name = "Block legacy XML-RPC endpoint", expression = "http.request.uri.path eq \"/xmlrpc.php\"" },
+  ]
+}
+```
+
+The rules come from the same catalogue as the zone policies. `account_waf_baseline_custom_rules` and `account_waf_baseline_managed_rulesets` hold the platform selection in `layers/waf/defaults.auto.tfvars`: `block_known_exploit_paths`, `block_disallowed_methods` and `block_attack_score`, and `cloudflare_managed` and `owasp_core` tuned by the same `waf_owasp_*` and `waf_managed_rules_action` settings. An account that sets either list replaces it. `account_waf` adds the scope and the tenant's own `custom_rules`, `managed_rulesets` and `managed_exceptions`.
+
+- **Enterprise zones only.** Cloudflare requires every account-level execute rule to end with `and cf.zone.plan eq "ENT"`, and the module always writes it. A zone in `account_waf.zone_keys` whose `zone_tier` is not `enterprise` fails the plan, because it would be listed as covered while getting nothing.
+- **Evaluation order.** The account entry point in a phase runs before the zone's. A zone's exceptions and skips do not reach account-level rules: turn an account-level managed rule off for some traffic with `account_waf.managed_exceptions`.
+- **Double execution.** A zone policy that still executes a managed ruleset the account level runs on the same zone evaluates it twice. The plan warns; drop the ruleset from the zone policy.
+- **Existing entry points.** An account entry point created in the dashboard is imported by `layers/waf/imports.tf` and its rules replaced on the first apply. Review the plan before applying.
+- **Token.** The `terraform-waf-apply` token needs `Account WAF Write` as well as its zone permission. Re-issue it with `ACCOUNT_WAF=1 ONLY_TOKEN=terraform-waf-apply .github/scripts/bootstrap-account-tokens.sh` before enabling.
+- **Disabling** destroys the account-level rulesets on the next apply. Zone policies are not affected.
+
 ### Governing defaults
 
 | Setting | Default | Effect |
@@ -439,6 +466,9 @@ The routes are application-specific, so `waf_html_submission_paths` has no platf
 | `waf_owasp_paranoia_level` | `1` | OWASP rules above this paranoia level are disabled. |
 | `waf_owasp_score_threshold` | `40` | OWASP anomaly score that triggers the action. |
 | `waf_managed_rules_action`, `waf_owasp_action` | `null` | Leaves each ruleset's rules on the action Cloudflare ships. |
+| `account_waf_enabled` | `false` | Deploys the account-level WAF rulesets. Needs the account-level WAF entitlement. |
+| `account_waf_baseline_custom_rules` | `block_known_exploit_paths`, `block_disallowed_methods`, `block_attack_score` | Set in `layers/waf/defaults.auto.tfvars`. Read only when enabled. |
+| `account_waf_baseline_managed_rulesets` | `cloudflare_managed`, `owasp_core` | Set in `layers/waf/defaults.auto.tfvars`. Read only when enabled. |
 
 ---
 
