@@ -19,6 +19,11 @@ output "name_servers" {
   value       = { for key, zone in module.zones : key => zone.name_servers }
 }
 
+output "dnssec" {
+  description = "Zone key => DS record details for zones with DNSSEC on (zones without it are left out). Publish each at the registrar: until then the zone reads as pending and validating resolvers treat it as unsigned."
+  value       = { for key, zone in module.zones : key => zone.dnssec if zone.dnssec != null }
+}
+
 output "zone_rules" {
   description = "Per-zone tier, what that tier unlocks, and whether this layer owns the plan and the bot posture. `subscription_id` is null unless the rate plan is managed here."
   value = {

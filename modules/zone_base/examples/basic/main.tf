@@ -29,6 +29,9 @@ module "zone_base" {
     brotli = "on"
   }
 
+  # On here so the offline plan exercises the resource; the module default is off.
+  dnssec = true
+
   # "@", a relative label and an MX, so the name qualification and the priority
   # rule are both exercised.
   dns_records = [

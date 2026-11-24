@@ -18,6 +18,7 @@ module "zones" {
   tls_1_3          = each.value.tls_1_3
   always_use_https = each.value.always_use_https
   zone_settings    = each.value.zone_settings
+  dnssec           = each.value.dnssec
 
   dns_records = each.value.dns_records
 }

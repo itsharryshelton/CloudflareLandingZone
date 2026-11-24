@@ -17,6 +17,15 @@ dns_config = {
       { name = "www", type = "CNAME", content = "example.com", ttl = 1, proxied = true },
       { name = "@", type = "MX", content = "mx.example.net", ttl = 3600, priority = 10 },
       { name = "@", type = "TXT", content = "v=spf1 include:example.net -all", ttl = 3600 },
+
+      # Delegating a signed child zone to another DNS provider: the NS records
+      # hand dev.example.com over, and the DS record (taken from that provider)
+      # extends the chain of trust down from this zone, which needs DNSSEC on.
+      # Content is "<key tag> <algorithm> <digest type> <digest>". The values
+      # here are placeholders.
+      { name = "dev", type = "NS", content = "ns1.example.net", ttl = 3600 },
+      { name = "dev", type = "NS", content = "ns2.example.net", ttl = 3600 },
+      { name = "dev", type = "DS", content = "12345 13 2 3B9F1A6C0E5D4B2A8F7C6E1D0A9B8C7D6E5F4A3B2C1D0E9F8A7B6C5D4E3F2A1B", ttl = 3600 },
     ]
   }
   mail = {

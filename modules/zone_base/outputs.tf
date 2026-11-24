@@ -23,6 +23,21 @@ output "status" {
   description = "Zone activation status (e.g. active, pending)."
 }
 
+output "dnssec" {
+  value = var.dnssec ? {
+    status           = cloudflare_zone_dnssec.this[0].status
+    ds               = cloudflare_zone_dnssec.this[0].ds
+    key_tag          = cloudflare_zone_dnssec.this[0].key_tag
+    algorithm        = cloudflare_zone_dnssec.this[0].algorithm
+    digest_type      = cloudflare_zone_dnssec.this[0].digest_type
+    digest_algorithm = cloudflare_zone_dnssec.this[0].digest_algorithm
+    digest           = cloudflare_zone_dnssec.this[0].digest
+    flags            = cloudflare_zone_dnssec.this[0].flags
+    public_key       = cloudflare_zone_dnssec.this[0].public_key
+  } : null
+  description = "DS record details to publish at the registrar, or null when DNSSEC is not managed. Registrars ask for either the full `ds` string or its parts (key tag, algorithm, digest type, digest); some want the DNSKEY (`flags`, `algorithm`, `public_key`) instead. All of it is public by design."
+}
+
 output "dns_record_ids" {
   value       = { for key, record in cloudflare_dns_record.this : key => record.id }
   description = "Map of internal DNS record keys to their Cloudflare record IDs."

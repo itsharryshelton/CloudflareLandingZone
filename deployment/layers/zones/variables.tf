@@ -89,6 +89,12 @@ variable "zone_config" {
                               var.default_min_tls_version.
     - `tls_1_3`             - (Optional) on, off or zrt. Defaults to var.default_tls_1_3.
     - `always_use_https`    - (Optional) on or off. Defaults to var.default_always_use_https.
+    - `dnssec`              - (Optional) Sign the zone with DNSSEC. Defaults to
+                              var.default_dnssec. Needs zone_type full or secondary,
+                              and the DS record from the `dnssec` output published at
+                              the registrar. Setting it back to false disables DNSSEC
+                              at Cloudflare - remove the DS record first, see
+                              var.default_dnssec.
     - `zone_settings`       - (Optional) Extra string-valued setting_id => value pairs, merged
                               over var.default_zone_settings and the module's secure baseline.
     - `bot_management`      - (Optional) Zone-level bot posture. REPLACES
@@ -113,6 +119,7 @@ variable "zone_config" {
     min_tls_version     = optional(string)
     tls_1_3             = optional(string)
     always_use_https    = optional(string)
+    dnssec              = optional(bool)
     manage_subscription = optional(bool)
     zone_settings       = optional(map(string), {})
     bot_management = optional(object({
@@ -198,6 +205,28 @@ variable "default_always_use_https" {
     condition     = contains(["on", "off"], var.default_always_use_https)
     error_message = "default_always_use_https must be one of: on, off."
   }
+}
+
+variable "default_dnssec" {
+  type        = bool
+  default     = false
+  description = <<-EOT
+    Whether DNSSEC is on for any zone that does not set `dnssec` itself.
+
+    Off by default because it cannot be assumed fleet-wide: partial and
+    internal zones cannot be signed by Cloudflare, and a zone only benefits once
+    its registrar publishes the DS record, which not every registrar or TLD
+    supports. Turn it on per zone in zone_config instead.
+
+    Off means unmanaged, not disabled: a zone left at false gets no DNSSEC
+    resource, so DNSSEC switched on outside Terraform is left alone.
+
+    The exception is a zone that was true and is set back to false. That
+    destroys the resource and disables DNSSEC at Cloudflare, and if the DS
+    record is still at the registrar the zone stops resolving for every
+    validating resolver. Remove the DS record first and wait out its TTL. The
+    same applies to flipping this default while zones rely on it.
+  EOT
 }
 
 variable "default_zone_settings" {

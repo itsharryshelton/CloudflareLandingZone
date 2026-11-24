@@ -8,6 +8,9 @@ default_min_tls_version = "1.2"
 default_tls_1_3          = "on"
 default_always_use_https = "on"
 
+# DNSSEC off unless a zone opts in with zone_config.<key>.dnssec = true
+default_dnssec = false
+
 default_zone_settings = {
   security_level = "medium"
 }
