@@ -764,6 +764,29 @@ TOKEN_SPECS["terraform-devices-apply"]="$(cat <<JSON
 JSON
 )"
 
+# 9l. terraform-certificates-apply
+# The same grant as terraform-originpulls-apply: Cloudflare has no narrower
+# group for edge certificates, Total TLS or Origin CA. A separate token for a
+# separate environment and reviewer list, not a smaller scope.
+CERTIFICATES_ZONE_PERMS="$(build_perm_array "zone"   "SSL and Certificates:Edit|SSL and Certificates Write"   "Zone:Read|Zone Read")"
+TOKEN_SPECS["terraform-certificates-apply"]="$(cat <<JSON
+{
+  "name": "terraform-certificates-apply",
+  "policies": [
+    {
+      "effect": "allow",
+      "permission_groups": $CERTIFICATES_ZONE_PERMS,
+      "resources": {
+        "$ACCOUNT_RESOURCE": {
+          "$ZONE_RESOURCE": "*"
+        }
+      }
+    }
+  ]
+}
+JSON
+)"
+
 # 10. terraform-zone-apply
 ZONE_PERMS="$(build_perm_array "zone" \
   "DNS:Edit|DNS Write" \
@@ -814,6 +837,7 @@ TOKEN_NAMES=(
   "terraform-plan"
   "terraform-accountgovernance-apply"
   "terraform-aigateway-apply"
+  "terraform-certificates-apply"
   "terraform-d1-apply"
   "terraform-deviceposture-apply"
   "terraform-devices-apply"
@@ -941,6 +965,7 @@ SECURITY WARNING & NEXT STEPS:
    gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-plan
    gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-account_governance-apply
    gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-ai_gateway-apply
+   gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-certificates-apply
    gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-d1-apply
    gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-device_posture-apply
    gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-devices-apply

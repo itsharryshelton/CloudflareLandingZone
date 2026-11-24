@@ -64,7 +64,7 @@ Terraform source, so adding an account, a layer or a module needs no edit here:
   |---|---|---|
   | 1 | `account_governance` | Account-wide permissions and resource-group scope. Every later tier's token is evaluated against what this applies, so it goes out on its own and first. |
   | 2 | `zones`, `ai_gateway`, `bulk_redirects`, `d1`, `device_posture`, `devices`, `gateway`, `lists`, `turnstile`, `wan` | `zones` *creates* zones. The rest touch no zone at all, so nothing waits on them - they ride along in this tier rather than being ordered against each other. `lists` must land before `waf`, `device_posture` before `zerotrust`, whose Access policies name its rules, and `d1` before `workers`, which finds each database it binds by name and needs its migrations applied; all three do by being a tier earlier. |
-  | 3 | `dns`, `load_balancing`, `logpush`, `notifications`, `origin_pulls`, `pages`, `r2`, `rules`, `tunnels`, `waf`, `workers`, `zerotrust` | Resolve a zone with `data "cloudflare_zone"`, which fails at plan time until tier 2 has created it. `r2` is here because a bucket can be served from a custom domain, even where no bucket currently is; `tunnels` for the same reason, since a tunnel's public hostname needs a CNAME in its zone; `pages` likewise, for the CNAME behind each custom domain; `logpush` because a zone-scoped job is created against its zone, even on an account whose jobs are all account-scoped; `notifications` because a policy can be filtered to a zone, by ID, even where none currently is; `origin_pulls` because Authenticated Origin Pulls is configured on a zone, and only means anything once that zone's SSL mode is `full` or `strict`. `zerotrust` is here by its own `tier.tf` instead: Access applications are addressed by hostname, so they need the zone to exist even though the layer never reads one. |
+  | 3 | `certificates`, `dns`, `load_balancing`, `logpush`, `notifications`, `origin_pulls`, `pages`, `r2`, `rules`, `tunnels`, `waf`, `workers`, `zerotrust` | Resolve a zone with `data "cloudflare_zone"`, which fails at plan time until tier 2 has created it. `certificates` is here because every certificate it orders, uploads or issues belongs to a zone, and it reads that zone's plan quota and DNS setup type; `r2` is here because a bucket can be served from a custom domain, even where no bucket currently is; `tunnels` for the same reason, since a tunnel's public hostname needs a CNAME in its zone; `pages` likewise, for the CNAME behind each custom domain; `logpush` because a zone-scoped job is created against its zone, even on an account whose jobs are all account-scoped; `notifications` because a policy can be filtered to a zone, by ID, even where none currently is; `origin_pulls` because Authenticated Origin Pulls is configured on a zone, and only means anything once that zone's SSL mode is `full` or `strict`. `zerotrust` is here by its own `tier.tf` instead: Access applications are addressed by hostname, so they need the zone to exist even though the layer never reads one. |
 
   Tier 2 and 3 membership is **derived from the Terraform source** - `zone_base`
   call versus `data "cloudflare_zone"` block - so a new layer classifies itself.
@@ -358,6 +358,7 @@ one needs.
 | `account_a-logpush-apply`            | **required** | `Logs:Edit` at account and zone scope, and `Zone:Read`; plus `Zero Trust: PII Read` at account scope only if a job pushes an Access, Gateway or DEX dataset |
 | `account_a-notifications-apply`      | **required** | `Notifications:Edit` at account scope (the API refers to the same grant as Notifications Write); plus `Zone:Read` only if a policy names a `zone_key`. Changes no traffic, but can repoint any alert at a destination of its choosing, or switch the alert a SOC relies on off |
 | `account_a-origin_pulls-apply`       | **required** | `SSL and Certificates:Edit` and `Zone:Read` at zone scope, and nothing at account scope. Notably *not* `Zone:Edit` and *not* `DNS:Edit` |
+| `account_a-certificates-apply`       | **required** | `SSL and Certificates:Edit` and `Zone:Read` at zone scope, and nothing at account scope - the same grant as `origin_pulls`. Notably *not* `Zone:Edit` and *not* `DNS:Edit`. Can disable Universal SSL, delete any edge certificate and revoke any Origin CA certificate on the zones it covers |
 | `account_a-gateway-apply`            | **required** | `Zero Trust:Edit` at account scope, and nothing else. The API refers to the same grant as Zero Trust Write; it covers both the Gateway policy APIs and the category and application catalogues the layer resolves names against |
 | `account_a-wan-apply`                | **required** | `Magic Transit:Edit` at account scope, and nothing else. The permission group is named after the older product and covers the Cloudflare WAN tunnel and route APIs                                                              |
 | `account_a-bulk_redirects-apply`     | **required** | `Account Filter Lists:Edit`, `Account Rulesets:Edit` at account scope, and nothing at zone scope. Can redirect any hostname the account serves |
@@ -449,6 +450,16 @@ both repoint a hostname and decide which certificate the edge presents can stand
 up an origin of their own and have Cloudflare authenticate to it. Give it the
 same reviewer list as `zones`, and remember the private keys live in its state
 rather than in its token - see the layer secret below.
+
+The `certificates` token is the same grant again, because Cloudflare has no
+narrower permission group for edge certificates, Total TLS or Origin CA. So
+either token can do the other's job; the split buys a separate environment and
+reviewer list, not a smaller blast radius. What this one can do is take a site
+off TLS: switch Universal SSL off, delete the certificate pack or custom
+certificate a hostname depends on, or revoke the Origin CA certificate an origin
+is serving, each of which fails visitors' or the edge's handshakes at once. It
+is not given `Zone:Edit` or `DNS:Edit`, for the reason given for `origin_pulls`.
+Give it the same reviewer list as `zones`.
 
 The `devices` token is the same grant a third time, and for the same reason the
 layer is its own: review. A device profile decides what traffic reaches Gateway at
@@ -574,6 +585,23 @@ pasting. Each private key is an identity the origin has been told to trust, and
 it lands in the saved plan and in `origin_pulls` state in plain text - so a leak
 of either is a leak of the certificate, and the fix is to upload a replacement
 and only then drop the old one from the origin's trust store.
+
+The `certificates` layer takes one secret, wired in the same way and held in
+the **`<account>-plan`** environment for the same reason:
+**`TF_VAR_CUSTOM_CERTIFICATES`**, a JSON object of custom edge certificates and
+their private keys, keyed by the `certificate_key` the account tree refers to.
+
+```
+TF_VAR_CUSTOM_CERTIFICATES = {"www_2027":{"certificate":"-----BEGIN CERTIFICATE-----\n...","private_key":"-----BEGIN PRIVATE KEY-----\n..."}}
+```
+
+Only needed where a zone uploads a custom certificate. Certificate packs, Total
+TLS and Origin CA need nothing here: an Origin CA certificate is issued from a
+CSR committed in `certificates.tfvars`, and its private key never leaves the
+origin. Build the value with `jq -n --rawfile` as for `origin_pulls`. Each
+private key lands in the saved plan and in `certificates` state in plain text,
+and whoever holds it can serve the zone's hostnames as the zone, so a leak is
+fixed by revoking at the issuing CA and uploading a replacement.
 
 The `pages` layer takes one secret, wired in the same way and held in the
 **`<account>-plan`** environment for the same reason:

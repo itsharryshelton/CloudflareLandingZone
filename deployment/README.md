@@ -10,6 +10,7 @@ deployment/
 │   ├── account_governance/            # own state: members, user groups, RBAC
 │   ├── ai_gateway/                    # own state: AI gateways, caching, rate and spend limits, DLP, guardrails, dynamic routes
 │   ├── bulk_redirects/                # own state: URL redirect lists and execution ruleset
+│   ├── certificates/                  # own state: Universal SSL, Total TLS, advanced certificate packs, custom certificates, Origin CA
 │   ├── d1/                            # own state: D1 databases; schema migrations applied after apply
 │   ├── device_posture/                # own state: device posture checks, MDM and EDR integrations
 │   ├── devices/                       # own state: Cloudflare One Client settings, device profiles, split tunnels
@@ -36,6 +37,7 @@ deployment/
     │   ├── account_governance.tfvars  # dashboard access -> account_governance
     │   ├── ai_gateway.tfvars          # LLM proxies      -> ai_gateway
     │   ├── bulk_redirects.tfvars      # URL redirects    -> bulk_redirects
+    │   ├── certificates.tfvars        # edge/origin TLS  -> certificates
     │   ├── d1.tfvars                  # D1 inventory     -> d1, workers
     │   ├── device_posture.tfvars      # posture checks   -> device_posture
     │   ├── devices.tfvars             # device profiles  -> devices
@@ -57,7 +59,7 @@ deployment/
     │   ├── workers.tfvars             # edge compute, KV, queues -> workers
     │   ├── zerotrust.tfvars           # Access posture   -> zerotrust
     │   ├── zone_config.tfvars         # zone settings    -> zones
-    │   └── zones.tfvars               # zone inventory   -> zones, bulk_redirects, dns, waf, lb, logpush, notifications, origin_pulls, pages, r2, rules, tunnels, workers
+    │   └── zones.tfvars               # zone inventory   -> zones, bulk_redirects, certificates, dns, waf, lb, logpush, notifications, origin_pulls, pages, r2, rules, tunnels, workers
     └── account_b/
         └── ...
 ```
@@ -89,6 +91,7 @@ Tier 2: Foundational Zones & Account Services
 └── wan                                (account-scoped Magic WAN tunnels and static routes)
 
 Tier 3: Zone-Dependent & Consumer Layers
+├── certificates                       (resolves zone IDs, plan quota and setup type; orders and uploads edge certificates, issues Origin CA)
 ├── dns                                (resolves zone IDs via data source; creates DNS records)
 ├── load_balancing                     (resolves zone IDs; provisions origin pools and health monitors)
 ├── logpush                            (resolves zone IDs for zone-scoped jobs; pushes logs to a SIEM or storage)
@@ -106,7 +109,7 @@ Tier 3: Zone-Dependent & Consumer Layers
 Tier membership is derived directly from the Terraform source code - calling the `zone_base` module means Tier 2, resolving a zone with `data "cloudflare_zone"` means Tier 3 - except where the source cannot express the dependency at all. Those two layers declare their own tier in a `tier.tf` holding `locals { apply_tier = <n> }`, which `tf-matrix.sh` reads in preference to the derivation:
 - **Tier 1 (`account_governance`):** Account-wide permissions and resource-group scopes. Every downstream token is evaluated against what this layer applies, so it runs on its own first. Declared in `tier.tf`, because the dependency is on Cloudflare's authorisation decision rather than on any Terraform attribute.
 - **Tier 2 (`zones`, `ai_gateway`, `bulk_redirects`, `d1`, `device_posture`, `devices`, `gateway`, `lists`, `turnstile`, `wan`):** `zones` creates the zone containers at Cloudflare. The remaining layers touch no zones, so nothing waits on them. `lists` is deliberately placed in Tier 2 so that named lists exist before `waf` references them, `device_posture` so that a posture rule exists before a `zerotrust` Access policy requires it, and `d1` so that a database and its migrations exist before `workers` looks it up by name and deploys code against it.
-- **Tier 3 (`dns`, `load_balancing`, `logpush`, `notifications`, `origin_pulls`, `pages`, `r2`, `rules`, `tunnels`, `waf`, `workers`, `zerotrust`):** These layers resolve zones dynamically via `data "cloudflare_zone"`, which fails at plan time until Tier 2 has created the zone. `tunnels` resolves one for the proxied CNAME behind each public hostname, `pages` one per zone a custom domain's `zone_key` names, `logpush` one for each zone-scoped job, and `notifications` one for each zone a policy filters on. `origin_pulls` resolves one per zone it configures, and belongs behind `zones` for a second reason: the zone's SSL mode has to be `full` or `strict` before authenticating to the origin means anything. `zerotrust` is included here by declaration in its own `tier.tf`, because Access applications are addressed by hostname and require the corresponding zone and DNS record to exist, yet the layer never reads a zone for the derivation to find.
+- **Tier 3 (`certificates`, `dns`, `load_balancing`, `logpush`, `notifications`, `origin_pulls`, `pages`, `r2`, `rules`, `tunnels`, `waf`, `workers`, `zerotrust`):** These layers resolve zones dynamically via `data "cloudflare_zone"`, which fails at plan time until Tier 2 has created the zone. `tunnels` resolves one for the proxied CNAME behind each public hostname, `pages` one per zone a custom domain's `zone_key` names, `logpush` one for each zone-scoped job, and `notifications` one for each zone a policy filters on. `certificates` resolves one per zone it configures, and also reads the zone's custom certificate quota and DNS setup type from it. `origin_pulls` resolves one per zone it configures, and belongs behind `zones` for a second reason: the zone's SSL mode has to be `full` or `strict` before authenticating to the origin means anything. `zerotrust` is included here by declaration in its own `tier.tf`, because Access applications are addressed by hostname and require the corresponding zone and DNS record to exist, yet the layer never reads a zone for the derivation to find.
 
 ## Why split this way
 
@@ -120,9 +123,9 @@ Tier membership is derived directly from the Terraform source code - calling the
 
 ## Layers do not read each other's state
 
-The `dns`, `waf`, `load_balancing`, `logpush`, `notifications`, `origin_pulls`, `pages`, `r2`, `rules`, `tunnels`, and `workers` layers resolve a zone key to a zone ID using `data "cloudflare_zone"` filtered by name and account ID, rather than reading `terraform_remote_state`. State files remain completely decoupled: any layer can be applied, re-initialised, or migrated without affecting the others.
+The `certificates`, `dns`, `waf`, `load_balancing`, `logpush`, `notifications`, `origin_pulls`, `pages`, `r2`, `rules`, `tunnels`, and `workers` layers resolve a zone key to a zone ID using `data "cloudflare_zone"` filtered by name and account ID, rather than reading `terraform_remote_state`. State files remain completely decoupled: any layer can be applied, re-initialised, or migrated without affecting the others.
 
-This design requires the Cloudflare API to be accessible at plan time for consumer layers, and plans will fail if the zone does not yet exist. Apply `zones` first; `dns`, `waf`, `load_balancing`, `logpush`, `notifications`, `origin_pulls`, `pages`, `r2`, `rules`, `tunnels`, and `workers` can then plan and apply concurrently.
+This design requires the Cloudflare API to be accessible at plan time for consumer layers, and plans will fail if the zone does not yet exist. Apply `zones` first; `certificates`, `dns`, `waf`, `load_balancing`, `logpush`, `notifications`, `origin_pulls`, `pages`, `r2`, `rules`, `tunnels`, and `workers` can then plan and apply concurrently.
 
 `account_governance` queries the API to resolve role, permission group, and resource group names to IDs. `zerotrust` queries the account's existing Zero Trust organisation, to adopt its team name when `zero_trust_team_name` is unset and to refuse an unintended rename when it is set. `gateway` dynamically resolves Cloudflare's content categories, security categories, and application catalogues so that configuration files reference human-readable names like `"Microsoft 365"` rather than arbitrary IDs like `606`.
 
@@ -187,6 +190,7 @@ The pipeline maps variable files to layers dynamically. The table below lists th
 | `account_governance` | `account.tfvars`, `account_governance.tfvars`                         | None                                                                                                                          |
 | `ai_gateway`         | `account.tfvars`, `ai_gateway.tfvars`                                 | None (BYOK provider keys live in Secrets Store and are added outside Terraform)                                               |
 | `bulk_redirects`     | `account.tfvars`, `zones.tfvars`, `bulk_redirects.tfvars`             | None                                                                                                                          |
+| `certificates`       | `account.tfvars`, `zones.tfvars`, `certificates.tfvars`               | `TF_VAR_custom_certificates` (from the `<account>-plan` environment; only where a zone uploads a custom certificate)          |
 | `d1`                 | `account.tfvars`, `d1.tfvars`, `tags.tfvars`                          | None                                                                                                                          |
 | `device_posture`     | `account.tfvars`, `device_posture.tfvars`                             | `TF_VAR_device_posture_integration_secrets` (from the `<account>-plan` environment)                                           |
 | `devices`            | `account.tfvars`, `devices.tfvars`                                    | None                                                                                                                          |
@@ -1673,6 +1677,127 @@ Edge mTLS in the other direction - client certificates presented *by visitors to
 
 ---
 
+## Certificates
+
+Edge and origin TLS certificates, managed by the `certificates` layer, which calls [`modules/certificates`](../modules/certificates/) once per zone. Five things, each optional per zone, and a zone or part left out is left as Cloudflare has it:
+
+| Part | Resource | What it is |
+|---|---|---|
+| `universal_ssl` | `cloudflare_universal_ssl_setting` | The free edge certificate for the apex and first-level wildcard. Normally left alone; disable only once something else covers every hostname. |
+| `total_tls` | `cloudflare_total_tls` | A certificate ordered automatically for every proxied hostname Universal SSL does not cover. Needs Advanced Certificate Manager and a full DNS setup. |
+| `certificate_packs` | `cloudflare_certificate_pack` | Advanced certificates (Advanced Certificate Manager): chosen hostnames, CA, validity and validation method. |
+| `custom_certificates` | `cloudflare_custom_ssl` | A certificate you bought elsewhere, uploaded with its private key. Business and Enterprise. |
+| `origin_ca_certificates` | `cloudflare_origin_ca_certificate` | A certificate for the origin server, signed by Cloudflare's Origin CA and trusted by the Cloudflare edge only. |
+
+It is split from `zones` for the same reasons as `origin_pulls`: its state can hold custom certificate private keys, and its token needs `SSL and Certificates:Edit` without `Zone:Edit` or `DNS:Edit`. It is split from `origin_pulls`, which holds the same grant, because what visitors are shown and what the origin is shown are reviewed by different people. Cloudflare has no narrower permission group, so either token can do the other's job; the split buys a separate environment and reviewer list, not a smaller blast radius.
+
+```hcl
+# accounts/account_a/certificates.tfvars
+certificates = {
+  primary = {
+    certificate_packs = {
+      edge = { hosts = ["www", "*"] } # apex added; Google, 90 days, TXT by default
+    }
+
+    total_tls = { enabled = true }
+
+    origin_ca_certificates = {
+      origin = {
+        hostnames    = ["@", "*"]
+        request_type = "origin-ecc"
+        csr          = <<-EOT
+          -----BEGIN CERTIFICATE REQUEST-----
+          ...
+          -----END CERTIFICATE REQUEST-----
+        EOT
+      }
+    }
+
+    custom_certificates = {
+      www = { certificate_key = "www_2027" } # material from TF_VAR_CUSTOM_CERTIFICATES
+    }
+  }
+}
+```
+
+Hostnames are qualified against the zone as in `origin_pulls`: `@` is the apex, `*` the first-level wildcard, a single label is prefixed to the zone, and anything else must end in the zone's domain or the plan fails.
+
+### Advanced certificate packs and Total TLS
+
+Both need [Advanced Certificate Manager](https://developers.cloudflare.com/ssl/edge-certificates/advanced-certificate-manager/), a paid add-on bought outside Terraform; without it the apply fails. A pack always includes the zone apex, because Cloudflare requires it, and holds at most 50 names. A pack cannot be changed once ordered, so any edit replaces it; the replacement is ordered before the old pack is deleted, so the hostnames stay covered while it validates.
+
+On a full DNS setup Cloudflare publishes the TXT validation records itself. On a partial (CNAME) setup somebody has to publish the records in the `certificate_packs` output at the authoritative DNS provider, or the pack stays in `pending_validation`. Cloudflare renews packs itself.
+
+Terraform cannot delete the Total TLS setting or the Universal SSL setting. Removing either from the account tree leaves it as last applied, so turn Total TLS off with `enabled = false`, and turn Universal SSL back on with `universal_ssl = true`.
+
+### Disabling Universal SSL
+
+`universal_ssl = false` removes the Universal certificate from the edge, and any hostname with no other valid certificate fails every new TLS handshake. The plan refuses it on a zone with no certificate pack or custom certificate in this layer, but it cannot tell whether those cover every hostname. Apply the pack first, wait for `active` in the `certificate_packs` output, then disable Universal SSL in a separate pull request.
+
+### Origin CA certificates
+
+An Origin CA certificate is for the origin server, not the edge. Only the Cloudflare edge trusts it, so it works for proxied hostnames on SSL mode `full` or `strict`, and a visitor who reaches the origin directly or through a DNS-only record sees an untrusted certificate.
+
+The layer takes a CSR, not a key. Generate the key and CSR on the origin, so the private key never leaves it and never passes through Terraform, its state or the pipeline:
+
+```bash
+openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+  -keyout origin.key -out origin.csr -subj "/CN=example.com"
+```
+
+A CSR is public, so it is committed in `certificates.tfvars`. The plan fails if a `PRIVATE KEY` block is pasted by mistake, but by then the key is already in your working copy. Treat it as compromised and generate a new one. After apply, the signed certificate is in the `origin_ca_certificates` output:
+
+```bash
+terraform -chdir=deployment/layers/certificates output -json origin_ca_certificates \
+  | jq -r '.primary.origin.certificate' >origin.pem
+```
+
+An issued certificate cannot be changed, and deleting one revokes it while the origin is still serving it. So the module treats an issued certificate as fixed: a change to `csr`, `hostnames` or `request_type` on an existing key fails the plan instead of replacing it. A change to `requested_validity` alone is ignored. To rotate:
+
+1. Add a new entry under a new key (`origin_2027`) and apply.
+2. Install the new certificate and its key on the origin.
+3. Remove the old entry and apply. This revokes the old certificate.
+
+Cloudflare sends no expiry notice for Origin CA certificates. The layer defaults to 365 days rather than Cloudflare's 15 years, so that a leaked origin key stops being useful within a year; watch `expires_on` in the output.
+
+### Custom certificates
+
+Business and Enterprise only. The plan reads each zone's custom certificate quota from Cloudflare (0 on Free and Pro) and fails if the account tree asks for more. `certificate_key` names an entry in the `<account>-plan` environment's `TF_VAR_CUSTOM_CERTIFICATES`; the certificate and key never go in `.tfvars`:
+
+```bash
+jq -n --rawfile cert www.crt --rawfile key www.key \
+  '{www_2027: {certificate: $cert, private_key: $key}}' \
+  | gh secret set TF_VAR_CUSTOM_CERTIFICATES --repo <owner/repo> --env <account>-plan
+```
+
+`www.crt` is the leaf followed by its intermediates. The plan fails for a `certificate_key` with no material and for material nothing refers to. The private key lands in the saved plan and in this layer's state in plain text, so anyone with either can serve the zone's hostnames as the zone.
+
+Cloudflare does not renew an uploaded certificate. New material replaces the certificate, uploading the new one before deleting the old, so a rotation needs one free slot in the quota; without one the upload fails and the old certificate stays. A zone has one `legacy_custom` slot, so a legacy certificate cannot be rotated this way.
+
+### Governing defaults
+
+| Setting | Default | Effect |
+|---|---|---|
+| `default_certificate_authority` | `"google"` | CA for a pack that does not name one. |
+| `default_validation_method` | `"txt"` | The one method that also covers wildcards, needs no origin change, and is published automatically on a full setup. |
+| `default_validity_days` | `90` | The one period every CA offers. Cloudflare renews packs itself. |
+| `default_bundle_method` | `"ubiquitous"` | Custom certificate chain most likely to verify on old clients. |
+| `default_origin_ca_validity_days` | `365` | Bounds how long a leaked origin key is useful. Cloudflare's own default is 5475 days. |
+
+### Out of Scope
+
+Keyless SSL, custom hostnames for SaaS (Cloudflare for SaaS), Advanced Certificate Manager's per-hostname cipher suites and minimum TLS version, and mTLS client certificates presented by visitors. The zone's SSL mode, minimum TLS version and TLS 1.3 belong to the `zones` layer, and certificates the edge presents to the origin to `origin_pulls`.
+
+### Not yet verified against a live account
+
+The guardrails were proven by offline plans against provider 5.23.0 with a stubbed zone lookup and a hand-written state. Three behaviours rest on the provider schema and Cloudflare's documentation rather than on an apply:
+
+- That the API returns an Origin CA certificate's `csr` and `hostnames` in a form the immutability check accepts. It ignores whitespace, order and case; any other difference would fail every plan after the first apply.
+- That the custom certificate quota is populated in `data.cloudflare_zone` on every plan. Where it is null the check is skipped and Cloudflare enforces it at apply instead.
+- That the CA validity table above (Let's Encrypt 90 days only, Google 14/30/90, SSL.com 14/30/90 and 365 on Enterprise) still matches Cloudflare's [certificate authorities reference](https://developers.cloudflare.com/ssl/reference/certificate-authorities/).
+
+---
+
 ## Turnstile
 
 The `turnstile` layer manages Cloudflare Turnstile widgets: the CAPTCHA replacement a form embeds, and the secret its backend validates the resulting token with. A widget is account-scoped and attached to no zone - the hostname list is free text, so a widget may legitimately name a domain this account does not hold, and Cloudflare will not warn when a hostname is wrong. The widget simply refuses to render on the page that embeds it.
@@ -1968,11 +2093,12 @@ The Release Manager automates:
 Within your customer's dedicated deployment repository, you can manage multiple administrative accounts (for example: `production`, `staging`, `development`):
 
 1. Create a directory `accounts/<account_name>/`.
-2. Copy all twenty-six template `.tfvars` files from `accounts/account_a/`:
+2. Copy all twenty-seven template `.tfvars` files from `accounts/account_a/`:
    - `account.tfvars`
    - `account_governance.tfvars`
    - `ai_gateway.tfvars`
    - `bulk_redirects.tfvars`
+   - `certificates.tfvars`
    - `d1.tfvars`
    - `device_posture.tfvars`
    - `devices.tfvars`
