@@ -28,3 +28,15 @@ output "resolved_zone_ids" {
   description = "Zone key => zone ID as resolved by name. Useful for confirming this layer bound to the zones you expected."
   value       = { for key, zone in data.cloudflare_zone.this : key => zone.id }
 }
+
+output "account_waf" {
+  description = "Account-level WAF as deployed, or null when account_waf_enabled is false. deploy_expression shows which zones the account rules reach."
+  value = var.account_waf_enabled ? {
+    custom_ruleset_id         = module.account_waf[0].custom_ruleset_id
+    custom_entrypoint_id      = module.account_waf[0].custom_entrypoint_id
+    managed_entrypoint_id     = module.account_waf[0].managed_entrypoint_id
+    deploy_expression         = module.account_waf[0].deploy_expression
+    managed_rulesets_deployed = module.account_waf[0].managed_rulesets_deployed
+    managed_exceptions        = module.account_waf[0].managed_exceptions
+  } : null
+}

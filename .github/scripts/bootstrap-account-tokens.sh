@@ -21,6 +21,8 @@
 #   CSV_OUTPUT_PATH         Destination path for exported CSV.
 #   DRY_RUN                 1 = print planned tokens and policy payloads, touch nothing.
 #   ONLY_TOKEN              Restrict creation to a single token name (optional).
+#   ACCOUNT_WAF             1 = add Account WAF Write to terraform-waf-apply, for an
+#                           account with the account-level WAF entitlement (optional).
 
 # If running script from PowerShell session use:
 # $env:CLOUDFLARE_ACCOUNT_ID = "1234"
@@ -56,6 +58,7 @@ command -v jq >/dev/null 2>&1 || { echo "[ERROR] jq is required but not installe
 
 DRY_RUN="${DRY_RUN:-0}"
 ONLY_TOKEN="${ONLY_TOKEN:-all}"
+ACCOUNT_WAF="${ACCOUNT_WAF:-0}"
 
 echo "======================================================================"
 echo " Cloudflare Landing Zone: Account-Owned API Token Provisioning"
@@ -433,6 +436,11 @@ TOKEN_SPECS["terraform-waf-apply"]="$(cat <<JSON
 }
 JSON
 )"
+if [[ "$ACCOUNT_WAF" == "1" ]]; then
+  WAF_ACCT_PERMS="$(build_perm_array "account" "Account WAF:Edit|Account WAF Write")"
+  TOKEN_SPECS["terraform-waf-apply"]="$(echo "${TOKEN_SPECS["terraform-waf-apply"]}" | jq --argjson perms "$WAF_ACCT_PERMS" --arg account "$ACCOUNT_RESOURCE" \
+    '.policies += [{effect: "allow", permission_groups: $perms, resources: {($account): "*"}}]')"
+fi
 
 # 7. terraform-wan-apply
 WAN_ACCT_PERMS="$(build_perm_array "account" \

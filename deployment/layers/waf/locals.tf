@@ -24,6 +24,19 @@ locals {
     && contains(keys(var.zones), policy.zone_key)
   }
 
+  # Phase => ID of the account's existing root ruleset, or null where it has
+  # none or account-level WAF is off. For the account imports in imports.tf.
+  existing_account_entrypoints = {
+    for phase in ["http_request_firewall_custom", "http_request_firewall_managed"] : phase => (
+      var.account_waf_enabled
+      ? one([
+        for ruleset in data.cloudflare_rulesets.account[0].rulesets : ruleset.id
+        if ruleset.phase == phase && ruleset.kind == "root"
+      ])
+      : null
+    )
+  }
+
   # Baseline rules first, tenant rules after.
   waf_policies = {
     for key, policy in var.waf_policies : key => merge(policy, {
@@ -170,12 +183,113 @@ locals {
   ]
 
   # Baseline rules selected while the variable they depend on is empty
-  waf_unsatisfied_baseline_rules = flatten([
-    for key, policy in var.waf_policies : [
-      for name in concat(policy.baseline_custom_rules, keys(policy.baseline_managed_exceptions)) :
-      "${key} selects \"${name}\": ${local.waf_baseline_requirements[name].reason}"
+  waf_unsatisfied_baseline_rules = concat(
+    flatten([
+      for key, policy in var.waf_policies : [
+        for name in concat(policy.baseline_custom_rules, keys(policy.baseline_managed_exceptions)) :
+        "${key} selects \"${name}\": ${local.waf_baseline_requirements[name].reason}"
+        if contains(keys(local.waf_baseline_requirements), name)
+        && !local.waf_baseline_requirements[name].satisfied
+      ]
+    ]),
+    [
+      for name in local.account_waf_selected_custom_rules :
+      "account_waf_baseline_custom_rules selects \"${name}\": ${local.waf_baseline_requirements[name].reason}"
       if contains(keys(local.waf_baseline_requirements), name)
       && !local.waf_baseline_requirements[name].satisfied
+    ],
+  )
+
+  # Baseline rules selected on a zone below the plan that exposes their fields
+  underpowered_baseline_rules = flatten([
+    for key, policy in var.waf_policies : [
+      for name in policy.baseline_custom_rules :
+      "${key} selects \"${name}\" (needs ${local.waf_baseline_min_tier[name]}, zone \"${policy.zone_key}\" is ${local.zone_tiers[policy.zone_key]})"
+      if contains(keys(local.waf_baseline_min_tier), name)
+      && contains(keys(var.zones), policy.zone_key)
+      && local.tier_rank[local.zone_tiers[policy.zone_key]] < local.tier_rank[local.waf_baseline_min_tier[name]]
     ]
+  ])
+
+  # -------------------------------------------------------------------------
+  # Account-level WAF (account_waf.tf)
+  # -------------------------------------------------------------------------
+  # Nothing account-level is evaluated while the toggle is off, so a platform
+  # selection in defaults.auto.tfvars cannot fail an account that lacks the
+  # entitlement.
+  account_waf_selected_custom_rules     = var.account_waf_enabled ? var.account_waf_baseline_custom_rules : []
+  account_waf_selected_managed_rulesets = var.account_waf_enabled ? var.account_waf_baseline_managed_rulesets : []
+
+  # Unknown names are dropped here and reported by the preflight, rather than
+  # failing as a generic "Invalid index".
+  account_waf_custom_rules = concat(
+    [
+      for name in local.account_waf_selected_custom_rules : local.waf_baseline_custom_rules[name]
+      if contains(keys(local.waf_baseline_custom_rules), name)
+    ],
+    var.account_waf.custom_rules,
+  )
+
+  account_waf_managed_rulesets = concat(
+    [
+      for name in local.account_waf_selected_managed_rulesets : local.waf_baseline_managed_rulesets[name]
+      if contains(keys(local.waf_baseline_managed_rulesets), name)
+    ],
+    var.account_waf.managed_rulesets,
+  )
+
+  account_waf_managed_ruleset_ids = [for ruleset in local.account_waf_managed_rulesets : ruleset.id]
+
+  account_waf_zone_names = [
+    for key in var.account_waf.zone_keys : var.zones[key].domain_name
+    if contains(keys(var.zones), key)
+  ]
+
+  account_waf_unknown_baselines = concat(
+    [
+      for name in local.account_waf_selected_custom_rules : "account_waf_baseline_custom_rules[\"${name}\"]"
+      if !contains(keys(local.waf_baseline_custom_rules), name)
+    ],
+    [
+      for name in local.account_waf_selected_managed_rulesets : "account_waf_baseline_managed_rulesets[\"${name}\"]"
+      if !contains(keys(local.waf_baseline_managed_rulesets), name)
+    ],
+  )
+
+  account_waf_dangling_zone_keys = [
+    for key in var.account_waf.zone_keys : key
+    if var.account_waf_enabled && !contains(keys(var.zones), key)
+  ]
+
+  # A listed zone that is not Enterprise would match nothing while reading as
+  # if it were covered.
+  account_waf_non_enterprise_zones = [
+    for key in var.account_waf.zone_keys : "${key} (tier \"${local.zone_tiers[key]}\")"
+    if var.account_waf_enabled
+    && contains(keys(var.zones), key)
+    && local.tier_rank[local.zone_tiers[key]] < local.tier_rank["enterprise"]
+  ]
+
+  # Tenant account-level content written while the toggle is off. Baselines are
+  # excluded: the platform selection is always set in defaults.auto.tfvars.
+  account_waf_ignored_content = !var.account_waf_enabled && anytrue([
+    length(var.account_waf.zone_keys) > 0,
+    length(var.account_waf.custom_rules) > 0,
+    length(var.account_waf.managed_rulesets) > 0,
+    length(var.account_waf.managed_exceptions) > 0,
+  ])
+
+  # Zone policies that execute a managed ruleset the account level already runs
+  # on the same zone. Only managed Enterprise zones in scope are known here; an
+  # unmanaged zone cannot have a policy.
+  account_waf_double_executed = flatten([
+    for key, policy in var.waf_policies : [
+      for id in setintersection(local.waf_policy_managed_ruleset_ids[key], local.account_waf_managed_ruleset_ids) :
+      "${key} (zone \"${policy.zone_key}\") executes ${id}"
+    ]
+    if var.account_waf_enabled
+    && contains(keys(var.zones), policy.zone_key)
+    && local.tier_rank[local.zone_tiers[policy.zone_key]] >= local.tier_rank["enterprise"]
+    && (length(var.account_waf.zone_keys) == 0 || contains(var.account_waf.zone_keys, policy.zone_key))
   ])
 }

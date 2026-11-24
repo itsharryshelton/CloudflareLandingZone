@@ -23,6 +23,22 @@ waf_blocked_countries = ["BY", "CU", "IR", "KP", "RU", "SY"]
 #   "/templates/[0-9]+",
 # ]
 
+# Account-level WAF: only for an account with the account-level WAF entitlement.
+# Enforces the platform baseline (layers/waf/defaults.auto.tfvars) on Enterprise
+# zones centrally. Re-issue the terraform-waf-apply token with ACCOUNT_WAF=1
+# before enabling. Left off here: this account's zones are not Enterprise.
+# account_waf_enabled = true
+#
+# account_waf = {
+#   zone_keys = [] # empty = every Enterprise zone in the account
+#   custom_rules = [
+#     {
+#       name       = "Block legacy XML-RPC endpoint on every zone"
+#       expression = "http.request.uri.path eq \"/xmlrpc.php\""
+#     },
+#   ]
+# }
+
 waf_policies = {
   primary = {
     zone_key = "primary"

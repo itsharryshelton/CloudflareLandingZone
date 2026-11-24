@@ -81,3 +81,21 @@ waf_html_submission_paths = []
 # Events shows one blocking a legitimate submission; rule IDs are global, so an
 # ID added here applies to every account.
 waf_html_submission_skip_rule_ids = []
+
+# Account-level WAF. Off by default
+account_waf_enabled = false
+
+# Platform baseline enforced on every Enterprise zone once enabled.
+account_waf_baseline_custom_rules = [
+  "block_known_exploit_paths",
+  "block_disallowed_methods",
+  "block_attack_score",
+]
+
+# Tuned by the waf_owasp_* settings above. Run waf_managed_rules_action and
+# waf_owasp_action as "log" in an account's first deployment if its zones carry
+# live traffic that has never been through these rulesets.
+account_waf_baseline_managed_rulesets = [
+  "cloudflare_managed",
+  "owasp_core",
+]

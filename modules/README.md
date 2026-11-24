@@ -43,6 +43,7 @@ cloudflare/cloudflare provider            configured by the layer, never by the 
 |---|---|---|
 | `account_governance` | `account_governance` | Account members, user groups and their memberships |
 | `account_list` | `lists` | One account-level IP, ASN or hostname list, and optionally its rows |
+| `account_waf` | `waf` | The account's custom WAF ruleset and its `http_request_firewall_custom` and `http_request_firewall_managed` entry points (Enterprise, account-level WAF entitlement) |
 | `ai_gateway` | `ai_gateway` | One AI Gateway and its dynamic routes |
 | `authenticated_origin_pulls` | `origin_pulls` | Authenticated Origin Pulls for one zone: settings, zone and per-hostname certificates |
 | `bulk_redirect_list` | `bulk_redirects` | One redirect list, and optionally its rows |

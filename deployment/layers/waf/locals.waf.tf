@@ -3,7 +3,9 @@
 # The rules a deployment is likely to want on every zone, expressed once here and
 # opted into by name from `waf_policies[*].baseline_custom_rules`,
 # `baseline_rate_limits`, `baseline_managed_rulesets` and
-# `baseline_managed_exceptions`. Nothing here is customer-specific: the
+# `baseline_managed_exceptions`, and for the account-level rulesets from
+# `account_waf_baseline_custom_rules` and `account_waf_baseline_managed_rulesets`.
+# Nothing here is customer-specific: the
 # addresses, paths, hostnames and country codes come from variables, so the same
 # catalogue serves every tenant.
 #
@@ -79,6 +81,36 @@ locals {
       description = "Baseline - log admin access from trusted networks"
       enabled     = true
     }
+
+    block_disallowed_methods = {
+      # Methods no web application needs at the edge. TRACE and TRACK echo the
+      # request back (cross-site tracing); DEBUG is an IIS remote-debug verb.
+      name        = "Baseline - block disallowed HTTP methods"
+      expression  = "http.request.method in {\"TRACE\" \"TRACK\" \"DEBUG\"}"
+      action      = "block"
+      description = "Baseline - block disallowed HTTP methods"
+      enabled     = true
+    }
+
+    block_attack_score = {
+      # WAF attack score class "attack" is a score of 1-20: Cloudflare's own
+      # threshold for requests its machine learning model rates as almost
+      # certainly malicious. Catches SQLi, XSS and RCE variants the signature
+      # rulesets have no rule for yet.
+      name        = "Baseline - block requests scored as attacks"
+      expression  = "cf.waf.score.class eq \"attack\""
+      action      = "block"
+      description = "Baseline - block requests scored as attacks"
+      enabled     = true
+    }
+  }
+
+  # Baseline custom rules that read a field lower plans do not expose. Cloudflare
+  # rejects the whole ruleset on such a zone, taking every other rule with it.
+  # Account-level rules only ever run on Enterprise zones, so this gates zone
+  # policies alone.
+  waf_baseline_min_tier = {
+    block_attack_score = "business"
   }
 
   # Baseline rate limits (http_ratelimit)
