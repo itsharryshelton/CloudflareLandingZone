@@ -53,6 +53,13 @@ Changes reach Cloudflare only through two manually started pipelines. Merging co
 - Changes roll out in three dependency tiers: account governance, then zones and account-level services, then zone-dependent services. Each tier is planned only after the previous tier has applied.
 - Each layer uses its own least-privilege Cloudflare API token, held in a dedicated GitHub Environment restricted to the `main` branch. For example, the WAF token cannot modify DNS or delete a zone.
 
+### Drift Detection (nightly, read-only)
+
+- Every night, a read-only plan runs against every account and layer, using the same read-only token as Terraform Plan. It can change nothing at Cloudflare.
+- It reports resources changed outside Terraform (for example a dashboard edit), changes merged to `main` but never applied, and any layer it could not check.
+- Findings go to one GitHub issue, which can be assigned to engineers or a service desk account. The issue opens when drift first appears, gets a comment only when the drift changes, and closes when everything matches again, so the same drift does not alert every night.
+- The issue lists resource addresses and actions only, no configuration values.
+
 ### Pre-flight safeguards on every plan and apply
 
 - The API token's format is checked before Terraform starts, and the token is verified against the target account.

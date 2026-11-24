@@ -9,7 +9,7 @@ it - token scopes, security trade-offs, rate limiting - see
 
 | # | What | Where it goes | How many |
 |---|---|---|---|
-| 1 | [Repository variables](#1-repository-variables) | Repo **Settings → Secrets and variables → Actions → Variables** | 3 |
+| 1 | [Repository variables](#1-repository-variables) | Repo **Settings → Secrets and variables → Actions → Variables** | 3, plus 2 optional |
 | 2 | [Repository secrets](#2-repository-secrets) | Repo **Settings → Secrets and variables → Actions → Secrets** | 3 |
 | 3 | [Environments](#3-environments) | Repo **Settings → Environments** | 2 + one per layer, per account |
 | 4 | [`CLOUDFLARE_API_TOKEN`](#4-cloudflare_api_token---one-per-environment) | Environment secret, in **every** environment | 1 per environment |
@@ -32,6 +32,12 @@ Not secret. Shared by every account and layer.
 | `TF_BACKEND_BUCKET` | `yourorg-cloudflare-platform-tfstate` | R2 bucket that holds Terraform state | plan, apply, `state-forget`, `state-unlock` |
 | `TF_BACKEND_ENDPOINT` | `https://<state-account-id>.r2.cloudflarestorage.com` | S3-compatible endpoint for that bucket | plan, apply, `state-forget`, `state-unlock` |
 | `MODULES_APP_ID` | `1234567` | Numeric App ID of the modules-reader GitHub App (not the client ID or slug) | every workflow that runs `terraform init`: all but `secret-scanning.yml` |
+| `DRIFT_ISSUE_ASSIGNEES` | `oncall-engineer,platform-lead` | Optional. Comma-separated GitHub logins assigned to the drift issue when it opens. Each needs access to the repository. A service desk account goes here too | `drift-detection` |
+| `DRIFT_ISSUE_MENTION` | `@yourorg/platform-oncall` | Optional. A user or team mention written into the drift issue and every change comment | `drift-detection` |
+
+The two `DRIFT_` variables decide who hears about drift. With neither set, only
+people watching the repository do. See [Drift
+detection](.github/workflows/README.md#getting-it-to-a-person).
 
 ## 2. Repository secrets
 

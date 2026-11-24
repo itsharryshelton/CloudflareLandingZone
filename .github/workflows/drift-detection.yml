@@ -1,0 +1,125 @@
+# Drift detection - a read-only plan of every account and layer, every night,
+# reported as one rolling GitHub issue.
+#
+# The plan is the same one terraform-plan.yml runs: the `<account>-plan`
+# environment and its read-only token. Nothing here can change Cloudflare or
+# state. The report job holds no Cloudflare credential at all, only a
+# GITHUB_TOKEN that can write issues. See .github/workflows/README.md.
+
+name: Drift Detection
+
+on:
+  schedule:
+    # 02:17 UTC
+    - cron: '17 2 * * *'
+  workflow_dispatch:
+    inputs:
+      account:
+        description: 'Account directory name, or "all". A narrowed run reports to the run summary only and leaves the issue alone.'
+        required: false
+        default: 'all'
+        type: string
+      layer:
+        description: 'Layer directory name, or "all". A narrowed run reports to the run summary only and leaves the issue alone.'
+        required: false
+        default: 'all'
+        type: string
+
+permissions:
+  contents: read
+
+# Queued, never cancelled: a run cut short would report its unfinished pairs as
+# "could not check" and churn the issue for nothing.
+concurrency:
+  group: drift-detection
+  cancel-in-progress: false
+
+jobs:
+  discover:
+    name: select pairs
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.select.outputs.matrix }}
+      any: ${{ steps.select.outputs.any }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Select
+        id: select
+        env:
+          # Drift is about what is live, not what changed in git, so there is no
+          # diff to narrow on: every pair, unless narrowed by hand.
+          BASE_SHA: ''
+          HEAD_SHA: ${{ github.sha }}
+          FORCE_ALL: 'true'
+          # A scheduled run has no inputs, so these fall back to 'all'.
+          ONLY_ACCOUNT: ${{ inputs.account || 'all' }}
+          ONLY_LAYER: ${{ inputs.layer || 'all' }}
+        run: bash .github/scripts/tf-matrix.sh
+
+  # A zone-reading layer whose zone does not exist yet fails to plan, as in
+  # terraform-plan.yml. Overnight that means a zone merged but never applied,
+  # which the report lists under "could not check" - itself worth knowing.
+  plan:
+    name: plan
+    needs: discover
+    if: needs.discover.outputs.any == 'true'
+    strategy:
+      fail-fast: false
+      # Nobody waits on a nightly run, so it trades speed for a lighter draw on
+      # each account's plan token, which a daytime plan or apply also uses.
+      max-parallel: 2
+      matrix:
+        include: ${{ fromJSON(needs.discover.outputs.matrix) }}
+    uses: ./.github/workflows/_terraform-run.yml
+    with:
+      account: ${{ matrix.account }}
+      layer: ${{ matrix.layer }}
+      mode: plan
+      environment: ${{ matrix.account }}-plan
+      # Kept so whoever picks up the issue can read the attribute-level diff.
+      # Shorter than terraform-plan.yml's 5 days because a fresh one lands every
+      # night, and a plan file holds zone IDs, record contents and expressions.
+      plan_artifact: tfplan-${{ matrix.account }}-${{ matrix.layer }}-${{ github.run_id }}-${{ github.run_attempt }}
+      plan_retention_days: 3
+      drift_artifact: drift-${{ matrix.account }}-${{ matrix.layer }}-${{ github.run_id }}
+    secrets: inherit
+
+  report:
+    name: report
+    needs: [discover, plan]
+    # Runs when plans fail too: a pair that could not be planned is a blind
+    # spot, and the report is what says so.
+    if: >-
+      always() &&
+      needs.discover.result == 'success' &&
+      needs.discover.outputs.any == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v7
+
+      # continue-on-error because a run where every plan failed has nothing to
+      # download, and that must still reach the report as "could not check".
+      - name: Collect the drift results
+        uses: actions/download-artifact@v8
+        continue-on-error: true
+        with:
+          pattern: drift-*-${{ github.run_id }}
+          path: drift-results
+          merge-multiple: true
+
+      - name: Report
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MATRIX: ${{ needs.discover.outputs.matrix }}
+          RESULTS_DIR: drift-results
+          # Only a full run may open or close the issue. A run narrowed to one
+          # pair cannot tell that the rest are clean.
+          MANAGE_ISSUE: ${{ (inputs.account || 'all') == 'all' && (inputs.layer || 'all') == 'all' }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          DRIFT_ISSUE_ASSIGNEES: ${{ vars.DRIFT_ISSUE_ASSIGNEES }}
+          DRIFT_ISSUE_MENTION: ${{ vars.DRIFT_ISSUE_MENTION }}
+        run: bash .github/scripts/drift-report.sh
