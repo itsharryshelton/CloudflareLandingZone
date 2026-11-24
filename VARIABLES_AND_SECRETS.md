@@ -93,6 +93,7 @@ the CSV once they are all uploaded.
 | `<account>-account_governance-apply` | `account_governance` | `terraform-accountgovernance-apply` | `Account Settings:Edit` |
 | `<account>-ai_gateway-apply` | `ai_gateway` | `terraform-aigateway-apply` | `AI Gateway:Edit` (the API names the same grant AI Gateway Write). Not `AI Gateway Run`. Can read and delete every gateway's logs - prompts and responses - as can the plan token's `AI Gateway:Read` |
 | `<account>-bulk_redirects-apply` | `bulk_redirects` | *not created - make by hand* | `Account Filter Lists:Edit`, `Account Rulesets:Edit` |
+| `<account>-certificates-apply` | `certificates` | `terraform-certificates-apply` | `SSL and Certificates:Edit`, `Zone:Read` - the same grant as `origin_pulls`, notably *not* `Zone:Edit` and *not* `DNS:Edit`. Can switch Universal SSL off, delete edge certificates and revoke Origin CA certificates |
 | `<account>-d1-apply` | `d1` | `terraform-d1-apply` | `D1:Edit`. Also runs the post-apply migrations, which are queries over the D1 REST API, so it can read and rewrite the contents of every database in the account |
 | `<account>-device_posture-apply` | `device_posture` | `terraform-deviceposture-apply` | `Zero Trust:Edit` |
 | `<account>-devices-apply` | `devices` | `terraform-devices-apply` | `Zero Trust:Edit`. Decides what device traffic reaches Gateway at all |
@@ -141,7 +142,7 @@ difference matters.
 
 ## 5. Layer secrets (`TF_VAR_*`)
 
-Only seven layers take a secret besides their token. Each is a JSON object keyed
+Only eight layers take a secret besides their token. Each is a JSON object keyed
 the same way as the matching map in that layer's `.tfvars`.
 
 These go in the **`<account>-plan`** environment, not the apply one. The plan
@@ -150,6 +151,7 @@ step is what reads `TF_VAR_*`; apply runs the saved plan and never re-reads them
 | Secret name | Layer | Keyed like | Wired into the pipeline? | Example value |
 |---|---|---|---|---|
 | `TF_VAR_IDENTITY_PROVIDER_SECRETS` | `zerotrust` | `identity_providers` | Yes, on every plan - **must be set**; `{}` only with no OAuth-type provider | `{"entra_id":"<client secret>"}` |
+| `TF_VAR_CUSTOM_CERTIFICATES` | `certificates` | `certificate_key` references in `custom_certificates` | Yes, only when set | `{"www_2027":{"certificate":"-----BEGIN CERTIFICATE-----\n...","private_key":"-----BEGIN PRIVATE KEY-----\n..."}}` |
 | `TF_VAR_DEVICE_POSTURE_INTEGRATION_SECRETS` | `device_posture` | `device_posture_integrations` | Yes, only when set | `{"intune":{"client_secret":"<client secret>"}}` |
 | `TF_VAR_LOGPUSH_DESTINATION_SECRETS` | `logpush` | `logpush_jobs` | Yes, only when set | `{"audit_archive":"r2://<bucket>/audit/{DATE}?account-id=<id>&access-key-id=<key id>&secret-access-key=<secret>"}` |
 | `TF_VAR_LOGPUSH_OWNERSHIP_CHALLENGES` | `logpush` | `logpush_jobs` | Yes, only when set | `{"primary_http_requests":"<challenge token>"}` |
@@ -169,6 +171,12 @@ Notes:
   `zerotrust` plan fails with `Missing expression`. `{}` is valid only on an
   account that declares no OAuth-type identity provider: every `azureAD`, `oidc`,
   `okta`, `google` and similar provider needs its secret here, or the plan fails.
+- **certificates:** only needed where a zone uploads a custom certificate;
+  certificate packs, Total TLS and Origin CA need nothing here. Build it with
+  `jq -n --rawfile` as for `origin_pulls`, the certificate being the leaf
+  followed by its intermediates. The private key lands in that layer's state
+  in plain text. An Origin CA certificate is issued from a CSR committed in
+  `certificates.tfvars`; its private key stays on the origin.
 - **device_posture:** most integration types take `client_secret`; Uptycs takes
   `client_key` and `client_secret`; a custom integration takes
   `access_client_secret`.
@@ -210,7 +218,8 @@ Notes:
 `account_governance`, `ai_gateway`, `bulk_redirects`, `d1`, `devices`, `dns`, `gateway`, `lists`,
 `load_balancing`, `r2`, `rules`, `tunnels`, `turnstile`, `waf`, `workers` and
 `zones` need only their `CLOUDFLARE_API_TOKEN`. So does `origin_pulls`, unless a zone in it
-uploads a certificate of its own, `pages`, unless a project lists
+uploads a certificate of its own, `certificates`, unless a zone uploads a custom
+certificate, `pages`, unless a project lists
 `secret_names`, and `notifications`, unless a webhook's URL is a credential or
 carries a `cf-webhook-auth` secret. Workers secrets live in Cloudflare Secrets
 Store and are referenced by name in `workers.tfvars`.

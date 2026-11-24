@@ -336,6 +336,7 @@ jobs:
           NOTIFICATION_WEBHOOK_SECRETS: ${{ inputs.layer == 'notifications' && secrets.TF_VAR_NOTIFICATION_WEBHOOK_SECRETS || '' }}
           WAN_IPSEC_TUNNEL_PSKS: ${{ inputs.layer == 'wan' && secrets.TF_VAR_WAN_IPSEC_TUNNEL_PSKS || '' }}
           WAN_BGP_MD5_KEYS: ${{ inputs.layer == 'wan' && secrets.TF_VAR_WAN_BGP_MD5_KEYS || '' }}
+          CUSTOM_CERTIFICATES: ${{ inputs.layer == 'certificates' && secrets.TF_VAR_CUSTOM_CERTIFICATES || '' }}
         run: |
           set -euo pipefail
           # Exported only when set: an unset secret would reach Terraform as an
@@ -375,7 +376,12 @@ jobs:
           if [[ -n "${WAN_BGP_MD5_KEYS:-}" ]]; then
             export TF_VAR_wan_bgp_md5_keys="$WAN_BGP_MD5_KEYS"
           fi
-          unset LOGPUSH_DESTINATION_SECRETS LOGPUSH_OWNERSHIP_CHALLENGES DEVICE_POSTURE_INTEGRATION_SECRETS ORIGIN_PULL_CERTIFICATES PAGES_PROJECT_SECRETS NOTIFICATION_WEBHOOK_SECRETS WAN_IPSEC_TUNNEL_PSKS WAN_BGP_MD5_KEYS
+          # Custom edge certificates and their private keys. Unset is valid where
+          # no zone uploads one; where one does, preflight names what is missing.
+          if [[ -n "${CUSTOM_CERTIFICATES:-}" ]]; then
+            export TF_VAR_custom_certificates="$CUSTOM_CERTIFICATES"
+          fi
+          unset LOGPUSH_DESTINATION_SECRETS LOGPUSH_OWNERSHIP_CHALLENGES DEVICE_POSTURE_INTEGRATION_SECRETS ORIGIN_PULL_CERTIFICATES PAGES_PROJECT_SECRETS NOTIFICATION_WEBHOOK_SECRETS WAN_IPSEC_TUNNEL_PSKS WAN_BGP_MD5_KEYS CUSTOM_CERTIFICATES
 
           # Which account var files this layer takes is derived from the config,
           # not hardcoded - see .github/scripts/tf-varfiles.sh. Written to a file

@@ -48,6 +48,7 @@ cloudflare/cloudflare provider            configured by the layer, never by the 
 | `authenticated_origin_pulls` | `origin_pulls` | Authenticated Origin Pulls for one zone: settings, zone and per-hostname certificates |
 | `bulk_redirect_list` | `bulk_redirects` | One redirect list, and optionally its rows |
 | `bulk_redirect_ruleset` | `bulk_redirects` | The account's `http_request_redirect` entry-point ruleset |
+| `certificates` | `certificates` | One zone's Universal SSL setting, Total TLS, advanced certificate packs, custom certificates and Origin CA certificates |
 | `cache_rules` | `rules` | One zone's `http_request_cache_settings` entry-point ruleset |
 | `config_rules` | `rules` | One zone's `http_config_settings` entry-point ruleset (Configuration Rules, such as a per-hostname SSL mode) |
 | `d1_database` | `d1` | One D1 database |
