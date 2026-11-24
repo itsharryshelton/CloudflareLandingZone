@@ -738,6 +738,24 @@ TOKEN_SPECS["terraform-notifications-apply"]="$(cat <<JSON
 JSON
 )"
 
+# 9k. terraform-devices-apply
+DEVICES_ACCT_PERMS="$(build_perm_array "account" "Zero Trust:Edit|Zero Trust Write")"
+TOKEN_SPECS["terraform-devices-apply"]="$(cat <<JSON
+{
+  "name": "terraform-devices-apply",
+  "policies": [
+    {
+      "effect": "allow",
+      "permission_groups": $DEVICES_ACCT_PERMS,
+      "resources": {
+        "$ACCOUNT_RESOURCE": "*"
+      }
+    }
+  ]
+}
+JSON
+)"
+
 # 10. terraform-zone-apply
 ZONE_PERMS="$(build_perm_array "zone" \
   "DNS:Edit|DNS Write" \
@@ -790,6 +808,7 @@ TOKEN_NAMES=(
   "terraform-aigateway-apply"
   "terraform-d1-apply"
   "terraform-deviceposture-apply"
+  "terraform-devices-apply"
   "terraform-dns-apply"
   "terraform-gateway-apply"
   "terraform-loadbalancing-apply"
@@ -916,6 +935,7 @@ SECURITY WARNING & NEXT STEPS:
    gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-ai_gateway-apply
    gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-d1-apply
    gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-device_posture-apply
+   gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-devices-apply
    gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-dns-apply
    gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-gateway-apply
    gh secret set CLOUDFLARE_API_TOKEN --repo <owner/repo> --env <account_name>-load_balancing-apply

@@ -336,9 +336,13 @@ The bare `account-a-admin.pages.dev` hostname is listed on purpose: protecting o
   - account_a rules: Cloudflare One Client running, disk encryption (Windows, macOS), OS version (Windows 11 23H2+, macOS 14.4+), firewall (Windows), CrowdStrike Falcon sensor (Windows).
   - account_b rules: Cloudflare One Client running, disk encryption (Windows, macOS, Linux).
   - **No sample Gateway or Access rule references a posture check** (`device_posture_check_ids` / `device_posture_ids` are unused). Posture is collected but not enforced.
+- **Devices (`deployment/layers/devices/`):** Cloudflare One Client device settings (Gateway TCP/UDP proxy, root CA installation, override codes, emergency disconnect), the default device profile, custom profiles, split tunnels and Local Domain Fallback. Platform defaults lock the client on (`switch_locked`, no leaving the organisation, no mode switching), allow only the `warp` (Traffic and DNS) mode, prepend Cloudflare's default LAN exclusions and fallback suffixes to every managed list, and refuse a split tunnel exclusion broader than a /8 of routable space.
+  - account_a: Gateway proxy on for TCP and UDP, root CA installation off (left to MDM), one-hour override codes. Default profile in exclude mode with one vendor host excluded and `corp.example.com` resolved locally; an Engineering profile without the LAN-range baseline so lab ranges go through the client; a Contractors profile in include mode for one application range.
+  - account_b: none.
+  - Split tunnels decide what Gateway can see: excluded traffic is never evaluated by any DNS, network or HTTP policy.
 - **Pages layer:** emits `pages_access_applications`, which is copied by hand into the zerotrust account tree. The pages token has no Zero Trust scope, so the zerotrust entry is the only protection on those sites.
 - **Tunnels layer:** manages cloudflared tunnels, routes and virtual networks, which private Access destinations and Gateway network rules can target.
-- **Not managed anywhere in the repo** (no resource exists in any module): Gateway egress and resolver policies, DNS locations / proxy endpoints, Zero Trust lists, DLP profiles, WARP device settings profiles and split tunnels, Access custom pages, Access mTLS certificates, CASB. The HLD should list these as dashboard-managed, out of scope or future work.
+- **Not managed anywhere in the repo** (no resource exists in any module): Gateway egress and resolver policies, DNS locations / proxy endpoints, Zero Trust lists, DLP profiles, Access custom pages, Access mTLS certificates, CASB. The HLD should list these as dashboard-managed, out of scope or future work.
 
 # Known issues / open items
 

@@ -12,6 +12,7 @@ deployment/
 │   ├── bulk_redirects/                # own state: URL redirect lists and execution ruleset
 │   ├── d1/                            # own state: D1 databases; schema migrations applied after apply
 │   ├── device_posture/                # own state: device posture checks, MDM and EDR integrations
+│   ├── devices/                       # own state: Cloudflare One Client settings, device profiles, split tunnels
 │   ├── dns/                           # own state: per-zone DNS records
 │   ├── gateway/                       # own state: SWG egress filtering, TLS inspection, root CA
 │   ├── lists/                         # own state: account-level IP, ASN and hostname lists
@@ -37,6 +38,7 @@ deployment/
     │   ├── bulk_redirects.tfvars      # URL redirects    -> bulk_redirects
     │   ├── d1.tfvars                  # D1 inventory     -> d1, workers
     │   ├── device_posture.tfvars      # posture checks   -> device_posture
+    │   ├── devices.tfvars             # device profiles  -> devices
     │   ├── dns.tfvars                 # DNS records      -> dns
     │   ├── gateway.tfvars             # egress filtering -> gateway
     │   ├── lists.tfvars               # shared lists     -> lists
@@ -79,6 +81,7 @@ Tier 2: Foundational Zones & Account Services
 ├── bulk_redirects                     (account-scoped redirect lists and rules; independent of zones)
 ├── d1                                 (account-scoped databases and their migrations; required before workers)
 ├── device_posture                     (account-scoped posture checks and MDM/EDR integrations; required before zerotrust)
+├── devices                            (account-scoped client settings, device profiles and split tunnels; independent of zones)
 ├── gateway                            (account-scoped SWG policies, TLS decryption settings, root CA)
 ├── lists                              (account-scoped IP, ASN, and hostname lists; required before WAF)
 ├── turnstile                          (account-scoped widgets; attached to no zone, so nothing waits on it)
@@ -102,7 +105,7 @@ Tier 3: Zone-Dependent & Consumer Layers
 
 Tier membership is derived directly from the Terraform source code - calling the `zone_base` module means Tier 2, resolving a zone with `data "cloudflare_zone"` means Tier 3 - except where the source cannot express the dependency at all. Those two layers declare their own tier in a `tier.tf` holding `locals { apply_tier = <n> }`, which `tf-matrix.sh` reads in preference to the derivation:
 - **Tier 1 (`account_governance`):** Account-wide permissions and resource-group scopes. Every downstream token is evaluated against what this layer applies, so it runs on its own first. Declared in `tier.tf`, because the dependency is on Cloudflare's authorisation decision rather than on any Terraform attribute.
-- **Tier 2 (`zones`, `ai_gateway`, `bulk_redirects`, `d1`, `device_posture`, `gateway`, `lists`, `turnstile`, `wan`):** `zones` creates the zone containers at Cloudflare. The remaining layers touch no zones, so nothing waits on them. `lists` is deliberately placed in Tier 2 so that named lists exist before `waf` references them, `device_posture` so that a posture rule exists before a `zerotrust` Access policy requires it, and `d1` so that a database and its migrations exist before `workers` looks it up by name and deploys code against it.
+- **Tier 2 (`zones`, `ai_gateway`, `bulk_redirects`, `d1`, `device_posture`, `devices`, `gateway`, `lists`, `turnstile`, `wan`):** `zones` creates the zone containers at Cloudflare. The remaining layers touch no zones, so nothing waits on them. `lists` is deliberately placed in Tier 2 so that named lists exist before `waf` references them, `device_posture` so that a posture rule exists before a `zerotrust` Access policy requires it, and `d1` so that a database and its migrations exist before `workers` looks it up by name and deploys code against it.
 - **Tier 3 (`dns`, `load_balancing`, `logpush`, `notifications`, `origin_pulls`, `pages`, `r2`, `rules`, `tunnels`, `waf`, `workers`, `zerotrust`):** These layers resolve zones dynamically via `data "cloudflare_zone"`, which fails at plan time until Tier 2 has created the zone. `tunnels` resolves one for the proxied CNAME behind each public hostname, `pages` one per zone a custom domain's `zone_key` names, `logpush` one for each zone-scoped job, and `notifications` one for each zone a policy filters on. `origin_pulls` resolves one per zone it configures, and belongs behind `zones` for a second reason: the zone's SSL mode has to be `full` or `strict` before authenticating to the origin means anything. `zerotrust` is included here by declaration in its own `tier.tf`, because Access applications are addressed by hostname and require the corresponding zone and DNS record to exist, yet the layer never reads a zone for the derivation to find.
 
 ## Why split this way
@@ -123,7 +126,7 @@ This design requires the Cloudflare API to be accessible at plan time for consum
 
 `account_governance` queries the API to resolve role, permission group, and resource group names to IDs. `zerotrust` queries the account's existing Zero Trust organisation, to adopt its team name when `zero_trust_team_name` is unset and to refuse an unintended rename when it is set. `gateway` dynamically resolves Cloudflare's content categories, security categories, and application catalogues so that configuration files reference human-readable names like `"Microsoft 365"` rather than arbitrary IDs like `606`.
 
-`wan`, `bulk_redirects`, `lists`, `turnstile`, `ai_gateway`, and `device_posture` are completely account-scoped and contain no zone data sources.
+`wan`, `bulk_redirects`, `lists`, `turnstile`, `ai_gateway`, `device_posture`, and `devices` are completely account-scoped and contain no zone data sources.
 
 ### Reading a layer's outputs
 
@@ -186,6 +189,7 @@ The pipeline maps variable files to layers dynamically. The table below lists th
 | `bulk_redirects`     | `account.tfvars`, `zones.tfvars`, `bulk_redirects.tfvars`             | None                                                                                                                          |
 | `d1`                 | `account.tfvars`, `d1.tfvars`, `tags.tfvars`                          | None                                                                                                                          |
 | `device_posture`     | `account.tfvars`, `device_posture.tfvars`                             | `TF_VAR_device_posture_integration_secrets` (from the `<account>-plan` environment)                                           |
+| `devices`            | `account.tfvars`, `devices.tfvars`                                    | None                                                                                                                          |
 | `dns`                | `account.tfvars`, `zones.tfvars`, `dns.tfvars`                        | None                                                                                                                          |
 | `gateway`            | `account.tfvars`, `gateway.tfvars`                                    | None                                                                                                                          |
 | `lists`              | `account.tfvars`, `lists.tfvars`                                      | None                                                                                                                          |
@@ -237,6 +241,7 @@ Keys are scoped locally to each account tree: `primary` in `account_a` is comple
 - `account_governance`: an unknown role, permission group or resource group name; a restricted role; a member email outside `allowed_email_domains`.
 - `zerotrust`: an unintended team-name change; an Access policy using a restricted decision (`bypass`); an `include` rule admitting an email outside `allowed_email_domains`; an OAuth identity provider without its secret, or a secret with no provider.
 - `device_posture`: a firewall check that passes a disabled firewall, a binary check with no signing thumbprint, a posture result that expires in less than twice its polling period, or a service provider integration missing a setting or its credential.
+- `devices`: a split tunnel exclusion broader than a /8 of routable space, an include-mode split tunnel with nothing in it, an entry that is neither or both of an address and a host, a client mode outside `allowed_device_service_modes`, a custom profile that matches every device, two custom profiles sharing a precedence, or device settings with a switch left unstated.
 - `gateway`: a category or application name that does not resolve; a custom policy in the reserved precedence band; two policies sharing a precedence; an HTTP rule while TLS decryption is off or unmanaged.
 - `waf` and `rules`: two policies for the same zone; an unknown baseline name or a baseline missing its input; managed rulesets or bot traffic below the zone tier they need; a cache rule that could cache a personalised response.
 - `load_balancing`, `pages`, `r2`, `tunnels`, `workers`: a hostname outside the zone its `zone_key` names.
@@ -685,7 +690,102 @@ A firewall check with `enabled = false` always fails the plan: it passes only de
 ### Out of Scope
 - **Zero Trust lists:** the serial number or device ID list a `serial_number` or `unique_client_id` check reads is maintained outside Terraform, and referenced by `list_id`.
 - **Client certificates:** the signing certificate a `client_certificate_v2` check validates against is uploaded separately, and referenced by `certificate_id`.
-- **WARP client deployment and device profiles.**
+- **WARP client deployment.** Device profiles, split tunnels and client settings are the [`devices`](#devices-cloudflare-one-client) layer's.
+
+---
+
+## Devices (Cloudflare One Client)
+
+The `devices` layer manages what the Cloudflare One Client (WARP) does on each device, through [`modules/device_profiles`](../modules/device_profiles/): the account-wide device settings, the default device profile, custom profiles that override it for a matched set of devices, their split tunnels, and their Local Domain Fallback lists. It is account-scoped and reads no zone.
+
+It is its own layer because a device profile decides what reaches Gateway at all. Traffic a split tunnel excludes is never evaluated by any DNS, network or HTTP policy and never logged, and with the Gateway proxy off in device settings, no network or HTTP policy sees device traffic - while the `gateway` layer's plan, and the dashboard, still show every policy as enforced. Its token holds the same `Zero Trust:Edit` as `gateway` and `device_posture`; the separation is of state and of review.
+
+```hcl
+# accounts/account_a/devices.tfvars
+device_settings = {
+  gateway_proxy_enabled                 = true
+  gateway_udp_proxy_enabled             = true
+  root_certificate_installation_enabled = false
+  use_zt_virtual_ip                     = false
+  disable_for_time                      = 3600
+}
+
+device_default_profile = {
+  service_mode = { mode = "warp" }
+  split_tunnel = {
+    mode    = "exclude"
+    entries = [{ host = "videoconf.example.com", description = "Inspected at the vendor" }]
+  }
+  fallback_domains = {
+    domains = [{ suffix = "corp.example.com", dns_servers = ["192.0.2.53"] }]
+  }
+}
+
+device_custom_profiles = {
+  contractors = {
+    name       = "Contractors"
+    precedence = 20
+    match      = { user_group_names = ["Contractors"] }
+    split_tunnel = {
+      mode    = "include"
+      entries = [{ address = "198.51.100.0/24" }]
+    }
+  }
+}
+```
+
+### Profiles and matching
+
+A device gets the first enabled custom profile it matches, in ascending `precedence`, and the default profile if it matches none. `precedence` is required and unique. `match` takes `user_emails`, `user_group_names`, `user_group_ids`, `user_group_emails` and `os_names`, compiled to `( identity terms OR'd ) and ( os_names )`; `match_expression` replaces it with raw wirefilter for anything else (`os.version`, `network`, a SAML attribute). A custom profile that matches every device is refused: that is the default profile's job, and a catch-all custom profile makes the default unreachable. Read `match` in the `device_custom_profiles` output after the first apply to confirm what a compiled profile selects.
+
+`service_mode.mode` is `warp` (Traffic and DNS), `1dot1` (DNS only), `warp_tunnel_only` (Traffic only), `proxy` (local proxy, needs `port`) or `posture_only`. Only `warp` puts every Gateway policy type in play, and the platform allows only `warp` until `allowed_device_service_modes` is widened.
+
+An attribute a profile leaves unset does not keep what the dashboard holds. Provider 5.23 fills most with its own default - `allowed_to_leave = true`, `switch_locked = false`, `captive_portal = 180` - which is why the layer applies `default_device_*` for the three lock-down switches, and why the first plan after adopting the default profile has to be read line by line.
+
+### Split tunnels
+
+Each profile has one `split_tunnel = { mode, entries }`. In `exclude` mode everything goes through Cloudflare except the entries; in `include` mode only the entries do. Cloudflare keeps one mode per profile, so the layer sends only that mode's list. Each entry is exactly one of `address` (a CIDR written as its network address, `/32` for one host) or `host` (a domain, optionally `*.`).
+
+A managed list replaces Cloudflare's own. In exclude mode, Cloudflare's default exclusions - RFC 1918, CGNAT, link-local, multicast - would vanish the moment a profile adds one entry, and printers, NAS boxes and captive portals would start going through Cloudflare. So `baseline_split_tunnel_excludes` is prepended to every exclude list unless the profile sets `include_baseline = false`, which is how a profile sends a private range such as `10.0.0.0/8` through the client to a tunnel.
+
+The plan fails for an exclusion broader than a /8 of routable space (`0.0.0.0/0`, `64.0.0.0/2`, `2000::/3`) or a wildcard over a whole top-level domain (`*.com`), unless `allow_broad_split_tunnel_excludes` is set; for an include list with nothing in it, which would send no traffic to Gateway at all; and for duplicate or malformed entries.
+
+### Local Domain Fallback
+
+`fallback_domains = { domains, include_baseline }` lists suffixes the client resolves with the device's own resolver, or the given `dns_servers`, rather than Gateway. Like the split tunnel, a managed list replaces Cloudflare's defaults, so `baseline_fallback_domains` (`local`, `home.arpa`, `corp` and the rest) is prepended unless `include_baseline = false`. Unset leaves the list unmanaged. Provider 5.23 cannot delete a fallback list: removing one from a profile drops it from state and leaves the last list at Cloudflare.
+
+### Device settings
+
+`device_settings` holds the account-wide switches: the Gateway TCP and UDP proxy, Cloudflare root CA installation (which TLS decryption in `gateway` depends on), CGNAT virtual IPs, admin override codes (`disable_for_time`) and the external emergency disconnect signal. Provider 5.23 cannot import this object, so the first apply writes it from `devices.tfvars` alone. The four switches are therefore required: copy each from the dashboard before setting `device_settings`, or the first apply could switch the proxy off across the fleet by omission. Setting it back to `null` deletes it at Cloudflare, with a reset nobody documents; use a `removed` block with `destroy = false` to stop managing it.
+
+### Adopting what already exists
+
+The default profile exists on every account. `layers/devices/imports.tf` adopts it whenever `device_default_profile` is set (import id: the account ID), and because that import reads the profile during the plan, `devices` is not in CI's offline plan. Custom profiles made in the dashboard are not matched by name: applied alongside one, the layer creates a second profile. `imports.tf` carries the API query and a commented `import` block (`<account_id>/<policy_id>`).
+
+### Governing defaults
+
+| Setting | Default | Effect |
+|---|---|---|
+| `default_device_switch_locked` | `true` | Users cannot switch the client off. An admin override code is the sanctioned way out. |
+| `default_device_allowed_to_leave` | `false` | Users cannot log the device out of the organisation. |
+| `default_device_allow_mode_switch` | `false` | Users cannot move the client to a mode Gateway sees less of. |
+| `allowed_device_service_modes` | `["warp"]` | Fails the plan for any other client mode. |
+| `allow_broad_split_tunnel_excludes` | `false` | Fails the plan for an exclusion broader than a /8 of routable space, or `*.<tld>`. |
+| `baseline_split_tunnel_excludes` | Cloudflare's default exclusions | Prepended to every exclude-mode list. |
+| `baseline_fallback_domains` | Cloudflare's default suffixes | Prepended to every managed fallback list. |
+
+### Out of Scope
+
+- **Client deployment.** Packaging the client and its MDM enrolment parameters is the MDM's job.
+- **Global acceleration, managed networks, device IP profiles, DEX tests and certificates on the default profile.** Not modelled; set in the dashboard.
+- **What a split tunnel host matches.** Whether `example.com` also covers its subdomains is Cloudflare's behaviour, not checked here; use `*.example.com` where subdomains are meant.
+
+### Not yet verified against a live account
+
+- Nothing here has been applied. Every guardrail has been fired and every resource planned offline against provider 5.23.0.
+- The client mode names (`warp`, `1dot1`, `warp_tunnel_only`, `proxy`, `posture_only`), the `os.name` values and the two baseline lists follow Cloudflare's documentation; the provider does not enumerate any of them.
+- Whether Cloudflare returns split tunnel and fallback entries in the order sent is not known. If it reorders them, the plan after the first apply shows a diff on every run; order the entries in `devices.tfvars` to match what the API returns.
+- Moving an existing profile from one split tunnel mode to the other sends the new list and leaves the other unset. How the API treats the old list on that change has not been seen.
 
 ---
 
@@ -1782,13 +1882,14 @@ The Release Manager automates:
 Within your customer's dedicated deployment repository, you can manage multiple administrative accounts (for example: `production`, `staging`, `development`):
 
 1. Create a directory `accounts/<account_name>/`.
-2. Copy all twenty-five template `.tfvars` files from `accounts/account_a/`:
+2. Copy all twenty-six template `.tfvars` files from `accounts/account_a/`:
    - `account.tfvars`
    - `account_governance.tfvars`
    - `ai_gateway.tfvars`
    - `bulk_redirects.tfvars`
    - `d1.tfvars`
    - `device_posture.tfvars`
+   - `devices.tfvars`
    - `dns.tfvars`
    - `gateway.tfvars`
    - `lists.tfvars`

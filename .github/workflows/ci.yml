@@ -142,11 +142,16 @@ jobs:
           set -euo pipefail
 
           # Offline-plannable == makes no Cloudflare read at plan time. Derived,
-          # not listed, so a new layer classifies itself.
+          # not listed, so a new layer classifies itself. An uncommented import
+          # block reads too: it fetches the object it adopts during the plan, so
+          # a dummy token fails it (devices adopts the default device profile).
           offline_layers=()
           for layer_dir in deployment/layers/*/; do
             layer="$(basename "$layer_dir")"
             if grep -rhqE '^[[:space:]]*data[[:space:]]+"cloudflare_' "$layer_dir"*.tf; then
+              continue
+            fi
+            if grep -rhqE '^[[:space:]]*import[[:space:]]*\{' "$layer_dir"*.tf; then
               continue
             fi
             offline_layers+=("$layer")
@@ -387,7 +392,7 @@ jobs:
           # selects every layer for that account by design. d1 is not in it
           # either: d1.tfvars is an inventory shared with workers, asserted
           # below.
-          for layer in account_governance ai_gateway bulk_redirects device_posture dns gateway lists logpush notifications origin_pulls pages r2 rules tunnels turnstile waf wan workers zerotrust; do
+          for layer in account_governance ai_gateway bulk_redirects device_posture devices dns gateway lists logpush notifications origin_pulls pages r2 rules tunnels turnstile waf wan workers zerotrust; do
             if [[ ! -f "deployment/accounts/$acct/$layer.tfvars" ]]; then
               echo "::notice::$acct has no $layer.tfvars - assertion skipped"
               continue

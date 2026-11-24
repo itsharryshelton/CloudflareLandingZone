@@ -51,6 +51,7 @@ cloudflare/cloudflare provider            configured by the layer, never by the 
 | `config_rules` | `rules` | One zone's `http_config_settings` entry-point ruleset (Configuration Rules, such as a per-hostname SSL mode) |
 | `d1_database` | `d1` | One D1 database |
 | `device_posture` | `device_posture` | Device posture rules and service provider integrations |
+| `device_profiles` | `devices` | Cloudflare One Client device settings, the default and custom device profiles, and their Local Domain Fallback lists |
 | `dns_records` | `dns` | One zone's DNS records |
 | `gateway` | `gateway` | Gateway policies, account settings and the inspection root CA |
 | `load_balancer` | `load_balancing` | One monitor, one pool and one load balancer |
