@@ -57,6 +57,16 @@ module "gateway" {
         download_file_types = ["exe"]
       }
     },
+    {
+      # A Gateway list referenced by UUID - the zerotrust_list module's id output.
+      name       = "Block listed domains"
+      type       = "dns"
+      action     = "block"
+      precedence = 40
+      match = {
+        domain_list_ids = ["00000000-0000-4000-8000-000000000001"]
+      }
+    },
   ]
 
   # TLS decryption on, so the HTTP policy passes the uninspected-policy guard;

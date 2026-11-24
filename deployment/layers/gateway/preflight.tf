@@ -5,7 +5,10 @@ resource "terraform_data" "preflight" {
     security_categories = length(var.gateway_security_categories)
     content_categories  = length(var.gateway_blocked_content_categories)
     bypass_applications = length(var.gateway_bypass_applications)
-    dlp_profiles        = length(var.gateway_dlp_profile_ids)
+    dlp_profiles        = length(var.gateway_dlp_profile_ids) + length(var.gateway_dlp_profile_keys)
+    managed_lists       = length(var.gateway_lists)
+    managed_dlp         = length(var.gateway_dlp_profiles)
+    dns_locations       = length(var.gateway_dns_locations)
     tls_decrypt         = var.gateway_settings == null ? "unmanaged" : tostring(try(var.gateway_settings.tls_decrypt.enabled, "unset"))
     inspection_cert     = var.gateway_inspection_certificate == null ? "unmanaged" : "managed"
   }
@@ -30,6 +33,36 @@ resource "terraform_data" "preflight" {
     precondition {
       condition     = length(local.unsatisfied_baselines) == 0
       error_message = "A selected baseline policy has nothing to act on: ${join("; ", local.unsatisfied_baselines)}. An empty selector set renders as `in {}`, which Cloudflare rejects as a syntax error, and a rule that matched nothing would sit in the dashboard looking like a control. Populate the variable or remove the baseline from gateway_baseline_policies."
+    }
+
+    # An unknown key is dropped from the compiled expression rather than failing
+    # it, which leaves a rule broader or narrower than the one written - or, for
+    # the last key a selector had, a rule with that selector gone entirely.
+    precondition {
+      condition     = length(local.unknown_list_keys) == 0
+      error_message = "A policy names a list key that gateway_lists does not define: ${join("; ", local.unknown_list_keys)}. Defined keys: ${join(", ", sort(keys(var.gateway_lists)))}."
+    }
+
+    # Cloudflare accepts a list of the wrong type in any selector and the rule
+    # then matches nothing - an IP list read as hostnames contains no hostnames.
+    precondition {
+      condition     = length(local.mismatched_list_types) == 0
+      error_message = "A policy reads a list through a selector that cannot use its type: ${join("; ", local.mismatched_list_types)}. Domain, host and SNI selectors take DOMAIN lists; destination and source IP selectors take IP lists; url_list_keys takes URL lists; identity.user_email_list_keys takes EMAIL lists. Cloudflare would accept the rule and it would never match."
+    }
+
+    precondition {
+      condition     = length(local.unknown_dlp_profile_keys) == 0
+      error_message = "A DLP profile key is not defined in gateway_dlp_profiles: ${join("; ", local.unknown_dlp_profile_keys)}. Defined keys: ${join(", ", sort(keys(var.gateway_dlp_profiles)))}. A predefined or dashboard-built profile is named by UUID in dlp_profile_ids or gateway_dlp_profile_ids instead."
+    }
+
+    precondition {
+      condition     = length(local.unknown_dns_location_keys) == 0
+      error_message = "A policy names a DNS location key that gateway_dns_locations does not define: ${join("; ", local.unknown_dns_location_keys)}. Defined keys: ${join(", ", sort(keys(var.gateway_dns_locations)))}."
+    }
+
+    precondition {
+      condition     = length(local.default_dns_locations) <= 1
+      error_message = "More than one DNS location sets client_default: ${join(", ", local.default_dns_locations)}. An account has exactly one default location; each apply would hand the flag to whichever Cloudflare wrote last, and the plan after it would show the others drifting. Set it on one."
     }
 
     precondition {

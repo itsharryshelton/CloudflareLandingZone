@@ -103,7 +103,10 @@ locals {
       security_categories = []
       content_categories  = []
       applications        = []
-      dlp_profile_ids     = var.gateway_dlp_profile_ids
+      dlp_profile_ids = concat(
+        var.gateway_dlp_profile_ids,
+        [for key in var.gateway_dlp_profile_keys : local.dlp_profile_ids_by_key[key] if contains(keys(var.gateway_dlp_profiles), key)],
+      )
       download_file_types = []
 
       block_reason          = "This request contained data the organisation does not permit to be sent to this destination."
@@ -149,8 +152,8 @@ locals {
       reason    = "gateway_bypass_applications is empty, so this rule would exempt nothing from inspection while appearing in the dashboard as a bypass."
     }
     block_dlp_matches = {
-      satisfied = length(var.gateway_dlp_profile_ids) > 0
-      reason    = "gateway_dlp_profile_ids is empty. DLP profiles are defined in the Zero Trust dashboard and referenced by UUID; without one there is nothing for this rule to match."
+      satisfied = length(var.gateway_dlp_profile_ids) + length(var.gateway_dlp_profile_keys) > 0
+      reason    = "gateway_dlp_profile_keys and gateway_dlp_profile_ids are both empty. Name a profile from gateway_dlp_profiles by key, or a predefined or dashboard-built profile by UUID; without one there is nothing for this rule to match."
     }
     quarantine_risky_downloads = {
       satisfied = length(var.gateway_quarantine_file_types) > 0

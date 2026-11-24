@@ -84,15 +84,34 @@ variable "gateway_policies" {
       destination_ip_cidrs  - destination ranges. On a dns policy this is the RESOLVED
                               address, so it is evaluated after the answer comes back
 
+    Gateway list references - KEYS into gateway_lists, each list one more
+    destination term. The list's type must suit the selector, and the plan
+    fails naming the policy if it does not:
+
+      domain_list_keys         - DOMAIN lists, matched like `domains`. dns and http
+      host_list_keys           - DOMAIN lists, matched like `hosts`. dns and http
+      sni_domain_list_keys     - DOMAIN lists, matched like `sni_domains`. network
+      sni_host_list_keys       - DOMAIN lists, matched like `sni_hosts`. network
+      url_list_keys            - URL lists. http only, and never on a Do Not
+                                 Inspect policy: the path is encrypted
+      destination_ip_list_keys - IP lists, matched like `destination_ip_cidrs`
+
     Constraints - each is OR'd internally and AND'd against the rest:
 
       source_ip_cidrs       - where the request came from
+      source_ip_list_keys   - KEYS into gateway_lists, IP type. OR'd with
+                              source_ip_cidrs
       destination_ports     - network only
       protocols             - network only. "tcp", "udp" or "icmp"
       http_methods          - http only
-      dlp_profile_ids       - http only. DLP profile UUIDs from the dashboard. A match
+      dlp_profile_keys      - http only. KEYS into gateway_dlp_profiles. A match
                               means the request body contained what the profile
                               describes
+      dlp_profile_ids       - http only. DLP profile UUIDs for profiles NOT managed
+                              here - Cloudflare's predefined profiles, or one
+                              built in the dashboard. OR'd with dlp_profile_keys
+      dns_location_keys     - dns only. KEYS into gateway_dns_locations: the query
+                              arrived through one of these locations
       upload_file_types     - http only. OR'd with download_file_types
       download_file_types   - http only
 
@@ -100,7 +119,8 @@ variable "gateway_policies" {
                               with an allowed list carved out
 
     `identity` restricts to people rather than traffic, and its terms are OR'd:
-    `user_emails`, `user_group_names`, `user_group_emails`, `user_group_ids`.
+    `user_emails`, `user_group_names`, `user_group_emails`, `user_group_ids`,
+    and `user_email_list_keys` (keys into gateway_lists, EMAIL type).
     Group names are the ones the identity provider sends, which for Entra ID means
     the group's display name and needs `support_groups` on the provider in the
     zerotrust layer.
@@ -172,13 +192,24 @@ variable "gateway_policies" {
       dlp_profile_ids      = optional(list(string), [])
       upload_file_types    = optional(list(string), [])
       download_file_types  = optional(list(string), [])
+
+      domain_list_keys         = optional(list(string), [])
+      host_list_keys           = optional(list(string), [])
+      sni_domain_list_keys     = optional(list(string), [])
+      sni_host_list_keys       = optional(list(string), [])
+      url_list_keys            = optional(list(string), [])
+      destination_ip_list_keys = optional(list(string), [])
+      source_ip_list_keys      = optional(list(string), [])
+      dlp_profile_keys         = optional(list(string), [])
+      dns_location_keys        = optional(list(string), [])
     }), {})
 
     identity = optional(object({
-      user_emails       = optional(list(string), [])
-      user_group_names  = optional(list(string), [])
-      user_group_emails = optional(list(string), [])
-      user_group_ids    = optional(list(string), [])
+      user_emails          = optional(list(string), [])
+      user_group_names     = optional(list(string), [])
+      user_group_emails    = optional(list(string), [])
+      user_group_ids       = optional(list(string), [])
+      user_email_list_keys = optional(list(string), [])
     }), {})
 
     device_posture_check_ids = optional(list(string), [])
@@ -279,6 +310,7 @@ variable "gateway_baseline_policies" {
                                                     gateway_bypass_applications.
       block_dlp_matches            http block       Requests whose body matches a DLP
                                                     profile. Needs
+                                                    gateway_dlp_profile_keys or
                                                     gateway_dlp_profile_ids.
       quarantine_risky_downloads   http quarantine  Executable downloads to the file
                                                     sandbox. Needs
@@ -373,11 +405,14 @@ variable "gateway_dlp_profile_ids" {
   type        = list(string)
   default     = []
   description = <<-EOT
-    DLP profile UUIDs the baseline DLP rule blocks on. Data Loss Prevention
-    profiles are defined in the Zero Trust dashboard under DLP, and Cloudflare
-    exposes no data source that resolves one by name, so these arrive as IDs
-    rather than names - the one place in this layer where an opaque identifier is
-    unavoidable.
+    DLP profile UUIDs the baseline DLP rule blocks on, for profiles NOT managed
+    by this layer: Cloudflare's predefined profiles (Financial Information,
+    Credentials and Secrets, ...) and anything built in the dashboard.
+    Cloudflare exposes no data source that resolves a DLP profile by name, so
+    these arrive as IDs.
+
+    A profile this layer manages in gateway_dlp_profiles is named by key in
+    gateway_dlp_profile_keys instead. The two are combined.
 
     A DLP match is produced by scanning the decrypted request body, so it works
     only on HTTP policies and only where the traffic is actually inspected.
@@ -389,7 +424,196 @@ variable "gateway_dlp_profile_ids" {
       for id in var.gateway_dlp_profile_ids :
       can(regex("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$", id))
     ])
-    error_message = "Each gateway_dlp_profile_ids entry must be a UUID, copied from the DLP profile in the Zero Trust dashboard."
+    error_message = "Each gateway_dlp_profile_ids entry must be a UUID, copied from the DLP profile in the Zero Trust dashboard. For a profile defined in gateway_dlp_profiles, use its key in gateway_dlp_profile_keys."
+  }
+}
+
+variable "gateway_dlp_profile_keys" {
+  type        = list(string)
+  default     = []
+  description = <<-EOT
+    Keys into gateway_dlp_profiles that the baseline DLP rule blocks on. The
+    layer resolves each to the profile's UUID, so the account tree names what
+    the profile is rather than carrying an opaque ID. Combined with
+    gateway_dlp_profile_ids. An unknown key fails the plan.
+  EOT
+}
+
+variable "gateway_lists" {
+  description = <<-EOT
+    Zero Trust lists for this account, keyed by a logical key that policies use
+    in their *_list_keys selectors. Each becomes one zerotrust_list module
+    instance; the key is part of its address, so renaming the key replaces the
+    list (a new UUID, and every policy reading it rewritten in the same apply).
+
+    - `name`        - Display name in the dashboard. Free to change.
+    - `type`        - DOMAIN, IP, URL, EMAIL, SERIAL, AAGUID, CATEGORY, LOCATION
+                      or DEVICE. Fixed at creation. Which selectors take which:
+                        DOMAIN - domain_list_keys, host_list_keys,
+                                 sni_domain_list_keys, sni_host_list_keys
+                        IP     - destination_ip_list_keys, source_ip_list_keys
+                        URL    - url_list_keys
+                        EMAIL  - identity.user_email_list_keys
+                      The others are created and output but no policy selector
+                      here reads them; use a raw expression with the list's
+                      reference from the lists output.
+    - `description` - (Optional) Why the list exists.
+    - `items`       - The entries, `{ value, description }`. Terraform owns them
+                      all: an entry added in the dashboard is removed by the next
+                      apply. Checked against the type at plan.
+    - `max_items`   - (Optional) Ceiling on entries, default 1000.
+
+    A list change changes what every policy reading it matches, and none of
+    those policies appears in the plan. Review a list diff with that in mind.
+  EOT
+  type = map(object({
+    name        = string
+    type        = string
+    description = optional(string)
+    items = list(object({
+      value       = string
+      description = optional(string)
+    }))
+    max_items = optional(number, 1000)
+  }))
+  default = {}
+
+  validation {
+    condition     = alltrue([for key in keys(var.gateway_lists) : can(regex("^[a-z0-9_]+$", key))])
+    error_message = "gateway_lists keys must be lowercase alphanumeric with underscores - they become Terraform resource addresses and the names policies use in *_list_keys."
+  }
+
+  validation {
+    condition     = length(distinct([for list in var.gateway_lists : lower(trimspace(list.name))])) == length(var.gateway_lists)
+    error_message = "Two gateway_lists entries share a name. The policy builder's list picker shows names only, so two lists of one name are indistinguishable there."
+  }
+}
+
+variable "gateway_dlp_profiles" {
+  description = <<-EOT
+    Custom DLP profiles for this account, keyed by a logical key that policies
+    use in match.dlp_profile_keys and the baseline uses in
+    gateway_dlp_profile_keys. Each becomes one dlp_profile module instance.
+
+    - `name`                 - Display name in the dashboard and Gateway logs.
+    - `description`          - (Optional) What the profile is meant to catch.
+    - `entries`              - The patterns: `{ name, regex, enabled, description,
+                               validation }`. `validation = "luhn"` adds a
+                               check-digit test. A pattern that does not compile,
+                               or that matches the empty string (and so every
+                               request body), fails the plan.
+    - `allowed_match_count`  - (Optional) Matches tolerated before the profile
+                               fires. 0 - Cloudflare's default - is one match.
+    - `confidence_threshold` - (Optional) low, medium, high or very_high.
+    - `ocr_enabled`          - (Optional) Also scan text inside images.
+    - `ai_context_enabled`   - (Optional) Let AI context analysis suppress matches.
+
+    Cloudflare's predefined profiles already exist on every account and are not
+    created here; reference one by UUID in gateway_dlp_profile_ids or a policy's
+    match.dlp_profile_ids.
+
+    A profile only sees decrypted traffic, so it does nothing while
+    gateway_settings.tls_decrypt is off or for a bypassed application.
+  EOT
+  type = map(object({
+    name        = string
+    description = optional(string)
+    entries = list(object({
+      name        = string
+      regex       = string
+      enabled     = optional(bool, true)
+      description = optional(string)
+      validation  = optional(string)
+    }))
+    allowed_match_count  = optional(number)
+    confidence_threshold = optional(string)
+    ocr_enabled          = optional(bool)
+    ai_context_enabled   = optional(bool)
+  }))
+  default = {}
+
+  validation {
+    condition     = alltrue([for key in keys(var.gateway_dlp_profiles) : can(regex("^[a-z0-9_]+$", key))])
+    error_message = "gateway_dlp_profiles keys must be lowercase alphanumeric with underscores - they become Terraform resource addresses and the names policies use in dlp_profile_keys."
+  }
+
+  validation {
+    condition     = length(distinct([for profile in var.gateway_dlp_profiles : lower(trimspace(profile.name))])) == length(var.gateway_dlp_profiles)
+    error_message = "Two gateway_dlp_profiles entries share a name. The name is what a Gateway log line records for a DLP match, so two of one name cannot be told apart in an investigation."
+  }
+}
+
+variable "gateway_dns_locations" {
+  description = <<-EOT
+    Gateway DNS locations for this account - sites whose DNS is filtered
+    without the Cloudflare One client - keyed by a logical key that DNS policies
+    use in match.dns_location_keys. Each becomes one dns_location module
+    instance.
+
+    - `name`                         - Display name, shown against every query in
+                                       the DNS logs.
+    - `client_default`               - (Optional) The location client queries are
+                                       attributed to. At most one per account.
+    - `ecs_support`                  - (Optional) Forward EDNS Client Subnet.
+    - `networks`                     - (Optional) The site's public IPv4 egress
+                                       ranges, /24 or smaller. Needed for the IPv4
+                                       endpoint on the shared resolver addresses.
+    - `dns_destination_ips_id`       - (Optional) A dedicated IPv4 resolver pair.
+    - `endpoints`                    - (Optional) `ipv4`, `ipv6`, `doh`, `dot`,
+                                       each off unless enabled. `networks`
+                                       restricts sources; `doh.require_token`
+                                       demands a user identity token.
+    - `max_ttl`                      - (Optional) `{ mode, ttl_secs }`: inherit,
+                                       override or disabled.
+    - `allow_unrestricted_endpoints` - (Optional) Permit an IPv6, DoH or DoT
+                                       endpoint that answers any source. Off:
+                                       whoever learns the address resolves through
+                                       this account's policies, internal names
+                                       included.
+
+    The resolver addresses, DoH URL and DoT hostname to configure on the site
+    are in the dns_locations output after apply.
+  EOT
+  type = map(object({
+    name                   = string
+    client_default         = optional(bool, false)
+    ecs_support            = optional(bool, false)
+    networks               = optional(list(string), [])
+    dns_destination_ips_id = optional(string)
+    endpoints = optional(object({
+      ipv4 = optional(object({
+        enabled = optional(bool, false)
+      }), {})
+      ipv6 = optional(object({
+        enabled  = optional(bool, false)
+        networks = optional(list(string), [])
+      }), {})
+      doh = optional(object({
+        enabled       = optional(bool, false)
+        networks      = optional(list(string), [])
+        require_token = optional(bool, false)
+      }), {})
+      dot = optional(object({
+        enabled  = optional(bool, false)
+        networks = optional(list(string), [])
+      }), {})
+    }), {})
+    max_ttl = optional(object({
+      mode     = string
+      ttl_secs = optional(number)
+    }))
+    allow_unrestricted_endpoints = optional(bool, false)
+  }))
+  default = {}
+
+  validation {
+    condition     = alltrue([for key in keys(var.gateway_dns_locations) : can(regex("^[a-z0-9_]+$", key))])
+    error_message = "gateway_dns_locations keys must be lowercase alphanumeric with underscores - they become Terraform resource addresses and the names policies use in dns_location_keys."
+  }
+
+  validation {
+    condition     = length(distinct([for location in var.gateway_dns_locations : lower(trimspace(location.name))])) == length(var.gateway_dns_locations)
+    error_message = "Two gateway_dns_locations entries share a name. The name is what the DNS logs show for every query, so two of one name make the logs ambiguous."
   }
 }
 

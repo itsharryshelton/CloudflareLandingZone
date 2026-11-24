@@ -37,8 +37,9 @@ terraform {
   #
   # This layer's state holds no credentials, but it does hold the complete egress
   # filtering posture of the estate: every category and application that is
-  # inspected or bypassed, every DLP profile in force, and every internal range
-  # named in a source or destination selector. Read as a whole it is a map of
+  # inspected or bypassed, every DLP profile in force and the exact patterns it
+  # matches, every list entry, every site's egress range and resolver endpoint,
+  # and every internal range named in a selector. Read as a whole it is a map of
   # what is watched and what is not, which is exactly what somebody planning to
   # move data out would want. Keep the bucket private and treat a saved plan file
   # the same way.

@@ -14,7 +14,7 @@ deployment/
 │   ├── device_posture/                # own state: device posture checks, MDM and EDR integrations
 │   ├── devices/                       # own state: Cloudflare One Client settings, device profiles, split tunnels
 │   ├── dns/                           # own state: per-zone DNS records
-│   ├── gateway/                       # own state: SWG egress filtering, TLS inspection, root CA
+│   ├── gateway/                       # own state: SWG egress filtering, TLS inspection, root CA, lists, DLP profiles, DNS locations
 │   ├── lists/                         # own state: account-level IP, ASN and hostname lists
 │   ├── load_balancing/                # own state: monitors, pools, zone load balancers
 │   ├── logpush/                       # own state: Logpush jobs, account and zone log streams
@@ -82,7 +82,7 @@ Tier 2: Foundational Zones & Account Services
 ├── d1                                 (account-scoped databases and their migrations; required before workers)
 ├── device_posture                     (account-scoped posture checks and MDM/EDR integrations; required before zerotrust)
 ├── devices                            (account-scoped client settings, device profiles and split tunnels; independent of zones)
-├── gateway                            (account-scoped SWG policies, TLS decryption settings, root CA)
+├── gateway                            (account-scoped SWG policies, TLS decryption settings, root CA, Zero Trust lists, DLP profiles, DNS locations)
 ├── lists                              (account-scoped IP, ASN, and hostname lists; required before WAF)
 ├── turnstile                          (account-scoped widgets; attached to no zone, so nothing waits on it)
 ├── ai_gateway                         (account-scoped AI gateways and routes; reached by URL, attached to no zone)
@@ -242,7 +242,7 @@ Keys are scoped locally to each account tree: `primary` in `account_a` is comple
 - `zerotrust`: an unintended team-name change; an Access policy using a restricted decision (`bypass`); an `include` rule admitting an email outside `allowed_email_domains`; an OAuth identity provider without its secret, or a secret with no provider.
 - `device_posture`: a firewall check that passes a disabled firewall, a binary check with no signing thumbprint, a posture result that expires in less than twice its polling period, or a service provider integration missing a setting or its credential.
 - `devices`: a split tunnel exclusion broader than a /8 of routable space, an include-mode split tunnel with nothing in it, an entry that is neither or both of an address and a host, a client mode outside `allowed_device_service_modes`, a custom profile that matches every device, two custom profiles sharing a precedence, or device settings with a switch left unstated.
-- `gateway`: a category or application name that does not resolve; a custom policy in the reserved precedence band; two policies sharing a precedence; an HTTP rule while TLS decryption is off or unmanaged.
+- `gateway`: a category or application name that does not resolve; a custom policy in the reserved precedence band; two policies sharing a precedence; an HTTP rule while TLS decryption is off or unmanaged; a list, DLP profile or DNS location key that is not defined; a list whose type does not suit its selector; a DLP pattern that matches the empty string; a DNS location endpoint open to any source.
 - `waf` and `rules`: two policies for the same zone; an unknown baseline name or a baseline missing its input; managed rulesets or bot traffic below the zone tier they need; a cache rule that could cache a personalised response.
 - `load_balancing`, `pages`, `r2`, `tunnels`, `workers`: a hostname outside the zone its `zone_key` names.
 - `r2`: public `.r2.dev` access, wildcard CORS, or a bucket-wide deleting lifecycle rule.
@@ -688,7 +688,7 @@ Whatever `derive_posture_expiration` says, an explicit expiration shorter than t
 A firewall check with `enabled = false` always fails the plan: it passes only devices whose firewall is off.
 
 ### Out of Scope
-- **Zero Trust lists:** the serial number or device ID list a `serial_number` or `unique_client_id` check reads is maintained outside Terraform, and referenced by `list_id`.
+- **Zero Trust lists:** the serial number or device ID list a `serial_number` or `unique_client_id` check reads is not managed by this layer, and is referenced by `list_id`. It can be created as a `SERIAL` or `DEVICE` entry in the `gateway` layer's `gateway_lists`; this layer cannot read that state, so copy the ID from the `gateway` layer's `lists` output after it applies.
 - **Client certificates:** the signing certificate a `client_certificate_v2` check validates against is uploaded separately, and referenced by `certificate_id`.
 - **WARP client deployment.** Device profiles, split tunnels and client settings are the [`devices`](#devices-cloudflare-one-client) layer's.
 
@@ -921,7 +921,7 @@ Both are read by the plan, so the pipeline takes them from the `<account>-plan` 
 
 ## Gateway (Secure Web Gateway)
 
-The `gateway` layer manages outbound corporate egress filtering: DNS policies, network L4 policies, HTTP L7 inspection rules, account-level Gateway settings, and automated root CA certificate lifecycle.
+The `gateway` layer manages outbound corporate egress filtering: DNS policies, network L4 policies, HTTP L7 inspection rules, account-level Gateway settings, automated root CA certificate lifecycle, and the Zero Trust lists, custom DLP profiles and DNS locations those policies read.
 
 ### Three Enforcement Pipelines
 
@@ -931,7 +931,7 @@ The `gateway` layer manages outbound corporate egress filtering: DNS policies, n
 | `network` | L4 connection (TCP/UDP/ICMP) | Ports, IP addresses, TLS SNI | `allow`, `block`, `l4_override` |
 | `http` | Decrypted L7 HTTP/HTTPS traffic | Full URL path, query strings, headers, body | `allow`, `block`, `on`, `off`, `scan`, `noscan`, `isolate`, `noisolate`, `quarantine`, `redirect` |
 
-An action from another pipeline fails the plan. `override`, `l4_override`, `quarantine` and `redirect` each need their matching `settings` block. Selectors are per pipeline too: `domains` and `hosts` on `dns` and `http`; `sni_domains`, `sni_hosts`, `destination_ports` and `protocols` on `network` only; methods, file types and DLP profiles on `http` only. A policy with no selector fails unless it sets `match_all_traffic = true`, which `allow`, `off`, `noscan` and `noisolate` may not. `device_posture_check_ids` sits on the policy itself, not under `match`.
+An action from another pipeline fails the plan. `override`, `l4_override`, `quarantine` and `redirect` each need their matching `settings` block. Selectors are per pipeline too: `domains` and `hosts` (and their list forms) on `dns` and `http`; `sni_domains`, `sni_hosts`, their list forms, `destination_ports` and `protocols` on `network` only; methods, file types, DLP profiles and URL lists on `http` only; DNS locations on `dns` only. A policy with no selector fails unless it sets `match_all_traffic = true`, which `allow`, `off`, `noscan` and `noisolate` may not. `device_posture_check_ids` sits on the policy itself, not under `match`.
 
 ### Precedence Architecture
 Gateway evaluates policies in ascending precedence order within each pipeline. Lower precedence numbers execute first.
@@ -961,6 +961,42 @@ gateway_policies = {
   }
 }
 ```
+
+### Lists, DLP profiles and DNS locations
+
+Three kinds of Zero Trust object that policies point at live in this layer too, each through its own module, so a policy and the object it reads change in one plan under one approval. A policy names them by key, and the layer resolves each key to the object's UUID.
+
+| Variable | Module | Read by |
+|---|---|---|
+| `gateway_lists` | [`zerotrust_list`](../modules/zerotrust_list/) | `domain_list_keys`, `host_list_keys`, `sni_domain_list_keys`, `sni_host_list_keys`, `url_list_keys`, `destination_ip_list_keys`, `source_ip_list_keys` under `match`, and `identity.user_email_list_keys` |
+| `gateway_dlp_profiles` | [`dlp_profile`](../modules/dlp_profile/) | `match.dlp_profile_keys`, and `gateway_dlp_profile_keys` for the baseline DLP rule |
+| `gateway_dns_locations` | [`dns_location`](../modules/dns_location/) | `match.dns_location_keys`, on `dns` policies only |
+
+```hcl
+gateway_lists = {
+  threat_feed_domains = {
+    name  = "Threat feed domains"
+    type  = "DOMAIN"
+    items = [{ value = "example.net", description = "Placeholder" }]
+  }
+}
+
+gateway_policies = {
+  block_threat_feed_domains = {
+    name       = "Block threat feed domains"
+    type       = "dns"
+    action     = "block"
+    precedence = 170
+    match      = { domain_list_keys = ["threat_feed_domains"] }
+  }
+}
+```
+
+A list selector compiles to Cloudflare's `in $<uuid>` form, one term per list, OR'd with the other destination terms. `source_ip_list_keys` is OR'd with `source_ip_cidrs`. The list's type has to suit the selector - DOMAIN for the domain, host and SNI selectors, IP for the IP selectors, URL for `url_list_keys`, EMAIL for `user_email_list_keys` - and a mismatch fails the plan, because Cloudflare accepts it and the rule never matches. Terraform owns every entry: one added in the dashboard is removed by the next apply. Changing a list's entries changes what every policy reading it matches, and none of those policies shows in the plan.
+
+`gateway_dlp_profiles` creates custom profiles, each with its entries as separate `cloudflare_zero_trust_dlp_custom_entry` resources. A pattern that does not compile under RE2, or that matches the empty string - and so every request body - fails the plan. Cloudflare's predefined profiles already exist on every account and are not created here; name one by UUID in `gateway_dlp_profile_ids` or a policy's `match.dlp_profile_ids`, since no data source resolves a profile by name.
+
+`gateway_dns_locations` creates sites whose DNS is filtered without the Cloudflare One client. Every endpoint is off unless enabled. The IPv4 endpoint needs the site's public egress range in `networks` (or a dedicated address pair), because on the shared resolver addresses that is the only thing tying a query to the site. An IPv6, DoH or DoT endpoint with no source restriction - and, for DoH, no `require_token` - answers anybody who learns its address and lets them resolve through the account's policies, so it fails the plan unless the location sets `allow_unrestricted_endpoints = true`. At most one location may set `client_default`. The addresses to configure on the site are in the `dns_locations` output after apply.
 
 ### Account Settings & TLS Decryption
 `gateway_settings = null`, the platform default, leaves the account's Gateway settings unmanaged, and the dashboard stays authoritative. The settings object already exists on every Zero Trust account, so to manage it, import it first, at `module.gateway.cloudflare_zero_trust_gateway_settings.this["<account_id>"]` - without the import, the first apply writes it from this configuration alone and drops whatever the dashboard held.
@@ -1001,7 +1037,7 @@ The platform baseline is a catalogue of six policies in `layers/gateway/locals.g
 | `bypass_trusted_applications` | `http` | `off` | 20 | `gateway_bypass_applications` |
 | `block_security_threats_http` | `http` | `block` | 30 | `gateway_security_categories` |
 | `block_disallowed_content` | `dns` | `block` | 40 | `gateway_blocked_content_categories` |
-| `block_dlp_matches` | `http` | `block` | 50 | `gateway_dlp_profile_ids` |
+| `block_dlp_matches` | `http` | `block` | 50 | `gateway_dlp_profile_keys`, `gateway_dlp_profile_ids` |
 | `quarantine_risky_downloads` | `http` | `quarantine` | 60 | `gateway_quarantine_file_types` |
 
 Category and application names match case-insensitively, and one that does not resolve fails the plan. The API does not tell content categories from security categories, so a name put in the wrong variable resolves but never matches.
