@@ -106,6 +106,32 @@ variable "always_use_https" {
   }
 }
 
+variable "dnssec" {
+  type        = bool
+  default     = false
+  description = <<-EOT
+    Sign the zone with DNSSEC, Cloudflare holding the keys. Off by default
+    because not every zone can take it: a partial or internal zone has no
+    public authoritative answer for Cloudflare to sign, and a domain whose
+    registrar or TLD cannot publish a DS record gains nothing from it.
+
+    Turning it on is half the job. Cloudflare reports the zone as "pending"
+    until the DS record in the `dnssec` output is published at the registrar
+    (Cloudflare Registrar does this itself), and until then validating
+    resolvers treat the zone as unsigned.
+
+    While pending, the provider plans an update from "pending" to "active" on
+    every run. The update is harmless, and it stops once the DS record is live,
+    so a zone that keeps showing it is a zone whose DS record has not been published.
+
+    TURNING IT OFF IS NOT SAFE ON ITS OWN. Setting this back to false destroys
+    the resource, which disables DNSSEC at Cloudflare. If the DS record is still
+    at the registrar, validating resolvers then reject every answer for the
+    zone and it stops resolving for most of the internet. Remove the DS record
+    first, wait out the parent zone's DS TTL, and only then set this to false.
+  EOT
+}
+
 variable "zone_settings" {
   type        = map(string)
   description = <<-EOT
@@ -138,6 +164,13 @@ variable "zone_settings" {
   validation {
     condition     = alltrue([for id, value in var.zone_settings : trimspace(id) != "" && trimspace(value) != ""])
     error_message = "zone_settings must not contain empty setting IDs or empty values."
+  }
+
+  # DNSSEC reads like a zone setting but is its own API, so a "dnssec" key here
+  # would only fail at apply, as an unknown setting.
+  validation {
+    condition     = !contains([for id in keys(var.zone_settings) : lower(trimspace(id))], "dnssec")
+    error_message = "zone_settings must not contain \"dnssec\": DNSSEC is not a zone setting. Use the `dnssec` variable instead (zone_config.<key>.dnssec = true in the zones layer)."
   }
 }
 

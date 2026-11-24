@@ -14,6 +14,7 @@ locals {
       min_tls_version  = coalesce(try(var.zone_config[key].min_tls_version, null), var.default_min_tls_version)
       tls_1_3          = coalesce(try(var.zone_config[key].tls_1_3, null), var.default_tls_1_3)
       always_use_https = coalesce(try(var.zone_config[key].always_use_https, null), var.default_always_use_https)
+      dnssec           = coalesce(try(var.zone_config[key].dnssec, null), var.default_dnssec)
 
       # Tier comes from the inventory, not from zone_config: the waf layer needs
       # it to gate bot traffic rules and is only ever given the inventory file.

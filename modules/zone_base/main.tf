@@ -19,6 +19,23 @@ resource "cloudflare_zone_setting" "this" {
   value      = each.value
 }
 
+resource "cloudflare_zone_dnssec" "this" {
+  count = var.dnssec ? 1 : 0
+
+  zone_id = cloudflare_zone.this.id
+
+  # Set explicitly: status is optional but not computed, so leaving it out plans
+  # a change to null against the "active" the API returns, on every run.
+  status = "active"
+
+  lifecycle {
+    precondition {
+      condition     = contains(["full", "secondary"], var.zone_type)
+      error_message = "dnssec = true needs a zone_type of full or secondary; ${var.domain_name} is ${var.zone_type}. A partial zone's DNS is answered by another provider, which is where it has to be signed, and an internal zone is never resolved publicly."
+    }
+  }
+}
+
 resource "cloudflare_dns_record" "this" {
   for_each = local.dns_records
 

@@ -14,6 +14,9 @@
 #   min_tls_version      1.0 | 1.1 | 1.2 | 1.3
 #   tls_1_3              on | off | zrt  (zrt adds 0-RTT; only for idempotent origins)
 #   always_use_https     on | off
+#   dnssec               true signs the zone (full or secondary only); publish the
+#                        DS record from the zones layer's `dnssec` output at the
+#                        registrar. Remove that DS record BEFORE setting it back to false.
 #   zone_settings        extra setting_id => value pairs, merged over the defaults
 #   manage_subscription  BILLING - lets Terraform move this zone's rate plan
 #   bot_management       replaces the account-wide default wholesale
@@ -25,5 +28,9 @@ zone_config = {
     min_tls_version  = "1.2"
     always_use_https = "on"
     security_level   = "medium"
+
+    # Sign this zone. After apply, publish the DS record from the zones layer's
+    # `dnssec` output at the registrar.
+    dnssec = true
   }
 }

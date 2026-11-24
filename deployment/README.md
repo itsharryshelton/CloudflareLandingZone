@@ -284,11 +284,30 @@ zone_config = {
 }
 ```
 
-A `zone_config` entry may also set `zone_type` (`full`, `partial`, `secondary` or `internal`), `paused`, `tls_1_3`, `manage_subscription` and `bot_management`. Any other zone setting goes in `zone_settings` as `setting_id = value`, merged over `default_zone_settings`; the dedicated fields above win over a `zone_settings` key of the same name. Every zone also gets `zone_base`'s own baseline: `automatic_https_rewrites`, `opportunistic_encryption`, `browser_check` and `http3` on. A zone's `bot_management` block replaces `default_bot_management` wholesale rather than merging with it, and a field the zone's `zone_tier` does not support fails the plan.
+A `zone_config` entry may also set `zone_type` (`full`, `partial`, `secondary` or `internal`), `paused`, `tls_1_3`, `dnssec`, `manage_subscription` and `bot_management`. Any other zone setting goes in `zone_settings` as `setting_id = value`, merged over `default_zone_settings`; the dedicated fields above win over a `zone_settings` key of the same name. Every zone also gets `zone_base`'s own baseline: `automatic_https_rewrites`, `opportunistic_encryption`, `browser_check` and `http3` on. A zone's `bot_management` block replaces `default_bot_management` wholesale rather than merging with it, and a field the zone's `zone_tier` does not support fails the plan.
 
 Removing a setting or a `bot_management` block does not revert it. Neither has a delete operation at Cloudflare, so the planned destroy only drops it from state, and the last applied value stays live on the zone - see the [Notes](../.github/workflows/README.md#notes) on planned destroys.
 
 A new zone stays `pending` until the registrar points at the nameservers in this layer's `name_servers` output.
+
+### DNSSEC
+
+`zone_config.<key>.dnssec = true` signs a zone with DNSSEC, Cloudflare holding the keys. It is off by default (`default_dnssec = false`) because not every zone can take it: it needs `zone_type` `full` or `secondary` (anything else fails the plan), and it only protects the zone once the registrar publishes the DS record. `dnssec` is its own field rather than a `zone_settings` key, because DNSSEC has its own API; a `dnssec` key in `zone_settings` fails the plan.
+
+```hcl
+# accounts/account_a/zone_config.tfvars
+zone_config = {
+  primary = {
+    dnssec = true
+  }
+}
+```
+
+1. Apply. The layer's `dnssec` output gives each signed zone's DS record, as the full `ds` string and as its parts (key tag, algorithm, digest type, digest).
+2. Publish it at the registrar. Cloudflare Registrar does this itself.
+3. Until the registrar publishes it, Cloudflare reports the zone as `pending`, and every plan shows an update from `pending` to `active` ([terraform-provider-cloudflare #7467](https://github.com/cloudflare/terraform-provider-cloudflare/issues/7467)). The update is harmless. A zone that keeps showing it is a zone whose DS record is not yet published.
+
+`false` means unmanaged, not disabled: DNSSEC turned on outside Terraform is left alone. **Switching a zone from `true` back to `false` disables DNSSEC at Cloudflare.** If the DS record is still at the registrar, validating resolvers then reject every answer for the zone, and it stops resolving for most users. Remove the DS record at the registrar first, wait out the parent zone's DS TTL, and only then set `dnssec = false`. The same applies to flipping `default_dnssec` while zones rely on it.
 
 `zone_config.<key>.dns_records` still exists, from before DNS moved to its own layer: records declared there are created by the `zones` layer, in its state. Keep each zone's records in exactly one layer; new records belong in `dns.tfvars`.
 
@@ -300,6 +319,7 @@ A new zone stays `pending` until the registrar points at the nameservers in this
 | `default_min_tls_version` | `"1.2"` | Rejects legacy TLS 1.0 and 1.1 connections edge-wide. |
 | `default_tls_1_3` | `"on"` | Enables TLS 1.3 without 0-RTT by default (0-RTT requires idempotent origins). |
 | `default_always_use_https` | `"on"` | Automatically redirects HTTP requests to HTTPS with a 301 redirect. |
+| `default_dnssec` | `false` | DNSSEC is managed only for zones that set `zone_config.<key>.dnssec = true`. Not every zone can be signed, so this stays off fleet-wide. See [DNSSEC](#dnssec). |
 | `default_zone_settings` | `{ security_level = "medium" }` | Settings every zone gets, beneath its own `zone_settings`. |
 | `default_zone_tier` | `"free"` | The plan assumed for a zone with no `zone_tier`. It decides which bot management fields are allowed, and is the plan bought when a subscription is managed. |
 | `default_bot_management` | `null` | No bot management resource is created, and the zone's current bot settings are left alone, unless a zone sets `bot_management`. |
