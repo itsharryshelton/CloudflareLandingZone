@@ -451,12 +451,16 @@ jobs:
           # Drift detection only. resource_drift is what refresh found changed at
           # Cloudflare since the last apply; resource_changes is what an apply
           # would do now, which also covers merged-but-unapplied code. Reads are
-          # left out: a deferred data source read is not drift.
+          # left out: a deferred data source read is not drift. So is each
+          # layer's terraform_data.preflight: it holds no Cloudflare state, only
+          # the plan-time guards, and shows as a create on every pair that has
+          # never been applied, so it would hold the issue open for nothing.
           if [[ -n "${DRIFT_ARTIFACT:-}" ]]; then
             mkdir -p "$GITHUB_WORKSPACE/drift-result"
             jq -c --arg account "$ACCOUNT" --arg layer "$LAYER" '
               def changed($list):
                 [$list[]? | select(.mode == "managed")
+                  | select((.type == "terraform_data" and .name == "preflight") | not)
                   | select(.change.actions != ["no-op"] and .change.actions != ["read"])
                   | {a: (.change.actions | join("+")), r: .address}]
                 | sort_by(.r);
