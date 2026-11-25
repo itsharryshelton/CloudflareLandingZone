@@ -455,6 +455,11 @@ jobs:
           # layer's terraform_data.preflight: it holds no Cloudflare state, only
           # the plan-time guards, and shows as a create on every pair that has
           # never been applied, so it would hold the issue open for nothing.
+          # An outside change only counts when the plan acts on the same
+          # address. Refresh also records computed fields Cloudflare moves on
+          # its own (a list's num_items, a reusable Access policy's app_count),
+          # which the code never sets and an apply would not touch; Terraform
+          # hides those from the plan output too.
           if [[ -n "${DRIFT_ARTIFACT:-}" ]]; then
             mkdir -p "$GITHUB_WORKSPACE/drift-result"
             jq -c --arg account "$ACCOUNT" --arg layer "$LAYER" '
@@ -464,8 +469,11 @@ jobs:
                   | select(.change.actions != ["no-op"] and .change.actions != ["read"])
                   | {a: (.change.actions | join("+")), r: .address}]
                 | sort_by(.r);
-              {account: $account, layer: $layer,
-               outside: changed(.resource_drift), planned: changed(.resource_changes)}
+              changed(.resource_changes) as $planned
+              | ($planned | map(.r)) as $acted
+              | {account: $account, layer: $layer,
+                 outside: [changed(.resource_drift)[] | select(.r as $r | $acted | any(. == $r))],
+                 planned: $planned}
             ' tfplan.json >"$GITHUB_WORKSPACE/drift-result/${ACCOUNT}--${LAYER}.json"
           fi
           rm -f tfplan.json
