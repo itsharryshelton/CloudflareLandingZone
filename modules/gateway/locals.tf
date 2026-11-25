@@ -137,6 +137,10 @@ locals {
     for type, templates in local.traffic_field_templates : type => merge(templates, local.list_field_templates[type])
   }
 
+  # Gateway stores a single address without its /32 and returns it that way,
+  # so sending the /32 leaves a diff on every plan. The policies validation
+  # still demands the explicit /32 (IPv4 only); only the rendered expression
+  # drops it.
   selector_sets = {
     for key, policy in local.policies : key => tomap({
       domains             = join(" ", [for value in policy.match.domains : "\"${lower(trimspace(value))}\""])
@@ -146,8 +150,8 @@ locals {
       applications        = join(" ", [for value in policy.match.application_ids : tostring(value)])
       content_categories  = join(" ", [for value in policy.match.content_category_ids : tostring(value)])
       security_categories = join(" ", [for value in policy.match.security_category_ids : tostring(value)])
-      destination_ips     = join(" ", [for value in policy.match.destination_ip_cidrs : trimspace(value)])
-      source_ips          = join(" ", [for value in policy.match.source_ip_cidrs : trimspace(value)])
+      destination_ips     = join(" ", [for value in policy.match.destination_ip_cidrs : trimsuffix(trimspace(value), "/32")])
+      source_ips          = join(" ", [for value in policy.match.source_ip_cidrs : trimsuffix(trimspace(value), "/32")])
       destination_ports   = join(" ", [for value in policy.match.destination_ports : tostring(value)])
       protocols           = join(" ", [for value in policy.match.protocols : "\"${lower(trimspace(value))}\""])
       http_methods        = join(" ", [for value in policy.match.http_methods : "\"${upper(trimspace(value))}\""])
